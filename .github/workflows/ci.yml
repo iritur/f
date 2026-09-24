@@ -654,6 +654,18 @@ jobs:
       # and no second machine, because the client is the frame and the graph is
       # a data structure. RFC 0013, RFC 0065.
       - run: cargo xtask compositor
+      # `claims/0038`'s six rows, against the table rather than against the boot's
+      # own refusals — `claims/0037`'s split one job up, for the same reason. The
+      # boot requires the frame's crossing count and the component's to be equal
+      # before it prints a row; the claim requires the number they agreed on to be
+      # the number the registry publishes. A boot grading its own homework is the
+      # arrangement RFC 0064 decided against.
+      #
+      # It runs one half rather than all five, and the route says why: the serving
+      # half is the workload the claim publishes — a client that submits one delta
+      # at a time — and the other four would build four more kernels to print
+      # nothing this table reads. E3-B01j.
+      - run: cargo xtask claim ring-crossings-per-ui-frame
       # E3-B06c. Section 11's inversion, as two boots. `declare` stands
       # `user/panel` up at ring 3 holding the *client's* end of a ring — the only
       # component in this tree that submits rather than answers — has it declare

@@ -317,10 +317,21 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
-        if let Some(answer) = held.offer(&entry, &payload, now)
-            && parts.data.post(answer).is_err()
-        {
-            break stopped::NO_RING;
+        if let Some(answer) = held.offer(&entry, &payload, now) {
+            if parts.data.post(answer).is_err() {
+                break stopped::NO_RING;
+            }
+            // **The return leg of `E3-B01j`'s count, taken where the ring took
+            // the completion and not where it was produced.** A completion the
+            // ring refused never crossed the boundary, so counting it at the
+            // answer would count this component's intentions; and the frame
+            // requires this number to equal the completions its own client
+            // reaped, which is what makes the two counts independent rather than
+            // one derived from the other. The `if let` above was one condition
+            // with an `&&` until this line existed and had to come apart, because
+            // a short-circuit cannot tell *no completion was owed* from *the post
+            // failed*.
+            held.answered();
         }
     };
 
@@ -470,6 +481,34 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::DEGRADED, story.degraded);
         let _ = board.write64(reported::RUNG, story.rung);
         let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
+        // The boundary crossings, `E3-B01j`. Three words where one would do, for
+        // `reported::WAKE`'s reason: the exit's sentence is an addition and a
+        // division, and a reader handed only the answer cannot check either. Both
+        // directions are already above — `DRAINED` and `ANSWERED` — and the sum is
+        // the component's own rather than the frame's, because the frame keeping
+        // the only sum is the *one side counts and the other trusts it*
+        // arrangement this line exists to prevent.
+        let _ = board.write64(reported::ANSWERED, counters.answered);
+        let _ = board.write64(reported::CROSSINGS, counters.crossings());
+        let _ = board
+            .write64(reported::CROSSINGS_PER_FRAME_X1000, counters.crossings_per_frame_x1000());
+        // The synchronisation state, `E3-B05f`. **Carried out rather than
+        // consulted and dropped**, which is this file's rule for every record it
+        // holds: a compositor that traced a frame's waits and threw the trace away
+        // would have made the one failure of this mechanism that leaves no
+        // evidence — `abi/src/sync.rs`'s third outcome, *a hang writes no log
+        // line* — leave no evidence again. Seven words where three have a node,
+        // and `crate::routing::reported` draws the division: three say what a
+        // reader of a running machine wants, and four are about whether the record
+        // those three come out of can be believed.
+        let waits = held.waits().published();
+        let _ = board.write64(reported::WAITS, waits.outstanding);
+        let _ = board.write64(reported::SIGNALLED, waits.signalled);
+        let _ = board.write64(reported::TIMEOUTS, waits.timeouts);
+        let _ = board.write64(reported::TRACED, waits.traced);
+        let _ = board.write64(reported::TRACE_DROPPED, waits.dropped);
+        let _ = board.write64(reported::TRACE_COMPLETE, waits.complete);
+        let _ = board.write64(reported::CHAIN_REFUSALS, waits.refusals);
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
         // tree is the machine's answer to *what is it running*, and RFC 0013
@@ -506,14 +545,23 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
     let counters = held.counters();
     let story = held.story();
     let mut written = 0;
+    let waits = held.waits().published();
     // In `node::WRITTEN`'s order, and the frame reads it back in that order.
-    // Twelve words and not four: the five `E3-B01k` adds are the frame's story —
+    // Fifteen words and not four: the five `E3-B01k` adds are the frame's story —
     // the rung it is drawing with, the frame it last closed, the deadline that
     // frame carried, what a frame costs on this machine, and what was given up
-    // to fit — and the three `E3-B06d` adds are the resolved theme. Every one of
-    // them is a value this component already holds, which is RFC 0013's rule: a
-    // node with no counter behind it would be a serialisation with extra steps
-    // wearing RFC 0013's name.
+    // to fit — the three `E3-B06d` adds are the resolved theme, and the three
+    // `E3-B05f` adds are the synchronisation of the frame that closed last. Every
+    // one of them is a value this component already holds, which is RFC 0013's
+    // rule: a node with no counter behind it would be a serialisation with extra
+    // steps wearing RFC 0013's name.
+    //
+    // **Fifteen is this manifest full.** `f_abi::manifest::STATE_NODES_MAX` is
+    // sixteen and the subtree is one of them, so the next node this component
+    // wants is an RFC widening that bound and not a row in `manifest.toml`.
+    // `node::WRITTEN` says the same thing where the ids are, and it is said twice
+    // on purpose: the author who reaches for a sixteenth word will be in one of
+    // the two files and not necessarily this one.
     let readability = held.readability();
     for (id, value) in [
         (node::FRAMES, counters.frames),
@@ -532,6 +580,15 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
         (node::RESOLVES, readability.resolves()),
         (node::NOTES, readability.report().len() as u64),
         (node::RULES, readability.rules_owed()),
+        // The synchronisation state, `E3-B05f`. Three of the seven this component
+        // reports, and the three a reader of a *running machine* wants: is
+        // anything still waiting, what value did this compositor reach, and how
+        // many frames has it abandoned. The other four are the trace's own
+        // integrity and are on the board, where the frame checks this component
+        // rather than reading the machine.
+        (node::WAITS, waits.outstanding),
+        (node::SIGNALLED, waits.signalled),
+        (node::TIMEOUTS, waits.timeouts),
     ] {
         if tree.set(id, value) {
             written += 1;

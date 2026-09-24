@@ -85,6 +85,7 @@ use f_scene::arena::{Arena, Refusal as GraphRefusal};
 use f_scene::commit::{Batch, DELTAS_MAX, Offered, Refusal, Refused};
 
 use crate::pacing::{Decision, Pacing, Tick, degraded, degraded_word};
+use crate::waits::Waits;
 
 /// How many deltas one frame may carry before this component refuses it.
 ///
@@ -140,6 +141,24 @@ pub struct Counters {
     /// two out of two.
     /// Unit: frames — UI frames.
     pub late: u64,
+    /// Completions this component put on the data ring and the ring accepted.
+    ///
+    /// **`E3-B01j`'s other direction**, and the reason a crossing count is not
+    /// `drained` alone: a delta going out and its completion coming back are two
+    /// entries over the boundary, each a slot written on one side and read on the
+    /// other. A client that submitted without reaping would be a client whose ring
+    /// fills, so the return leg is not free and is not optional.
+    ///
+    /// Incremented by `crate::component` beside the `post` and never inside
+    /// [`Held::offer`], which is the difference between a crossing and an
+    /// intention: `offer` *answers* a completion, and a completion the ring
+    /// refused never crossed anything. `crate::routing::reported::ANSWERED` is the
+    /// word, and the frame requires it to equal the completions its own client
+    /// reaped — two counts on opposite sides of one boundary, neither derived from
+    /// the other, which is the only arrangement in which their agreeing says
+    /// something.
+    /// Unit: entries.
+    pub answered: u64,
 }
 
 impl Counters {
@@ -147,7 +166,7 @@ impl Counters {
     ///
     /// A `const` rather than `Default::default()` so that [`Held::new`] adds
     /// nothing to the two it is handed: what a compositor starts as is an empty
-    /// graph, an empty frame and nine zeroes, and the zeroes are the only part
+    /// graph, an empty frame and ten zeroes, and the zeroes are the only part
     /// this file gets to decide.
     pub const ZERO: Self = Self {
         drained: 0,
@@ -159,7 +178,40 @@ impl Counters {
         refused: 0,
         token: 0,
         late: 0,
+        answered: 0,
     };
+
+    /// Entries that crossed this boundary in either direction.
+    ///
+    /// **Summed here and not by the frame**, which is the whole of `E3-B01j`: its
+    /// exit says *the frame and the component each count the crossings*, and a
+    /// figure the frame added up out of this component's two counts would be one
+    /// side counting and the other trusting it. Both terms are published beside
+    /// this so that a reader can check the addition, and the frame does check it.
+    /// Unit: entries.
+    #[must_use]
+    pub const fn crossings(&self) -> u64 {
+        self.drained + self.answered
+    }
+
+    /// [`Counters::crossings`] per UI frame, times a thousand.
+    ///
+    /// Times a thousand because RFC 0004 forbids a binary fraction and this is a
+    /// ratio. Zero where no frame closed: a component that closed no frame has no
+    /// per-frame anything, and [`Counters::frames`] beside it is what tells that
+    /// apart from a component whose client sent nothing.
+    ///
+    /// `u64` throughout and no intermediate that can overflow in practice: the
+    /// numerator is a count of ring entries times a thousand, and a run that
+    /// reached 2^54 entries would have overflowed the ring's own accounting first.
+    /// Unit: entries per UI frame, times one thousand.
+    #[must_use]
+    pub const fn crossings_per_frame_x1000(&self) -> u64 {
+        if self.frames == 0 {
+            return 0;
+        }
+        self.crossings() * 1000 / self.frames
+    }
 }
 
 /// What the frame told this component before its first instruction.
@@ -475,6 +527,14 @@ pub struct Held<'a> {
     readability: Readability,
     /// What it publishes about the last frame it closed.
     story: Story,
+    /// Section 08's chain, and the trace of the frame that closed last.
+    ///
+    /// Owned, for [`Held::pacing`]'s reason and with the same arithmetic behind
+    /// it: `f_abi::trace::Trace::EMPTY` is all zeroes — `f_abi::trace::Stage` is
+    /// numbered from one so that it is, which is RFC 0100's finding applied in the
+    /// crate that would otherwise have cost this image the copy — so a field here
+    /// is a `memset` over a stack frame and nothing in the component's `.rodata`.
+    waits: Waits,
     /// When the first delta of the frame under construction was staged.
     ///
     /// `None` between frames, which is what makes a frame's cost the span of
@@ -527,8 +587,34 @@ impl<'a> Held<'a> {
             // when it starts and never promotes, and the cheapest way to keep
             // that promise is for the only assignment to be in the constructor.
             story: Story { rung: rung_word(plan.backend_bits), ..Story::default() },
+            // Two timelines that have promised nothing, which admits no wait at
+            // all. `crate::waits::Waits::ZERO` says why that is the right start.
+            waits: Waits::ZERO,
             opened: None,
         }
+    }
+
+    /// Section 08's chain and the trace of the frame that closed last.
+    ///
+    /// Shared and never exclusive, for [`Held::graph`]'s reason and with more at
+    /// stake: a `&mut Waits` handed out here would be a second place a wait could
+    /// be entered, and *every wait in this component went through a door that
+    /// takes the trace* is the one sentence `crate::waits` exists to be able to
+    /// say.
+    #[must_use]
+    pub const fn waits(&self) -> &Waits {
+        &self.waits
+    }
+
+    /// One completion reached the client's ring.
+    ///
+    /// Called by `crate::component` where the `post` succeeded, and nowhere else.
+    /// It is not folded into [`Held::offer`] because `offer` answers a completion
+    /// and does not send one: a completion the ring refused never crossed the
+    /// boundary, and a count taken at the answer would be counting this
+    /// component's intentions. `Counters::answered` carries the argument in full.
+    pub const fn answered(&mut self) {
+        self.counters.answered += 1;
     }
 
     /// What it publishes about the last frame it closed.
@@ -701,9 +787,27 @@ impl<'a> Held<'a> {
         // compositor that is already late.
         let remaining_nanos = deadline_nanos.saturating_sub(now.nanos());
         self.story.degraded = degraded_word(self.story.decision.estimate_nanos, remaining_nanos);
-        if self.story.degraded != degraded::FITTED {
+        let fitted = self.story.degraded == degraded::FITTED;
+        if !fitted {
             self.counters.late += 1;
         }
+        // --- and the frame's synchronisation, `E3-B05f` ----------------------
+        //
+        // **Last, and after the degradation word rather than before it**, because
+        // `fitted` is what decides whether this frame's promised value is ever
+        // reached and `crate::waits` is deliberately not allowed to re-derive it.
+        // Two copies of that comparison would be two opinions about one frame, and
+        // `crate::routing::reported::LATE` is where the frame checks the other
+        // one — so the two readings a boot compares are genuinely two readings.
+        //
+        // The ordinal is `counters.frames`, which `offer` has already moved for
+        // this frame, so it is *which frame this is* and not *how many came
+        // before*. Passing the count before the increment would start both
+        // timelines at zero, and `f_abi::sync::Timeline::landed` refuses
+        // `UNSIGNALLED` — so the mistake is a refusal counted in
+        // `crate::routing::reported::CHAIN_REFUSALS` rather than a wrong number,
+        // which is the arrangement that type was given for exactly this.
+        self.waits.frame(self.counters.frames, fitted);
     }
 }
 
@@ -1226,6 +1330,118 @@ mod tests {
         let (mut bad, payload) = wire(Entry::RemoveNode(RemoveNode { node: NO_NODE }), 0);
         bad.flags = flags::NO_CQE;
         assert!(held.offer(&bad, &payload, clock.next()).is_some());
+    }
+
+    // --- the boundary crossings, `E3-B01j` ----------------------------------
+
+    /// A crossing count is the two directions added, and the two are **not** the
+    /// same number.
+    ///
+    /// # Why this test exists rather than a clause in the boot
+    ///
+    /// Because the boot cannot reach the case. Every entry in
+    /// `kernel/src/compositor.rs`'s script carries `flags = 0`, so its component
+    /// answers one completion per entry and `drained` and `answered` are equal
+    /// for the whole run — which means the boot's clause *the total is the sum of
+    /// its own two terms* is a guard nothing in that boot can move. A guard a
+    /// mutation cannot reach is a guard that is not there, which is what
+    /// `E3-B05b` recorded about its seventh mutation and the reason this is here.
+    ///
+    /// `NO_CQE` is what separates them, and it separates them for a reason rather
+    /// than by construction: an entry that asked not to be told it worked crossed
+    /// the boundary going out and nothing came back, so a crossing count that
+    /// derived the return leg from the outbound one would report a completion
+    /// that never existed.
+    ///
+    /// Adding such an entry to the boot's script instead was the alternative and
+    /// was refused: it would move `claims/0038`'s published number as a side
+    /// effect of testing an invariant, and a claim whose figure changed because a
+    /// test needed a case is a claim nobody can read.
+    #[test]
+    fn a_crossing_count_is_the_two_directions_and_they_are_not_equal() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        let mut clock = Ticking::new();
+
+        // One entry that wants its completion, and one that does not.
+        for (node, flags) in [(1u32, 0u8), (2, flags::NO_CQE)] {
+            let (mut entry, payload) = wire(
+                Entry::CreateNode(CreateNode {
+                    node,
+                    parent: NO_NODE,
+                    before: NO_NODE,
+                    kind: kind::LAYER,
+                }),
+                0,
+            );
+            entry.flags = flags;
+            if held.offer(&entry, &payload, clock.next()).is_some() {
+                held.answered();
+            }
+        }
+
+        let counters = *held.counters();
+        assert_eq!(counters.drained, 2, "both entries crossed going out");
+        assert_eq!(counters.answered, 1, "and only one completion came back");
+        assert_eq!(counters.crossings(), 3, "which is the sum and not twice either term");
+        // And the rate is zero rather than a division by nothing: no commit
+        // arrived, so no frame closed, and `frames` beside it is what tells that
+        // apart from a run whose frames cost nothing.
+        assert_eq!(counters.frames, 0);
+        assert_eq!(counters.crossings_per_frame_x1000(), 0);
+    }
+
+    /// The rate is the total over the frames, times a thousand, and the thousand
+    /// is not decoration.
+    ///
+    /// One frame of three entries — two creations and the commit that closes them
+    /// — costs three out and three back, so the honest answer is six per frame and
+    /// the published word is six thousand. A build that dropped the scale would
+    /// publish a six, which reads as a plausible crossing count and is a rate an
+    /// order of magnitude out. RFC 0004 is why the scale is in the name and this
+    /// is why it is in a test.
+    #[test]
+    fn the_rate_carries_its_scale_and_is_the_total_over_the_frames() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        let mut clock = Ticking::new();
+        // The deadline goes on the commit and on nothing else, which is the wire's
+        // rule and not this test's convenience: `abi/src/scene.rs` refuses a
+        // deadline on a delta that is not a commit, so a loop that put one on
+        // every entry would be measuring three refusals. The first draft did, and
+        // the frame count was zero.
+        for (body, deadline) in [
+            (
+                Entry::CreateNode(CreateNode {
+                    node: 1,
+                    parent: NO_NODE,
+                    before: NO_NODE,
+                    kind: kind::LAYER,
+                }),
+                0,
+            ),
+            (
+                Entry::CreateNode(CreateNode {
+                    node: 2,
+                    parent: 1,
+                    before: NO_NODE,
+                    kind: kind::DRAW,
+                }),
+                0,
+            ),
+            (Entry::Commit(Commit { frame_token: 7 }), 50_000_000),
+        ] {
+            let (entry, payload) = wire(body, deadline);
+            if held.offer(&entry, &payload, clock.next()).is_some() {
+                held.answered();
+            }
+        }
+        let counters = *held.counters();
+        assert_eq!(counters.frames, 1);
+        assert_eq!(counters.crossings(), 6, "three entries out and three completions back");
+        assert_eq!(counters.crossings_per_frame_x1000(), 6000);
     }
 
     // --- the resolved theme, `E3-B06d` --------------------------------------

@@ -19,13 +19,19 @@
 # retained graph, serving one client on one ring whose deltas travel inline;
 # restarted on a fault and not on an exit, at the price of every client's
 # retained scene; in the soft class, because nothing here yet has a deadline it
-# can miss; and publishing twelve numbers about itself that a reader can check
+# can miss; and publishing fifteen numbers about itself that a reader can check
 # against what a client asked for — four about what it applied, five that are one
 # frame's story (the rung it would draw with, the frame it last closed, the
 # deadline that frame carried, what a frame costs here, and what was given up to
-# fit), and three about the theme it resolved: that it resolved one, how many
+# fit), three about the theme it resolved: that it resolved one, how many
 # decisions the resolver made on its author's behalf, and how many rules it owes
-# between grounds that do not part on their own.
+# between grounds that do not part on their own — and three about the
+# synchronisation of the frame it last closed: whether anything is still waiting,
+# what value it reached, and how many frames it has abandoned.
+#
+# Fifteen words and a subtree is sixteen nodes, which is `abi::manifest::
+# STATE_NODES_MAX` exactly. This manifest is full, and the paragraph at the foot of
+# the file says what the next node costs.
 
 schema = 4
 name   = "compositor"
@@ -545,3 +551,111 @@ parent = "compositor"
 name   = "rules"
 kind   = "gauge"
 unit   = "none"
+
+# --- The synchronisation state, E3-B05f ---------------------------------------
+#
+# Three nodes that are one declaration, and the reader they are for is a
+# supervisor rather than a person. `E3-B05e` — *a timeout is a named fate, the
+# supervisor decides it* — is a different line and RFC 0008 puts the deciding
+# above the frame; what a policy up there needs before it can decide anything is
+# the reading, and the reading is these three at once. *One wait outstanding* with
+# no last-reached value beside it does not say which frame is stuck; a
+# last-reached value with no outstanding count does not say whether anything is
+# waiting on the next one; and neither of them says whether this has happened
+# before, which is the difference between a pipeline in flight and a component
+# that abandons a frame every time.
+#
+# All three come out of `f_compositor::waits`, which holds the one
+# `f_abi::sync::Chain` in this component and enters every wait through a door that
+# takes the frame trace. `abi/src/trace.rs` named the direction it could not hold
+# — *nothing in a type makes a compositor hand every submission to a recorder* —
+# and that module is where it is held, in one file rather than by a reviewer.
+#
+# **These three fill this manifest.** `abi::manifest::STATE_NODES_MAX` is sixteen
+# and with them this file declares sixteen: the subtree and fifteen words. The
+# next node this component wants is an RFC widening that bound, with the state
+# record's fixed width as the cost, and not a row added here —
+# `cargo xtask lint-manifests` is what makes the attempt a red build rather than a
+# discovery. It is why `E3-B01j`'s boundary-crossing figure is on the board and in
+# `claims/0038` and not in this tree: that number is evidence about one run and the
+# board is where a run is reported, so the bound cost nothing this time. It will
+# not always.
+#
+# Ids 14 to 16, ascending, and 1 to 13 keep what they had.
+
+# Waits the last frame entered and did not get out of.
+#
+# `f_abi::trace::Trace::unreleased` over the trace of the last frame that closed,
+# which is a gauge and the state of **one frame** rather than a total: a reader of
+# a live machine is asking *is it happening now*, and `timeouts` below is what
+# answers *has it happened before*. The two are published together for that
+# reason and neither is derivable from the other.
+#
+# `none`, because a wait is not one of the quantities `f_abi::state::unit` names.
+# `entries` would say it is a ring record, which it is not — a wait is a value on
+# a timeline that has not been reached — and a unit that was nearly right would be
+# worse than the one that says plainly it is not a quantity of anything counted
+# elsewhere in this tree.
+[[state]]
+id     = 14
+parent = "compositor"
+name   = "waits"
+kind   = "gauge"
+unit   = "none"
+
+# The highest value that has landed on this compositor's own timeline.
+#
+# `f_abi::sync::Timeline::signalled`, and the field's own rule is what makes this
+# worth a node rather than a derivation from `frames`: it moves at the **landing**
+# and never at the submission, because submitting work is not the work having
+# happened. A component that had submitted three signals and reached one publishes
+# three frames and a one here, and a build that moved the timeline at submission
+# would publish three with nothing else in this tree disagreeing.
+#
+# The compositor's own and not the application's. It is the only timeline this
+# component produces — `f_abi::sync`'s first premise is that a timeline has
+# exactly one producer — and the application's half is advanced from the arrival
+# of its commit, so republishing it would be republishing `frames` under a second
+# name. `f_compositor::waits` argues that asymmetry and names what reverses it: a
+# client that publishes its own timeline record, adopted through
+# `Timeline::adopt`.
+#
+# A gauge and `none`: a timeline value is an ordinal, not a tally, and the day one
+# is adopted out of this tree rather than started from zero the node has to read
+# back as the same kind of thing it was written as.
+[[state]]
+id     = 15
+parent = "compositor"
+name   = "signalled"
+kind   = "gauge"
+unit   = "none"
+
+# Frames that closed with a wait outstanding and no room left to satisfy it.
+#
+# **There is no timer in this component and this node is not one.** RFC 0004 gives
+# a component no clock, and `E3-B01k` is the precedent for what a node that could
+# only move if one existed would be: a published zero wearing a measurement's
+# name. So a timeout here is defined out of two numbers this component already
+# publishes and is already checked on — the deadline the client put on the wire
+# and the p99 estimate in `pacing` — and it counts the frame whose promised value
+# is therefore never reached.
+#
+# `f_compositor::waits` carries the argument for the half that is arguable: the
+# compositor's value means *this frame is composited*, nothing in this build draws,
+# so there is no instant at which it is genuinely reached and the component
+# decides. It decides as the pipeline would — a frame that could not fit before its
+# deadline has missed the scanout it was paced against — and the present engine's
+# wait on that value stays open, which is exactly the hang `abi/src/trace.rs` says
+# it can record and not prevent. The reversal is named there: a renderer, at which
+# point the landing comes from the rasteriser and two lines are deleted.
+#
+# A counter, because a frame that was abandoned stays abandoned however the next
+# one goes, and `events` rather than `frames`: `f_abi::state::unit::FRAMES` means
+# pages of memory in this system, which is the same trap the `frames` node above
+# avoids and for the same reason.
+[[state]]
+id     = 16
+parent = "compositor"
+name   = "timeouts"
+kind   = "counter"
+unit   = "events"

@@ -425,16 +425,68 @@ pub mod node {
     /// Unit: none — ordered pairs of grounds.
     pub const RULES: u32 = 13;
 
+    // --- the synchronisation state, `E3-B05f` -------------------------------
+    //
+    // Three ids, and what makes them one group is that a supervisor deciding
+    // what to do about a stuck frame needs all three. *One wait outstanding*
+    // with no last-reached value beside it does not say which frame is stuck;
+    // a last-reached value with no outstanding count does not say whether
+    // anything is waiting on the next one; and neither says whether this has
+    // happened before, which is the difference between a pipeline in flight and
+    // a component that abandons a frame every time. `crate::waits` is where all
+    // three are produced and where the third is argued at length.
+    //
+    // **These three fill this component's manifest.** `f_abi::manifest::
+    // STATE_NODES_MAX` is sixteen and this manifest now declares sixteen: the
+    // subtree and fifteen words. That is not a problem and it is worth saying
+    // where the next author will look — the next node this component wants is an
+    // RFC widening that bound, with the record's fixed width as the cost, and
+    // not a row quietly added to `manifest.toml`. `cargo xtask lint-manifests` is
+    // what turns the attempt into a red build rather than a discovery.
+
+    /// Waits the last frame entered and did not get out of.
+    ///
+    /// `f_abi::trace::Trace::unreleased` over the trace of the last frame that
+    /// closed. A gauge and the state of **one frame**: a running total would
+    /// answer *has this ever happened* where a reader of a live machine is asking
+    /// *is it happening now*, and [`TIMEOUTS`] is the total.
+    /// Unit: waits.
+    pub const WAITS: u32 = 14;
+    /// The highest value that has landed on the compositor's own timeline.
+    ///
+    /// `f_abi::sync::Timeline::signalled`, which moves at the landing and never
+    /// at the submission. That is what makes it worth a node rather than being
+    /// derived from [`FRAMES`]: a component that had submitted three signals and
+    /// reached one publishes three frames and a one here, and a build that moved
+    /// the timeline at submission would publish three and be caught by nothing
+    /// else.
+    ///
+    /// The compositor's own and not the application's, because it is the only
+    /// timeline this component produces. `crate::waits` argues that asymmetry.
+    /// Unit: none — a timeline value, which is an ordinal.
+    pub const SIGNALLED: u32 = 15;
+    /// Frames that closed with a wait outstanding and no room left to satisfy it.
+    ///
+    /// **Not a timer**, and `crate::waits` spends a section on why: nothing in
+    /// this component observes time, so a timeout is defined out of the deadline
+    /// the client put on the wire and the estimate this component already
+    /// publishes, and the frame that does not fit is the frame whose promised
+    /// value is never reached. A node that could only move if a timer existed
+    /// would be a published zero, which is the failure `E3-B01k` was written
+    /// against.
+    /// Unit: frames — UI frames.
+    pub const TIMEOUTS: u32 = 16;
+
     /// Every node this component writes a word into, in ascending id order.
     ///
     /// The component publishes exactly these and the frame requires exactly
     /// this many to carry a word, so a node added to the manifest and forgotten
-    /// here is a boot that says eleven where the schema says twelve rather than
-    /// a silence.
+    /// here is a boot that says fourteen where the schema says fifteen rather
+    /// than a silence.
     /// Unit: none — node ids.
-    pub const WRITTEN: [u32; 12] = [
+    pub const WRITTEN: [u32; 15] = [
         FRAMES, EDITS, NODES, REFUSED, RUNG, FRAME, DEADLINE, PACING, DEGRADED, RESOLVES, NOTES,
-        RULES,
+        RULES, WAITS, SIGNALLED, TIMEOUTS,
     ];
 }
 
@@ -654,6 +706,138 @@ pub mod reported {
     /// rule it did not.
     /// Unit: ordered pairs of grounds.
     pub const RULES: u32 = super::REPORT + 216;
+
+    // --- the synchronisation state, `E3-B05f` -------------------------------
+    //
+    // The same three words `super::node` carries, on the board where the frame
+    // compares them. A component whose tree and board disagreed about one of them
+    // would be a component with two sets of counters, which is the comparison
+    // `E3-B01k` established and the reason every word in the tree has one here.
+
+    /// Waits the last frame entered and did not get out of.
+    /// Unit: waits.
+    pub const WAITS: u32 = super::REPORT + 224;
+    /// The highest value that has landed on the compositor's own timeline.
+    /// Unit: none — a timeline value, which is an ordinal.
+    pub const SIGNALLED: u32 = super::REPORT + 232;
+    /// Frames that closed with a wait outstanding and no room left to satisfy it.
+    /// Unit: frames — UI frames.
+    pub const TIMEOUTS: u32 = super::REPORT + 240;
+
+    // --- the boundary crossings, `E3-B01j` ----------------------------------
+    //
+    // **None of these three has a node, and the reason is a bound rather than a
+    // judgement.** `f_abi::manifest::STATE_NODES_MAX` is sixteen and
+    // `E3-B05f`'s three words took this component's manifest to exactly that.
+    // The honest consequence is that this group lives on the board alone, and
+    // the honest reading of that is: a crossing count is evidence about *this
+    // run* rather than a property of a running machine a reader would poll, so
+    // the board is where it belongs anyway. `E3-B01j`'s exit asks for the number
+    // printed at boot and carried into `claims/`, and asks nothing of the tree.
+    //
+    // *What would reverse this:* the day a reader wants the crossing rate of a
+    // machine that is still running — a supervisor deciding that a client has
+    // become chatty is the obvious one — the bound has to move first, and that
+    // is an RFC with the record's fixed width as its cost.
+
+    /// Completions this component put on the data ring.
+    ///
+    /// **Counted where the ring accepted it and not where it was produced**,
+    /// which is the difference between a crossing and an intention:
+    /// `crate::tree::Held::offer` answers a completion, and a completion the ring
+    /// refused never crossed anything. So this word is incremented in
+    /// `crate::component`, beside the `post`, and the frame requires it to equal
+    /// the completions its own client reaped.
+    /// Unit: entries.
+    pub const ANSWERED: u32 = super::REPORT + 248;
+    /// Entries that crossed this boundary in either direction, this run.
+    ///
+    /// [`DRAINED`] plus [`ANSWERED`], summed by the component rather than by the
+    /// frame. That is the point of the word: `E3-B01j`'s exit says *the frame and
+    /// the component each count the crossings*, and a figure the frame added up
+    /// out of the component's two counts would be one side counting and the other
+    /// trusting it — the failure that line exists to prevent. Both are published
+    /// so that a reader can check the sum, and the frame checks it.
+    ///
+    /// **A crossing is an entry, and not an operation and not a doorbell.**
+    /// `E3-B01g` settled that a batch of four entries is one publish and one
+    /// doorbell, and printed what a client charging per entry would have said —
+    /// which makes the *operation* the right unit for a doorbell, because what a
+    /// doorbell costs is one delivery. It is the wrong unit for a crossing: a
+    /// client that batches four deltas into one publish has still moved four
+    /// payloads into the arena and still takes four completions back, and the
+    /// number `docs/design/ring-scene-boot.html` wants under ten per frame is the
+    /// number of deltas a frame costs — which is the number `E3-B01l`'s
+    /// reconciler exists to reduce. The doorbell is counted separately by
+    /// `f_ring::doorbell` and printed beside this, so a reader can convert.
+    ///
+    /// **The data ring only.** The control ring carries the frame's notices about
+    /// this component's life, which happen once per run rather than once per
+    /// frame, and folding them in would make a per-frame figure depend on how
+    /// often the supervisor spoke. *What would reverse this:* a control ring that
+    /// carries something per frame.
+    /// Unit: entries.
+    pub const CROSSINGS: u32 = super::REPORT + 256;
+    /// [`CROSSINGS`] per UI frame, times a thousand.
+    ///
+    /// Times a thousand because RFC 0004 forbids a binary fraction and this is a
+    /// ratio: sixteen crossings over two frames is eight thousand here, and a
+    /// reader who wants the whole number divides. The scale is in the name, which
+    /// is the convention `f_interface::token`'s `contrast_x1000` established and
+    /// `claims/0034` publishes a rate under.
+    ///
+    /// Zero where no frame closed, which is a statement and not a division by
+    /// zero: a component that closed no frame has no per-frame anything, and
+    /// [`FRAMES`] beside it is what tells the two apart.
+    /// Unit: entries per UI frame, times one thousand.
+    pub const CROSSINGS_PER_FRAME_X1000: u32 = super::REPORT + 264;
+
+    // --- the frame trace's own integrity, `E3-B05f` -------------------------
+    //
+    // Four words beside the three that have a node, on the division this module
+    // draws everywhere: the three in the tree say what a reader of a running
+    // machine wants, and these four are evidence about whether the record those
+    // three come out of can be believed at all. They are `DROPPED` and `CLEAN`'s
+    // shape one layer over, and for the same reason.
+
+    /// Waits every frame's trace has named, summed over the run.
+    ///
+    /// Two per frame in this build — the compositor's on the application's
+    /// timeline and the present engine's on the compositor's — so the frame can
+    /// require exactly twice the frame count. It is what makes `E3-B05b`'s *names
+    /// every wait* checkable from outside: a component whose present stage waited
+    /// and recorded nothing would publish a plausible [`WAITS`](super::node::WAITS)
+    /// and half of this.
+    /// Unit: waits.
+    pub const TRACED: u32 = super::REPORT + 272;
+    /// Waits the traces could not hold, summed over the run.
+    ///
+    /// `f_abi::trace::Trace::dropped_waits`. Non-zero means the bound's
+    /// derivation — three stages, each submitting once — has stopped being true,
+    /// and RFC 0101 is why it is a published count rather than an assertion: that
+    /// kind of decay is silent and surfaces three subsystems away from the
+    /// addition that caused it.
+    /// Unit: waits.
+    pub const TRACE_DROPPED: u32 = super::REPORT + 280;
+    /// One while every trace so far has named every wait its frame entered.
+    ///
+    /// Held across the run rather than read off the last frame, because a build
+    /// that dropped a wait in the first frame and none afterwards would publish a
+    /// clean last trace. Published beside [`TRACE_DROPPED`] for [`CLEAN`]'s
+    /// reason: a flag and a count that cannot disagree without one of them having
+    /// been published unread.
+    /// Unit: none — a flag.
+    pub const TRACE_COMPLETE: u32 = super::REPORT + 288;
+    /// Refusals this component's own chain produced.
+    ///
+    /// Zero on a build whose arithmetic is right: every value offered to the
+    /// chain is this component's own frame ordinal. A non-zero word is the
+    /// component contradicting itself, and the frame requires zero — which is why
+    /// `crate::waits` counts the refusal instead of ending the run over it. A
+    /// compositor that stopped serving because its own bookkeeping disagreed
+    /// would have turned an accounting defect into a black screen.
+    /// Unit: refusals.
+    pub const CHAIN_REFUSALS: u32 = super::REPORT + 296;
 }
 
 /// Why the component's loop ended.

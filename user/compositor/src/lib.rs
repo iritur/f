@@ -130,6 +130,16 @@ pub mod tree;
 // and why the clock arrives as a number rather than being read.
 pub mod pacing;
 
+// Section 08's chain and one frame's trace, compiled everywhere for `pacing`'s
+// reason and with one of its own: `E3-B05b` put the record in `abi/` and recorded
+// that nothing in a type makes a *compositor* hand every submission to a
+// recorder. This module is the only holder of an `f_abi::sync::Chain` in this
+// component, so *every wait went through a door that takes the trace* is a
+// property of one file a reader can finish. It is also the module `E3-B05e` will
+// read: a supervisor deciding a fate for a stuck frame needs the three words this
+// publishes, and nothing here decides one.
+pub mod waits;
+
 // The component half is x86-64's, and only because the door is. Nothing in
 // `component.rs` is architecture-specific; the one instruction underneath it is,
 // and `f_abi::door::call` is compiled only where there is a frame to call. The

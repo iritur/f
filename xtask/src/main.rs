@@ -24111,6 +24111,24 @@ enum Route {
     /// one matches. That comparison is why those themes are published at all.
     /// E3-D03, E3-B06m, RFC 0079, RFC 0110.
     Theme,
+    /// `claims/0038`'s crossing count — `cargo xtask compositor serve` — against
+    /// the claim's own table.
+    ///
+    /// One boot rather than five, and that is the route's only decision. The
+    /// serving half is the half whose workload the claim publishes: a client that
+    /// submits one delta at a time, which `kernel/src/compositor.rs`'s `drive`
+    /// does deliberately and says why. The other four halves print no row — the
+    /// wake half closes a third frame and batches it, and one row name carrying
+    /// two values reaches [`measured_rows`] as a row printed twice, which it
+    /// refuses rather than averages. That is `claims/0037`'s arrangement and the
+    /// reason both of these claims read one half each.
+    ///
+    /// The whole of `cargo xtask compositor` would also work and is deliberately
+    /// not what the claim publishes: four of the five halves build a kernel each
+    /// and none of them prints a row this table reads, so a reader reproducing the
+    /// number would spend four boots to learn nothing about it.
+    /// E3-B01j, E3-B01.
+    Crossings,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -24277,6 +24295,14 @@ const ROUTES: &[(&str, Route)] = &[
     // written by the tree that wrote the resolver, and a share over those is a
     // share over the answers. E3-D03, RFC 0079, RFC 0110.
     ("theme-refusals", Route::Theme),
+    // `E3-B01j`'s count, and the first row in this table whose number is a
+    // **count of crossings** rather than of copies, entries or refusals. It gates
+    // for `claims/0005`'s reason — a ring entry is an event the two sides of a
+    // boundary observe, not a time — and it deliberately does not gate on
+    // `E3-B01`'s *under ten*: that threshold belongs to the parent line, and the
+    // instrument here is a client that does not batch, so what it measures is a
+    // floor and not the design's figure. The claim file says so at length.
+    ("ring-crossings-per-ui-frame", Route::Crossings),
 ];
 
 /// The registry file one claim name resolves to.
@@ -24404,6 +24430,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Attest => claim_attest(&text, &relative(&file))?,
         Route::Canvas => claim_canvas(&text, &relative(&file))?,
         Route::Theme => claim_theme(&text, &relative(&file))?,
+        Route::Crossings => claim_crossings(&text, &relative(&file))?,
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -26461,6 +26488,51 @@ fn claim_runtime_entries(claim: &str, file: &str) -> Result<(), String> {
          here was counted over an unknown interval; and a zero `kernel_entries_provoked`\n\
          means the counter cannot move at all, which leaves the load half looking perfect\n\
          while measuring nothing.",
+    )
+}
+
+/// `claims/0038`'s crossing count, against the claim's own table.
+///
+/// # Why one boot and why the serving half
+///
+/// Because the number is *per UI frame* and the halves close different frames.
+/// The serving half commits two, one entry at a time, which is the workload the
+/// claim publishes and the one `kernel/src/compositor.rs`'s `drive` argues for at
+/// length: a client that batched there would be building `E3-B01j`'s evidence
+/// without its counter. The wake half closes a third frame as one batch, so its
+/// conversion between entries and publishes is a different pair of numbers — it
+/// is printed in that boot's log and is deliberately not a row here, because one
+/// row name carrying two values is a row [`measured_rows`] refuses rather than
+/// averages.
+///
+/// The boot still checks the agreement on **both** halves. That is where the
+/// teeth are: the frame counts what it submitted and reaped, the component counts
+/// what it drained and answered, and the verdict requires the two equal before any
+/// row is printed. So a red row here is a real change in what a frame costs, and
+/// not an accounting change — an accounting change turns the boot red first, with
+/// no rows at all.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_crossings(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask compositor serve: two UI frames of deltas across one ring, one entry              at a time, counted on both sides of the boundary",
+            "cargo",
+            &["xtask", "compositor", "serve"][..],
+        )],
+        "The two counts are taken on opposite sides of the boundary and neither derives from
+         the other, so read them together: if `ring_crossings_counted_by_the_frame` and
+         `ring_crossings_counted_by_the_component` disagree the boot has already gone red and
+         printed no rows, so seeing them here and unequal means that check was weakened. A
+         moved `ring_crossings_per_ui_frame_x1000` is the number itself changing and the two
+         direction rows say which way: more out is a client sending more deltas per frame,
+         more back is a component answering entries it used to leave alone. Read
+         `ui_frames_closed` before any of them — a rate over one frame is a rate over one
+         frame, and the script closes two.",
     )
 }
 

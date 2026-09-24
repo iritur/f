@@ -537,18 +537,22 @@ pub struct Report {
     /// is that every word is zero, which is [`Report::tree_before`], and what
     /// this number is for is saying that the fold moved.
     pub tree_blank: u64,
-    /// The twelve words this component publishes, read before it ran a line.
+    /// The fifteen words this component publishes, read before it ran a line.
     ///
-    /// Required to be zero, which is what makes the twelve read afterwards
+    /// Required to be zero, which is what makes the fifteen read afterwards
     /// evidence of anything: a component that published nothing into a tree
     /// somebody else had already filled in would be indistinguishable from one
     /// that published. Unit: as [`Report::tree`].
     pub tree_before: [u64; WORDS],
     /// The snapshot taken after it ended. Unit: none — a fold.
     pub tree_after: u64,
-    /// The twelve words this component's manifest says it publishes, read back
+    /// The fifteen words this component's manifest says it publishes, read back
     /// out of the tree by id, in `node::WRITTEN`'s order: frames, edits, nodes,
-    /// refused, rung, frame, deadline, pacing, degraded, resolves, notes, rules.
+    /// refused, rung, frame, deadline, pacing, degraded, resolves, notes, rules,
+    /// waits, signalled, timeouts.
+    ///
+    /// Fifteen is `f_abi::manifest::STATE_NODES_MAX` less the subtree, so this
+    /// array cannot grow again without an RFC widening that bound.
     pub tree: [u64; WORDS],
     /// The deadline the client put on the last commit it submitted.
     ///
@@ -664,6 +668,21 @@ pub struct Bells {
 /// Unit: nodes.
 const WORDS: usize = node::WRITTEN.len();
 
+/// How many waits one UI frame enters, on section 08's chain.
+///
+/// Two, and it is derived from the sentence rather than from the record's bound:
+/// the chain has three stages and the **application is the first**, so it waits
+/// for nothing. `f_abi::trace::STAGES_PER_FRAME` is three and is the right number
+/// for sizing the record — a stage that waits for nothing still has an entry's
+/// worth of room reserved against the day it does — and it is the wrong number
+/// here, because this is a count of waits entered and not of room.
+///
+/// It breaks on exactly what `abi/src/trace.rs` says breaks its own bound: a
+/// fourth waiting stage, or one stage submitting twice. Both are addition and
+/// neither touches this file, so the clause this constant is in is what says so.
+/// Unit: waits per UI frame.
+const WAITS_PER_FRAME: u64 = 2;
+
 /// What the component wrote into the half of its routing page that is its own.
 #[derive(Clone, Copy, Default)]
 pub struct Board {
@@ -754,6 +773,52 @@ pub struct Board {
     /// RFC 0079's one obligation on a compositor, counted. Unit: none — ordered
     /// pairs of grounds.
     pub rules: u64,
+
+    // --- the boundary crossings, `E3-B01j` ----------------------------------
+    //
+    // Three words, and the reason the frame reads all three rather than the one
+    // it needs is that the one it needs is a sum and a division. A component that
+    // published a plausible total with nothing behind it, or a rate that was not
+    // the total over the frames, would satisfy a single comparison and be caught
+    // by these. The frame's own two counts are in [`Report::submitted`] and
+    // [`Report::completed`], taken on this side of the boundary and derived from
+    // nothing here — which is the whole of what `E3-B01j` asks for.
+    /// Completions the component put on the data ring. Unit: entries.
+    pub answered: u64,
+    /// Entries that crossed the boundary in either direction, as the component
+    /// summed them. Unit: entries.
+    pub crossings: u64,
+    /// [`Board::crossings`] per UI frame, times a thousand, as the component
+    /// divided. Unit: entries per UI frame, times one thousand.
+    pub crossings_per_frame_x1000: u64,
+
+    // --- the synchronisation state, `E3-B05f` -------------------------------
+    //
+    // Seven words about the chain, of which three have a node in the component's
+    // tree and four do not. `f_compositor::routing::reported` draws the division
+    // and this file relies on it: the three are the machine's answer to *is
+    // anything still waiting*, and the four are whether the record they come out
+    // of can be believed at all — which is evidence about the component and
+    // belongs where the frame checks the component.
+    /// Waits the last frame entered and did not get out of. Unit: waits.
+    pub waits: u64,
+    /// The highest value that landed on the compositor's own timeline.
+    /// Unit: none — a timeline value, which is an ordinal.
+    pub signalled: u64,
+    /// Frames that closed with a wait outstanding and no room left.
+    /// Unit: frames — UI frames.
+    pub timeouts: u64,
+    /// Waits every frame's trace named, summed. Two per frame in this build.
+    /// Unit: waits.
+    pub traced: u64,
+    /// Waits the traces could not hold, summed. RFC 0101. Unit: waits.
+    pub trace_dropped: u64,
+    /// One while every trace named every wait its frame entered.
+    /// Unit: none — a flag.
+    pub trace_complete: u64,
+    /// Refusals the component's own chain produced, which is the component
+    /// contradicting itself. Unit: refusals.
+    pub chain_refusals: u64,
 }
 
 impl Board {
@@ -797,6 +862,16 @@ impl Board {
             dropped: board.read64(reported::DROPPED).ok()?,
             clean: board.read64(reported::CLEAN).ok()?,
             rules: board.read64(reported::RULES).ok()?,
+            answered: board.read64(reported::ANSWERED).ok()?,
+            crossings: board.read64(reported::CROSSINGS).ok()?,
+            crossings_per_frame_x1000: board.read64(reported::CROSSINGS_PER_FRAME_X1000).ok()?,
+            waits: board.read64(reported::WAITS).ok()?,
+            signalled: board.read64(reported::SIGNALLED).ok()?,
+            timeouts: board.read64(reported::TIMEOUTS).ok()?,
+            traced: board.read64(reported::TRACED).ok()?,
+            trace_dropped: board.read64(reported::TRACE_DROPPED).ok()?,
+            trace_complete: board.read64(reported::TRACE_COMPLETE).ok()?,
+            chain_refusals: board.read64(reported::CHAIN_REFUSALS).ok()?,
         })
     }
 }
@@ -1041,6 +1116,145 @@ impl Report {
         }
     }
 
+    /// What both serving halves owe about crossings and about the chain.
+    ///
+    /// # Why this is one function and not two blocks
+    ///
+    /// Because every clause here is a *relation between numbers* rather than a
+    /// statement about a script, and a relation that held on one half and was
+    /// forgotten on the other would be a clause with half the coverage it reads
+    /// as having. The numbers each script implies are pinned in each half's own
+    /// verdict, where the script is; what is here is what has to hold whatever the
+    /// script says.
+    ///
+    /// # `E3-B01j`: both sides count, and the two counts are required to agree
+    ///
+    /// That is the exit's own sentence and the first two clauses are it. The
+    /// frame's count is `submitted + completed` — entries it put on the ring and
+    /// completions it reaped, both counted on this side of the boundary and
+    /// derived from nothing the component published. The component's is
+    /// `drained + answered`, summed **by the component** into
+    /// `reported::CROSSINGS`; the third clause requires that sum to be the sum of
+    /// its own two terms, so a component that published a plausible total with
+    /// nothing behind it is caught rather than believed.
+    ///
+    /// One side counting and the other trusting it is the failure this line
+    /// exists to prevent, and the arrangement that avoids it is the one
+    /// `claims/0037` established between a runtime and the frame: two counters,
+    /// neither derived from the other, required equal.
+    ///
+    /// # `E3-B05f`: the trace is checked before anything is read out of it
+    ///
+    /// Three clauses, and their order is the argument. A trace that dropped a wait
+    /// is a record whose other numbers are over an unknown set — `unreleased` on a
+    /// truncated trace is *of the waits it kept* — so completeness is asked first.
+    /// Then the entry count: two waits per frame is section 08's shape with the
+    /// application removed, because the application is the first stage and waits
+    /// for nothing. A component whose present stage waited and recorded nothing
+    /// would publish a plausible outstanding count and half of this.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the boot log, naming the clause that did not hold.
+    fn crossings_and_chain_held(&self) -> Result<(), &'static str> {
+        if self.board.crossings != self.submitted.saturating_add(self.completed) {
+            return Err("the component and the frame disagree about how many entries crossed the \
+                 boundary. The two counts are taken on opposite sides of it and neither is \
+                 derived from the other, so one of them is counting something correlated with \
+                 a crossing rather than a crossing");
+        }
+        if self.board.crossings != self.board.drained.saturating_add(self.board.answered) {
+            return Err(
+                "the component's crossing total is not its own two directions added together, \
+                 so the total is a number with nothing behind it rather than a sum a reader \
+                 can check",
+            );
+        }
+        if self.board.answered != self.completed {
+            return Err(
+                "the completions the component says it put on the ring are not the ones the \
+                 client reaped, so the return leg of the crossing count is being reported by \
+                 one side only",
+            );
+        }
+        // The rate, re-derived rather than trusted, which is `reported::WAKE`'s
+        // rule: a published quotient whose terms are beside it is checkable, and
+        // this is the check. Integer division both sides, so the two truncate
+        // identically or the component divided something else.
+        // `checked_div` rather than a guarded division, because clippy is right
+        // about the shape and the reason is worth the line: *no frame closed* and
+        // *the quotient is zero* are the same published word here, and a reader of
+        // the component's own `crossings_per_frame_x1000` is told to read
+        // `frames` beside it to tell them apart. Spelling the absence as `None`
+        // and then as a zero is that arrangement said once rather than twice.
+        let expected_rate_x1000 =
+            self.board.crossings.saturating_mul(1000).checked_div(self.board.frames).unwrap_or(0);
+        if self.board.crossings_per_frame_x1000 != expected_rate_x1000 {
+            return Err("the crossings-per-frame figure the component published is not its own \
+                 crossing total over its own frame count, so the number a claim would carry \
+                 is not the number its two terms make");
+        }
+        // --- the frame trace, `E3-B05f` --------------------------------------
+        if self.board.trace_complete != 1 || self.board.trace_dropped != 0 {
+            return Err(
+                "a frame's trace did not name every wait its frame entered, so every other \
+                 number read out of it is over the waits the record happened to keep. RFC 0101 \
+                 is why the component says so rather than the bound being asserted somewhere",
+            );
+        }
+        if self.board.traced != self.board.frames.saturating_mul(WAITS_PER_FRAME) {
+            return Err(
+                "the traces do not name two waits per frame: section 08 has three stages and \
+                 two of them wait — the application is the first and waits for nothing. Below \
+                 this is a stage that waited and recorded nothing, which is the one thing \
+                 E3-B05's negative cannot survive; above it is a trace that was not emptied at \
+                 the frame boundary, so one frame's record carries the frame before it and \
+                 still reads as complete. Both directions are named because both were reached \
+                 by mutation, and a message naming only the first sent a reader looking for \
+                 the wrong defect",
+            );
+        }
+        if self.board.chain_refusals != 0 {
+            return Err(
+                "the component's own timeline chain refused one of its own frame ordinals, \
+                 which is the component contradicting itself rather than a client's mistake. \
+                 `f_compositor::waits` counts it instead of ending the run, so the run looks \
+                 ordinary and this is the only place it is visible",
+            );
+        }
+        // Two independent readings of one fact, required to agree. `late` is the
+        // pacing policy's answer — a degradation word that was not *fitted* — and
+        // `timeouts` is the trace's: a wait still open on a frame with no room
+        // left. A build that decided lateness once and reported it twice could not
+        // fail this; a build where the chain stopped landing signals altogether
+        // moves one and not the other.
+        if self.board.timeouts != self.board.late {
+            return Err(
+                "the frames the component abandoned are not the frames it found late, though \
+                 the two are readings of one fact taken through different numbers — the \
+                 degradation word and the frame trace",
+            );
+        }
+        // And the last frame's own state, against the last frame's own word. The
+        // trace is one frame's, so the outstanding count is about the frame the
+        // degradation word describes and the two have to say the same thing.
+        if (self.board.waits != 0) != (self.board.degraded != degraded::FITTED) {
+            return Err(
+                "the last frame has a wait outstanding and the component says it fitted, or it \
+                 fitted and something is still waiting on it — one of the two words is about a \
+                 different frame from the other",
+            );
+        }
+        if self.board.signalled > self.board.frames {
+            return Err(
+                "the compositor's timeline has reached a value for a frame it never closed, \
+                 which is a signal recorded at submission rather than at the landing — the one \
+                 distinction `f_abi::sync::Timeline::signalled` exists to keep",
+            );
+        }
+        Ok(())
+    }
+
     /// The half that sleeps, `E3-B01g`.
     ///
     /// **Two exits' worth of clauses and the order is the argument.** The scene
@@ -1171,7 +1385,61 @@ impl Report {
         if self.bells.batch_rings > 1 {
             return Err("one published batch rang more than one doorbell");
         }
-        Ok(())
+
+        // --- the crossings and the chain, on the half that batches ----------
+        //
+        // The same relations the serving half is held to, and running them here
+        // is the point rather than the tidiness: this half submits twelve entries
+        // as **nine publishes**, so it is the only place in this boot where the
+        // two units can be told apart at all. On the serving half the client
+        // submits one at a time on purpose and the two numbers are equal.
+        //
+        // **Which clause forbids which, because a mutation found the answer is
+        // not the obvious one.** Charging the crossing per publish on the
+        // *frame's* side was tried — `seen.submitted += 1` for the batch — and it
+        // reddens the completion clause two screens up rather than anything here:
+        // a client that counts nine submissions still reaps twelve completions,
+        // so `completed != submitted` catches it first. That is a real property
+        // and not an accident, and it means what the relations below uniquely
+        // forbid is the **component** counting something other than entries —
+        // which nothing else in this boot would notice, because the component's
+        // total is the only number here that no other clause reads.
+        //
+        // --- and what this script implies about the chain --------------------
+        //
+        // The mirror image of the serving half's three, which is why they are
+        // worth pinning here as well rather than left to the relations. This half
+        // closes **three** frames and the one with no room is the *second*, so the
+        // last frame reaches its own value: nothing is outstanding at the end, the
+        // timeline stands at the frame count rather than one below it, and the
+        // abandoned frame is still counted. A build that left every wait open, or
+        // one that landed every signal, moves one of these three and not the
+        // others — and neither could be told apart on the serving half, where the
+        // abandoned frame is the last one.
+        if self.board.waits != 0 {
+            return Err(
+                "a wait is outstanding at the end of a run whose last frame had a whole scanout \
+                 period of room. The batched frame fitted, so the value promised for it was \
+                 reached and nothing should still be waiting on it",
+            );
+        }
+        if self.board.signalled != expected.frames {
+            return Err(
+                "the compositor's timeline did not reach the value it promised for the last \
+                 frame, though that frame fitted — or it reached one it never promised. The \
+                 abandoned frame is the second of three here, so a timeline that stopped at it \
+                 is a build that never lands a signal again after one is skipped",
+            );
+        }
+        if self.board.timeouts != 1 {
+            return Err(
+                "this half did not find exactly one frame abandoned: the script's second frame \
+                 has a nanosecond of room and the other two have a whole scanout period each, \
+                 so a component answering the same way for all three is not reading the \
+                 deadline",
+            );
+        }
+        self.crossings_and_chain_held()
     }
 
     /// The half that is refused a compositor.
@@ -1458,10 +1726,15 @@ impl Report {
             );
         }
         // In `node::WRITTEN`'s order, which is the order the tree was read back
-        // in. Twelve words and not four: a board that agreed with a tree about
+        // in. Fifteen words and not four: a board that agreed with a tree about
         // the four old ones and diverged on the rest would be a component with
         // two sets of numbers, which is the failure this comparison exists to
         // catch and the reason every word on the board has a node beside it.
+        //
+        // Fifteen is also this component's manifest full —
+        // `f_abi::manifest::STATE_NODES_MAX` is sixteen and the subtree is one of
+        // them — which is why `E3-B01j`'s crossing figure is checked off the board
+        // by `Report::crossings_and_chain_held` and has no row here.
         let published = [
             self.board.frames,
             self.board.edits,
@@ -1475,6 +1748,9 @@ impl Report {
             self.board.resolves,
             self.board.notes,
             self.board.rules,
+            self.board.waits,
+            self.board.signalled,
+            self.board.timeouts,
         ];
         if self.tree != published {
             return Err(
@@ -1560,13 +1836,62 @@ impl Report {
                  wrongly or not at all",
             );
         }
+        // --- the synchronisation state, `E3-B05f` ---------------------------
+        //
+        // The relations are in [`Report::crossings_and_chain_held`] and are not
+        // repeated; what is here is what **this script** implies, which is the
+        // half a relation cannot supply. The script closes two frames and gives
+        // the second a single nanosecond of room, so the compositor never reaches
+        // the value it promised for it: the present engine's wait on that value is
+        // open at the end of the run, the timeline stands at the first frame's
+        // value, and one frame was abandoned.
+        //
+        // **Read out of the subtree and not off the board**, which is this line's
+        // exit sentence and `E3-B01k`'s before it. The equality above already
+        // requires the tree and the board to agree; these three are what the three
+        // words have to *be*, so a component whose board and tree agreed on three
+        // wrong numbers is caught here and nowhere else.
+        if self.tree[12] != 1 {
+            return Err(
+                "the compositor's subtree does not say that a wait is outstanding. The second \
+                 frame of this script was submitted a nanosecond before its deadline, so the \
+                 value promised for it is never reached and the present engine's wait on it is \
+                 the hang `abi/src/trace.rs` exists to make readable — a zero here is a build \
+                 that landed a signal for a frame it did not finish",
+            );
+        }
+        // **Against the frame *ordinal* and not against `FRAME_TWO`**, and the
+        // difference is worth the sentence because in this script the two are the
+        // same number. A timeline value is the count of frames the compositor has
+        // finished; a frame token is the client's own opaque word, and this client
+        // names its frames one, two and three after their order. A clause written
+        // against the token would pass for the wrong reason the day a client names
+        // a frame 0x12, which is exactly what `node::FRAME`'s own comment says a
+        // token is allowed to be.
+        if self.tree[13] != expected.frames.saturating_sub(1) {
+            return Err(
+                "the compositor's timeline has not stopped one frame short of the frames it \
+                 closed. The last of them was abandoned, so a value equal to the frame count is \
+                 a build that moves the timeline when it submits a signal rather than when the \
+                 signal lands — which would report a frame composited while it was still \
+                 queued, and which every other word in this tree would agree with",
+            );
+        }
+        if self.tree[14] != 1 {
+            return Err(
+                "the compositor's subtree does not count the abandoned frame. One of the two \
+                 frames this script sends has no room before its own deadline, so a zero here \
+                 is a timeout nothing in this build can reach and a published field that \
+                 cannot move — which is the failure E3-B01k was written against",
+            );
+        }
         if self.tree_after == self.tree_blank {
             return Err(
                 "the tree is byte-identical to the one published before the component ran, so \
                  nothing was published at all",
             );
         }
-        Ok(())
+        self.crossings_and_chain_held()
     }
 }
 
@@ -1765,6 +2090,87 @@ pub fn report_lines(report: &Report) {
                     BATCH_DELTAS,
                     BATCH_DELTAS,
                 );
+            }
+            // --- the synchronisation state, `E3-B05f` -----------------------
+            //
+            // Out of the **subtree** for the three words that have a node and out
+            // of the board for the four that do not, printed in that order so a
+            // reader sees which is which. The exit's own sentence is *read back at
+            // boot out of the component's subtree*, so the log prints where each
+            // number came from rather than leaving a reader to assume.
+            crate::kprintln!(
+                "  compositor    state tree waits outstanding {}, timeline reached {}, \
+                 timeout(s) {}; the traces named {} wait(s), dropped {}, and are {}",
+                report.tree[12],
+                report.tree[13],
+                report.tree[14],
+                report.board.traced,
+                report.board.trace_dropped,
+                match (report.board.frames, report.board.trace_complete) {
+                    // Three answers and not two, on the shape the theme line one
+                    // screen up already uses: a component that closed no frame
+                    // traced nothing, and *incomplete* would be a sentence about a
+                    // record that does not exist — which is exactly what the
+                    // starved half prints.
+                    (0, _) => "empty, because no frame closed",
+                    (_, 0) => "INCOMPLETE",
+                    _ => "complete",
+                },
+            );
+            // --- the boundary crossings, `E3-B01j` --------------------------
+            //
+            // **Both counts, side by side, and the conversion beside them.** The
+            // number is meaningless without saying what a crossing is, so the line
+            // prints the two directions that make it and what a client charging
+            // per *publish* would have said instead — which on the batching half
+            // is a different number and on the serving half is the same one, and a
+            // reader who cannot see both cannot tell which unit the figure is in.
+            // `E3-B01g` established that printing the conversion is what keeps a
+            // count honest, and this is that rule applied to the unit it settled.
+            crate::kprintln!(
+                "  compositor    {} crossing(s) by the frame's count, {} by the component's: \
+                 {} out, {} back, over {} UI frame(s) — {} per frame x1000; per publish a \
+                 client would say {}",
+                report.submitted + report.completed,
+                report.board.crossings,
+                report.board.drained,
+                report.board.answered,
+                report.board.frames,
+                report.board.crossings_per_frame_x1000,
+                report.bells.operations,
+            );
+            // And the rows `claims/0038` reads, on the serving half alone.
+            //
+            // **One half owns them**, for `claims/0037`'s reason stated in
+            // `kernel/src/main.rs`: the wake half closes a third frame and batches
+            // it, so its rate is a different number, and one row name carrying
+            // both values reaches `xtask`'s `measured_rows` as a row printed twice
+            // with different numbers — which it refuses rather than averages. The
+            // serving half is the one whose workload the claim publishes: a client
+            // that submits one delta at a time, which `drive` does deliberately
+            // and says so.
+            if report.half == Half::Serve {
+                crate::kprintln!(
+                    "    ring_crossings_per_ui_frame_x1000    {}",
+                    report.board.crossings_per_frame_x1000,
+                );
+                crate::kprintln!(
+                    "    ring_crossings_counted_by_the_frame    {}",
+                    report.submitted + report.completed,
+                );
+                crate::kprintln!(
+                    "    ring_crossings_counted_by_the_component    {}",
+                    report.board.crossings,
+                );
+                crate::kprintln!(
+                    "    ring_entries_client_to_component    {}",
+                    report.board.drained
+                );
+                crate::kprintln!(
+                    "    ring_entries_component_to_client    {}",
+                    report.board.answered,
+                );
+                crate::kprintln!("    ui_frames_closed    {}", report.board.frames);
             }
         }
     }
