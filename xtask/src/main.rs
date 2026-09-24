@@ -948,6 +948,7 @@ fn main() -> ExitCode {
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
         "lint-bounds" => lint_bounds(),
+        "lint-paths" => lint_paths(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
         "lint-units" => lint_units(),
@@ -1214,6 +1215,9 @@ cargo xtask <command>
   lint-bounds        Every boot-path bound still dominates the count that
                      decides it. RFC 0101's rule, read out of the source.
                      RFC 0116
+  lint-paths         Every path the release packager writes fits ustar's
+                     100-byte name field, read before the push rather than in
+                     three red jobs after it
   lint-mutations     No deliberate defect is on by default
   lint-claims        No document cites a claim value the claim no longer has
   lint-units         R03: every public abi field states its unit
@@ -14771,6 +14775,13 @@ fn lint_all() -> Result<(), String> {
     // written in a comment, and the last time one of them decayed it was a
     // six-boot nightly claim that noticed, a day later. Four file reads.
     lint_bounds()?;
+    // The same sentence applied to a string rather than to two constants. Three
+    // CI jobs went red on four RFC filenames past ustar's 100-byte name field,
+    // and the check that refuses them ran only in a job that packs the whole
+    // tree — which the local loop does not run. A path length is arithmetic over
+    // a string, so it is a file read and belongs here. RFC 0116's argument,
+    // second application.
+    lint_paths()?;
     lint_mutations()?;
     lint_claims()?;
     // The three rules from `docs/what-must-be-stated.html` section 15 that
@@ -15486,6 +15497,16 @@ fn lint_gate() -> Result<(), String> {
 /// failure this exists to prevent, so a check that could not see it was checking
 /// the shape of the thing rather than the thing.
 ///
+/// # What a workflow is, and what a job runs
+///
+/// Two readings that were narrow enough to skip the thing they check, and an
+/// audit on 2026-09-24 found both. A schedule is recognised by [`has_schedule`]
+/// at any indentation rather than at exactly two spaces, because a workflow this
+/// did not recognise was skipped *entirely* and a skipped workflow produces no
+/// finding. And every question below is asked of [`without_comments`]'s output,
+/// because a commented-out `bash ops/alarm-post.sh` satisfied the three
+/// anti-deletion rows — the mutation they exist to catch, one keystroke smaller.
+///
 /// # What it does not check
 ///
 /// That the alarm *works*. Opening an issue needs a token and a real failure,
@@ -15514,7 +15535,10 @@ fn lint_schedules() -> Result<(), String> {
             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
             let text =
                 std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
-            files.push((name, text));
+            // Once, here, so that every question below is asked of what the
+            // workflow runs. A commented-out posting step satisfied three
+            // `contains` clauses before this line existed.
+            files.push((name, without_comments(&text)));
         }
     }
     files.sort();
@@ -15534,7 +15558,7 @@ fn lint_schedules() -> Result<(), String> {
     let mut watched = 0usize;
     let mut scheduled = 0usize;
     for (name, text) in &files {
-        if !text.lines().any(|line| line.trim_end() == "  schedule:") {
+        if !has_schedule(text) {
             continue;
         }
         scheduled += 1;
@@ -15659,6 +15683,137 @@ const ALARM_SCRIPT: &str = "ops/alarm.sh";
 
 /// The three `gh` calls, which only a real failure can exercise.
 const ALARM_POST_SCRIPT: &str = "ops/alarm-post.sh";
+
+/// One workflow with its comments removed.
+///
+/// # The hole this closes
+///
+/// [`lint_schedules`] asks three `contains` questions of a job's raw text —
+/// *does it run `ops/alarm.sh`*, *does it run `ops/alarm-post.sh`*, *does it
+/// post on a schedule* — and a commented-out line satisfied all three. So the
+/// mutation the three rows were added to catch, **delete the posting step**, had
+/// a smaller sibling that walked straight past them: comment it out. The same
+/// function was already careful about comments in its `needs:` clause and says
+/// so in a fixture line, which is the tell that the care was applied in one
+/// place and not the other.
+///
+/// # The rule
+///
+/// YAML's own: a `#` begins a comment at the start of a line or after
+/// whitespace, and nowhere else. So `ops/alarm.sh` and `if: always()` are
+/// untouched, a `#` inside a word is left alone, and a step somebody commented
+/// out disappears — which is the whole point, because a commented-out step is a
+/// step that does not run.
+///
+/// It is not a YAML parser and does not pretend to be one; [`workflow_jobs`]
+/// says the same about itself and for the same reason. What it gets wrong is a
+/// `#` inside a quoted string preceded by a space, which truncates that string
+/// — and truncating a string is harmless here, because every needle this file
+/// looks for is a path or a call and none of them contains a `#`.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let bytes = line.as_bytes();
+        let mut code = line;
+        for (at, byte) in bytes.iter().enumerate() {
+            if *byte == b'#' && (at == 0 || bytes[at - 1].is_ascii_whitespace()) {
+                code = &line[..at];
+                break;
+            }
+        }
+        out.push_str(code.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// Does this workflow have a `schedule:` trigger?
+///
+/// # The hole this closes
+///
+/// This was `line.trim_end() == "  schedule:"` — exactly two spaces — and a
+/// workflow indented any other way was **skipped entirely**. A skipped workflow
+/// produces no finding, so the whole of this check would have passed over it in
+/// silence; the only backstop was the zero-schedules refusal at the end, and one
+/// correctly indented file satisfies that for the entire directory. That is the
+/// shape RFC 0101 names: a check that decays by addition, in the direction that
+/// reports ok.
+///
+/// So the indentation under a top-level `on:` is not this check's business. What
+/// is its business is the two facts it can hold to: the trigger block is the one
+/// opened by a key at column zero, and `schedule:` is a key inside it.
+///
+/// *What would reverse this:* a workflow that writes its triggers as a flow
+/// mapping on the `on:` line itself, which the last clause reads by substring
+/// rather than by structure and which nothing in this repository writes.
+fn has_schedule(text: &str) -> bool {
+    let mut in_on = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            // A key at column zero ends whatever block was open, so the answer
+            // is recomputed rather than left standing.
+            let key = line.trim_end();
+            in_on =
+                key.starts_with("on:") || key.starts_with("\"on\":") || key.starts_with("'on':");
+            if in_on && key.contains("schedule") {
+                return true;
+            }
+            continue;
+        }
+        if in_on && line.trim_start().starts_with("schedule:") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The two readings `lint-schedules` rests on, over text rather than over
+/// `.github/workflows/`.
+///
+/// Here rather than against the tree, for the reason the check itself gives: the
+/// shapes that matter are the ones this repository does *not* write, and only a
+/// fixture can hold one.
+#[cfg(test)]
+mod schedule_shapes {
+    use super::*;
+
+    #[test]
+    fn a_schedule_is_a_schedule_at_any_indentation() {
+        // The shape this check recognised, and the two it skipped in silence.
+        // A skipped workflow produces no finding at all, so each of these was
+        // the whole of the check passing over a file.
+        for on in ["on:\n  schedule:\n", "on:\n    schedule:\n", "on:\n\tschedule:\n"] {
+            assert!(has_schedule(on), "a schedule was skipped: {on:?}");
+        }
+
+        // And a `schedule:` that is not a trigger is not one. The key at column
+        // zero ends the block, which is what keeps a job named `schedule` or a
+        // step that prints the word out of the answer.
+        assert!(!has_schedule("on:\n  push:\njobs:\n  schedule:\n    runs-on: x\n"));
+        assert!(!has_schedule("on:\n  push:\n"));
+    }
+
+    #[test]
+    fn a_commented_out_step_does_not_satisfy_a_needle() {
+        let job = "    steps:\n      # - run: bash ops/alarm-post.sh\n      - run: echo nothing\n";
+        let stripped = without_comments(job);
+        assert!(
+            !stripped.contains("bash ops/alarm-post.sh"),
+            "a commented-out posting step still answers the question: {stripped:?}"
+        );
+        assert!(job.contains("bash ops/alarm-post.sh"), "the fixture no longer holds the needle");
+
+        // A `#` that begins no comment is left where it is, and a trailing
+        // comment does not take the code before it with it.
+        let kept = without_comments("      - run: bash ops/alarm.sh # decides and writes\n");
+        assert!(kept.contains("bash ops/alarm.sh"));
+        assert!(!kept.contains("decides"));
+        assert_eq!(without_comments("        body: \"issue#4\"\n").trim(), "body: \"issue#4\"");
+    }
+}
 
 /// The job names a workflow declares, in file order.
 ///
@@ -21514,14 +21669,10 @@ fn lint_bounds() -> Result<(), String> {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {file} for `{name}`: {e}"))?;
         match constant_value(&text, name, &read) {
-            Some(value) => {
+            Ok(value) => {
                 read.insert((*name).to_string(), value);
             }
-            None => findings.push(format!(
-                "  {file}  `{name}` is not a `const {name}: usize = <sum of integers and \
-                 constants this check already read>;` — so its value cannot be compared \
-                 with anything"
-            )),
+            Err(why) => findings.push(format!("  {file}  {why}")),
         }
     }
 
@@ -21605,6 +21756,84 @@ fn lint_bounds() -> Result<(), String> {
     ))
 }
 
+/// Every path the release packager will write fits ustar's name field.
+///
+/// # The three red jobs this comes from
+///
+/// `claims registry`, `package address (runner a)` and `package address (runner
+/// b)` all failed on PR #78 with one sentence from [`pack::Tar::file`]:
+/// *docs/rfc/0114-….md is 114 bytes and ustar's name field is 100*. Four RFC
+/// filenames were at or past the bound, and `pack::Tar` refuses such a name
+/// rather than writing a PAX extension — because a PAX header carries its own
+/// set of variable fields and that type's whole claim is that it has none, which
+/// is the claim the package address rests on. The refusal is the packer working.
+///
+/// What was not working is *where* it ran. The check existed only inside a job
+/// that packs the whole tree, which the local loop does not run and which costs
+/// a build; so a session could write a file, run `cargo xtask verify` green, push
+/// and take three jobs red on a string length. `CLAUDE.md` gained the scar for
+/// this shape the day before, from the other direction: **if a check rests on
+/// arithmetic over two constants it is a file read and belongs in `verify`**.
+/// `lint_bounds` is the first application of that sentence and this is the
+/// second. A path length is arithmetic over a string.
+///
+/// # Why it reads `CONTENTS` rather than walking the tree
+///
+/// Because the question is not *is any path in this repository long* — it is
+/// *will the packager refuse one*, and what the packager packs is
+/// [`CONTENTS`] through [`content_files`]. Calling that same function is what
+/// stops this check and the packer from disagreeing about which names are
+/// packed: a content added to the contract is covered here by existing. It costs
+/// the file reads that function does and no build.
+///
+/// The three names [`build_package`] adds itself — `MANIFEST`, `source.tar` and
+/// `image/f-kernel.elf32` — are literals of eight, ten and twenty bytes written
+/// at their one call site. They are not read here, because a second list of them
+/// is the defect this check is an instance of, and a literal cannot decay.
+///
+/// # Errors
+///
+/// Every path at or past [`pack::NAME_MAX`], named — not the first one, which is
+/// what the packing job reported and what cost a second push: three of the four
+/// long filenames were invisible until the first was renamed.
+fn lint_paths() -> Result<(), String> {
+    let mut findings: Vec<String> = Vec::new();
+    let mut packed = 0usize;
+    for content in CONTENTS {
+        for (name, _bytes) in content_files(content)? {
+            packed += 1;
+            if name.len() >= pack::NAME_MAX {
+                findings.push(format!("  {:>3}  {name}", name.len()));
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-paths: ok  ({packed} packaged path(s), longest under ustar's {}-byte name \
+             field)",
+            pack::NAME_MAX
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} path(s) the release packager cannot write, at or past ustar's {}-byte name \
+         field:\n{}\n\n\
+         `pack::Tar` refuses a long name rather than writing a PAX extension, because a PAX\n\
+         header carries its own set of variable fields and that type's whole claim is that\n\
+         it has none — which is the claim the package address rests on. So this is the\n\
+         packer working, arriving before the push rather than in three red jobs after it.\n\n\
+         Shorten the path. For an RFC that is a `git mv` and nothing else: every reference\n\
+         in this tree is by number, which is what `lint-registries` reads and what\n\
+         docs/rfc/README.md's rows carry. Record the rename in the file's own header, so a\n\
+         reader who greps the old slug is told the number did not move.",
+        findings.len(),
+        pack::NAME_MAX,
+        findings.join("\n")
+    ))
+}
+
 /// The value of `const NAME: usize = ...;` in `text`, resolved against `known`.
 ///
 /// A sum of decimal integers and names already read, and deliberately nothing
@@ -21613,28 +21842,95 @@ fn lint_bounds() -> Result<(), String> {
 /// — which is exactly the spelling `MAX_RESERVED` uses and the one a reader
 /// would have to follow anyway.
 ///
-/// `None` for anything else, which is a finding rather than a pass: a bound
-/// this cannot evaluate is a bound nothing is comparing, and that is the state
-/// this check exists to end.
-fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Option<u64> {
+/// # Why a second declaration is refused rather than resolved
+///
+/// This read the **first** spelling in the file and evaluated it, which is the
+/// failure RFC 0101 describes applied to the check itself: a `#[cfg(test)]`
+/// constant, a doc-comment code block or a second module shadows the
+/// declaration that decides the boot, and the lint then compares the wrong
+/// number — silently, and in the direction that passes, because a test fixture
+/// is the one likely to be small. All five constants are unique today, so this
+/// was latent; *decays silently, by addition* is the RFC's own phrase for
+/// exactly that, and a check with the shape it warns about is worth less than no
+/// check, because it reports ok.
+///
+/// So a needle that occurs more than once is an error naming the constant, on
+/// the same argument the errors below make: a bound this cannot evaluate with
+/// certainty is a bound nothing is comparing, and that is the state this check
+/// exists to end. *What would reverse this:* a reason to have two declarations
+/// of a boot-path bound in one file, at which point this is told which one — not
+/// made to guess.
+///
+/// # Errors
+///
+/// One sentence saying which constant and why, for a finding line.
+fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Result<u64, String> {
     let needle = format!("const {name}: usize = ");
-    let (_, rest) = text.split_once(&needle)?;
-    let (expression, _) = rest.split_once(';')?;
+    let found = text.matches(&needle).count();
+    if found > 1 {
+        return Err(format!(
+            "`{name}` is declared {found} times in this file, so this check cannot say \
+             which one bounds the boot. It used to take the first and evaluate it \
+             silently — RFC 0101's own decay, one level up, in the check written against \
+             it. Leave one declaration, or teach this which"
+        ));
+    }
+    let unresolved = || {
+        format!(
+            "`{name}` is not a `const {name}: usize = <sum of integers and constants this \
+             check already read>;` — so its value cannot be compared with anything"
+        )
+    };
+    let (_, rest) = text.split_once(&needle).ok_or_else(unresolved)?;
+    let (expression, _) = rest.split_once(';').ok_or_else(unresolved)?;
     let mut total: u64 = 0;
     for term in expression.split('+') {
         let term = term.trim();
-        let term = term.rsplit("::").next()?;
+        let term = term.rsplit("::").next().ok_or_else(unresolved)?;
         if term.is_empty() {
-            return None;
+            return Err(unresolved());
         }
         let value = if term.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
-            term.replace('_', "").parse::<u64>().ok()?
+            term.replace('_', "").parse::<u64>().map_err(|_| unresolved())?
         } else {
-            *known.get(term)?
+            *known.get(term).ok_or_else(unresolved)?
         };
-        total = total.checked_add(value)?;
+        total = total.checked_add(value).ok_or_else(unresolved)?;
     }
-    Some(total)
+    Ok(total)
+}
+
+/// The resolver `lint-bounds` rests on, over text rather than over the tree.
+///
+/// Here rather than in a boot, for the reason `lint_bounds` itself gives: this
+/// is arithmetic over a string. The case that matters is the second declaration
+/// — all five constants in `BOUND_SOURCES` are unique today, so the tree cannot
+/// exercise it and a fixture is the only thing that can.
+#[cfg(test)]
+mod bound_constants {
+    use super::*;
+
+    #[test]
+    fn a_constant_declared_twice_is_refused_by_name_rather_than_taken_from_the_top() {
+        // The shape the audit named: a real declaration and a `#[cfg(test)]`
+        // one below it, which is what a fixture for a bound usually looks like
+        // and is smaller than the bound it shadows — so the first-match reader
+        // passed, and passed in the direction that reports ok.
+        let two = "const PLACES_MAX: usize = 9;\n\
+                   #[cfg(test)]\n\
+                   const PLACES_MAX: usize = 2;\n";
+        let why = constant_value(two, "PLACES_MAX", &BTreeMap::new())
+            .expect_err("two declarations resolved to one value");
+        assert!(why.contains("PLACES_MAX"), "the refusal does not name the constant: {why}");
+        assert!(why.contains("declared 2 times"), "the refusal does not say why: {why}");
+
+        // And one declaration still resolves, including through a name already
+        // read and through a path taken by its last segment.
+        let mut known = BTreeMap::new();
+        known.insert("PLACES_MAX".to_string(), 9u64);
+        let one = "pub const MAX_MODULES: usize = 1 + component::PLACES_MAX + 1 + 2;\n";
+        assert_eq!(constant_value(one, "MAX_MODULES", &known), Ok(13));
+    }
 }
 
 /// One entry from `TODO.md`.

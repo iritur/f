@@ -1127,7 +1127,9 @@ mod tests {
     ///
     /// *The edits that make this go red:* `Panel::theme` returning the base
     /// theme unchanged, at which point the two offset tables would have to agree
-    /// and they differ at eleven of fifteen nodes; or `Panel::surface` answering
+    /// and they differ at ten of fifteen nodes — the other five are zero on both
+    /// panels, because a first child sits at its parent's origin at any density;
+    /// or `Panel::surface` answering
     /// a constant, at which point the sharp panel transforms stop doubling.
     #[test]
     fn each_density_reaches_a_different_stage() {
@@ -1222,11 +1224,27 @@ mod tests {
     /// crossed are the same number both times, because a declaration is sent
     /// when it changes and a pixel stream is sent when the panel refreshes. That
     /// difference is the whole of *not an encoded pixel stream*, which is why
-    /// the last two assertions are the point of this test rather than a
+    /// the last three assertions are the point of this test rather than a
     /// decoration on it.
     ///
-    /// *The edit that makes this go red:* a [`Pacer`] that ignores its cadence —
-    /// the two counts then agree, and they are meant to differ.
+    /// # Why there are two links and not one
+    ///
+    /// Because a single `Crossed` added to both totals in the same iteration
+    /// makes `fast_bytes == slow_bytes` true for every possible implementation
+    /// of [`Pacer`], [`Cadence`], [`send`] and [`Remote`] — an assertion about
+    /// this loop rather than about this module, and it was one until an audit
+    /// on 2026-09-24 said so. Each side now has its own far side and its own
+    /// call to [`send`], so the two totals come from two control flows and can
+    /// differ. The pixel side is read off `shown()` for the same reason: it was
+    /// arithmetic over `Cadence::HZ_60.refresh_hz` and `HZ_30.refresh_hz`, two
+    /// constants, and it held whatever the pacers did.
+    ///
+    /// *The edits that make this go red:* a [`Pacer`] that ignores its cadence —
+    /// the two counts then agree, and both the `shown` assertions and the pixel
+    /// comparison fail; or a sender that put the declaration on the link once
+    /// per *presentation* rather than once per change, which is the encoded
+    /// pixel stream this module exists to not be, at which point the two byte
+    /// totals are three frames against two.
     #[test]
     fn a_refresh_rate_changes_what_is_shown_and_not_what_it_costs() {
         /// When each frame arrived. Handed in, never read from a clock.
@@ -1242,30 +1260,39 @@ mod tests {
         let mut fast_bytes = 0;
         let mut slow_bytes = 0;
         for arrival_us in ARRIVED_US {
-            // The frame crosses whatever either panel does with it: the link
-            // carries the declaration and the pacer decides the presentation.
-            let mut remote = Remote::opening(EPOCH);
-            let crossed = link(&settings_panel(), &mut remote);
-            fast_bytes += crossed.bytes;
-            slow_bytes += crossed.bytes;
+            // Two far sides and two links, one per panel, and a fresh `Remote`
+            // per arrival because this is a first frame each time — `Tree`
+            // refuses a redeclaration, which is the property `E3-B06m`'s
+            // reconciler is for. The link is driven by the arrival and the
+            // pacer by the refresh, and nothing here lets the second reach the
+            // first: that is what the byte totals below are asserting.
+            let mut fast_remote = Remote::opening(EPOCH);
+            let mut slow_remote = Remote::opening(EPOCH);
+            fast_bytes += link(&settings_panel(), &mut fast_remote).bytes;
+            slow_bytes += link(&settings_panel(), &mut slow_remote).bytes;
             if fast.offer(arrival_us) == Paced::Show {
-                present_on(&remote, Panel::DESK, &mut layout);
+                present_on(&fast_remote, Panel::DESK, &mut layout);
             }
             if slow.offer(arrival_us) == Paced::Show {
-                present_on(&remote, Panel::DESK, &mut layout);
+                present_on(&slow_remote, Panel::DESK, &mut layout);
             }
         }
         assert_eq!((fast.shown(), fast.folded()), (3, 3));
         assert_eq!((slow.shown(), slow.folded()), (2, 4));
         assert_ne!(fast.shown(), slow.shown(), "the refresh rate reached nothing");
 
-        // The bytes are equal, and a pixel stream would not have been: a second
-        // of this panel is sixty frames at one rate and thirty at the other, and
-        // one is exactly twice the other.
+        // Six declarations each, at whatever rate the panel refreshes.
         assert_eq!(fast_bytes, slow_bytes);
-        assert_eq!(
-            Panel::DESK.pixel_bytes(u64::from(Cadence::HZ_60.refresh_hz)),
-            Panel::DESK.pixel_bytes(u64::from(Cadence::HZ_30.refresh_hz)) * 2
+        assert_eq!(fast_bytes, ARRIVED_US.len() as u64 * PANEL_LINK_BYTES);
+
+        // And a pixel stream would not have been equal, because it costs one
+        // frame per *presentation*. Read off the pacers rather than off the two
+        // refresh rates, so that this compares what the pacers did and not what
+        // two constants say they should have done.
+        assert_ne!(
+            Panel::DESK.pixel_bytes(u64::from(fast.shown())),
+            Panel::DESK.pixel_bytes(u64::from(slow.shown())),
+            "the refresh rate reached neither the link nor the pixels"
         );
     }
 
@@ -1278,6 +1305,22 @@ mod tests {
     /// own multiplication. A tally computed from a length would have agreed with
     /// whatever the encoder did.
     ///
+    /// # Who the second party is, and who it is not
+    ///
+    /// The **far side**, which decoded these bytes and counted what it staged:
+    /// `Applied` is `Tree::apply`'s own tally and the receiver reached it
+    /// without asking the sender anything. That is a second count of the same
+    /// frame, produced by the other end of the link.
+    ///
+    /// This test used to add `size_of_val(entry) + payload.len()` up in the sink
+    /// closure and call it a third witness. It was not one: that expression *is*
+    /// the definition of [`LINK_ENTRY_BYTES`], and `send`'s `put` calls the sink
+    /// and increments [`Crossed`] in adjacent statements, so the two sides
+    /// stepped in lockstep by construction and no defect could separate them.
+    /// An audit on 2026-09-24 said so and the claim is withdrawn: on the *byte*
+    /// number the witness is the hand-written literal below, and nothing else in
+    /// this tree can be.
+    ///
     /// The ratio is published unflattered. It is against an **uncompressed**
     /// frame, which is the upper bound of the pixel side — see the module
     /// honesty notes — so the honest sentence is *a declaration is three orders
@@ -1285,23 +1328,41 @@ mod tests {
     /// unmeasured amount smaller than a compressed one.*
     #[test]
     fn the_bytes_that_cross_are_counted_and_compared_with_pixels() {
-        let counted = Cell::new(0u64);
+        let closed = Cell::new(None);
         let mut remote = Remote::opening(EPOCH);
         let crossed = send(&settings_panel(), FRAME, &mut |entry, payload| {
-            // The third witness on the byte count: the `Sqe` and the payload are
-            // *here*, so what this adds up is what the link carries rather than
-            // what `Crossed` says it carries.
-            let bytes = (core::mem::size_of_val(entry) + payload.len()) as u64;
-            counted.set(counted.get() + bytes);
-            remote.receive(entry, payload).expect("the far side accepts it");
+            // Nothing is counted in this closure. What it would count is
+            // `LINK_ENTRY_BYTES` spelled a second way, beside the statement that
+            // increments the first one — see the note above.
+            if let Some(applied) = remote.receive(entry, payload).expect("the far side accepts it")
+            {
+                closed.set(Some(applied));
+            }
         })
         .expect("the panel is sendable");
+
+        // The far side's count, from the entries it decoded: fifteen
+        // declarations, seven states, the one handshake it carried and did not
+        // apply, and nothing removed. The commit is added here rather than
+        // hidden in a field, because it is an entry on the link and not an edit
+        // in a tree — which is the one place these two counts are allowed to
+        // disagree, and it is written out so that a reader can see it does.
+        let far = closed.get().expect("the frame closed");
+        assert_eq!((far.declared, far.stated, far.removed, far.agreements), (15, 7, 0, 1));
+        let far_entries = far.declared + far.stated + far.removed + far.agreements + 1;
+        assert_eq!(
+            far_entries,
+            u64::from(crossed.entries),
+            "the sender and the receiver counted different frames"
+        );
 
         assert_eq!(LINK_ENTRY_BYTES, 120, "a submission entry is 64 bytes and a payload slot 56");
         assert_eq!(crossed.entries, 24);
         assert_eq!(crossed.entries, PANEL_ENTRIES);
         assert_eq!(crossed.bytes, 2_880);
-        assert_eq!(crossed.bytes, counted.get(), "the tally and the link disagree");
+        // The byte number against the literal, which is the whole of what checks
+        // it: 24 entries at 120 bytes. Both numbers are written by hand.
+        assert_eq!(crossed.bytes, u64::from(crossed.entries) * 120);
 
         // The pixel side. Width times height times four, written as the
         // multiplication as well as the product.

@@ -1353,6 +1353,40 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the thirteenth and fourteenth waves, 2026-09-24.** Fifty-three `[x]`,
+four `[>]`, forty `[ ]` of ninety-seven — the denominator moved by two for lines
+the decomposition did not contain: `E3-B04f`, the crossing attested on both
+sides of the input ring, which closed as it was named, and `E3-B04g`, the
+compositor draining that ring itself, which is the line `E3-B01i`'s boot half
+was actually waiting on. **The reachable work is nearly exhausted**, and the two
+waves say so in their shape: one line closed, one moved to `[>]` on a wall that
+is a file nobody was assigned, and one was surveyed and not started because its
+manifest half is a schema bump.
+
+**What the timeout line found was larger than the timeout.** `policy::decide`
+took two flags, and its only caller passed *faulted* for every death it was told
+about — so *the supervisor decides from the manifest's restart policy* was true
+of a policy being fed a constant, and a component that had exited would have
+been restarted as though it had crashed. The cause has been on the wire since
+RFC 0008 and nothing had ever read it. And the input route found its blocker was
+**two** blockers: *the frame may not hold a reading* is true and unchanged, and
+*the frame may not compute any function of the bytes an entry carries* is what it
+had drifted into without anybody arguing for it. `lint-stamp` reads prose, so the
+frame may not so much as describe the stamp — and a fold is not a reading, which
+is RFC 0124.
+
+**Then an audit, and it was the most productive agent of the week.** Six defects
+in the half of the branch it read, two of them in things this file cites as
+evidence: an assertion comparing two accumulators fed from one source in one
+iteration, and a *third witness* on a byte count that was the encoder's own
+arithmetic. Both are repaired and both sentences above are corrected rather than
+deleted. The same wave put a path length in `verify` — three CI jobs had gone red
+on four RFC filenames past ustar's name field, and the only observer was a job
+that packs the whole tree — and made `lint-bounds` **refuse** a constant spelled
+twice rather than take the first spelling, which was RFC 0101's own decay inside
+the check written against it. A second pair of audits over the rest of the branch
+and its machinery found sixteen more, which the next wave repairs.
+
 **After the twelfth wave, 2026-09-24.** Fifty-two `[x]`, three `[>]`, forty
 `[ ]` of ninety-five. **The remote projection closed** and the clause it turns on
 is *one unmodified application*: the settings panel is promoted out of a test
@@ -1967,9 +2001,9 @@ thing it will measure would be blocking a ruler on a wall.
 - [x] **E3-B06h** `M` The remote projection: the tree at the far side's density and refresh rate, not an encoded pixel stream.
   **Met on 2026-09-24, and the application is unmodified in the one way that can be checked rather than claimed.** `semantic/src/remote.rs` sends a declaration as `f_abi::semantic` entries — a handshake, one `DeclareNode` per node, one `SetState` per node that stands somehow, one `Commit` — and the far side turns what landed back into vocabulary nodes and presents them. The application is `f_interface::example::settings_panel()`, promoted out of a test module unchanged, and the test asserts it is still equal to itself after both presentations: a copy would have been a second application, which is the failure the clause is written against. **There is no remote-only stage** — the far side declares, solves and emits through the same three functions, because the first thing two layout engines do is disagree.
   **Two densities and two refresh rates, and the test separates what each one reaches.** The theme's density reaches the **solve**: the panel's fifteen offsets are one table at ×1.000 and a different one at ×2.000, both derived by hand from the theme before the first run. The panel's pixels per point reach the **transform only**, and the assertion that shows it is a third panel identical to the desk but twice as sharp re-declaring the same demands and the solver reporting **nothing to do** — which it could only report if sharpness had reached none of the layout. A further assertion says the two panels do not differ by a scale factor, which is what a density folded in at the end would have produced. Refresh rate reaches pacing and nothing else: from **identical bytes on the link**, 60 Hz shows three of six arrivals and folds three, 30 Hz shows two and folds four, and a folded frame is applied to the tree rather than dropped.
-  **The bytes are counted and published unflattered.** Twenty-four entries at 120 bytes is 2 880, counted at the encoder and cross-checked by an independent tally in the sink, against 1 422x for a 1 280x800 desk frame, 3 510x for a handset, and 85 333x for one still second at 60 Hz. The honest half is in the module, the RFC and the claim register's absence: the pixel figure is an **upper bound**, a raw framebuffer copy, so the defensible sentence is *three orders of magnitude smaller than the raw framebuffer and an unmeasured amount smaller than a compressed one*. **No `claims/` row was taken**, and RFC 0121 argues why rather than leaving it implicit: these numbers have no baseline, no workload and no machine — they are arithmetic over constants a unit test holds exactly, which `CLAUDE.md`'s own scar puts in `verify` as a file read rather than in a registry as a measurement.
+  **The bytes are counted and published unflattered.** Twenty-four entries at 120 bytes is 2 880, counted at the encoder, with the **far side's** own tally of what it staged and applied as the second party — fifteen declarations, seven states and one agreement, plus the commit that closed the frame. On the byte figure the witness is the hand-written literal, and nothing else in this tree can be: `size_of_val(entry) + payload.len()` *is* the definition of `LINK_ENTRY_BYTES`, so a tally in the sink steps in lockstep with the encoder by construction. The earlier claim of an independent tally there was withdrawn on 2026-09-24, after an audit found it, against 1 422x for a 1 280x800 desk frame, 3 510x for a handset, and 85 333x for one still second at 60 Hz. The honest half is in the module, the RFC and the claim register's absence: the pixel figure is an **upper bound**, a raw framebuffer copy, so the defensible sentence is *three orders of magnitude smaller than the raw framebuffer and an unmeasured amount smaller than a compressed one*. **No `claims/` row was taken**, and RFC 0121 argues why rather than leaving it implicit: these numbers have no baseline, no workload and no machine — they are arithmetic over constants a unit test holds exactly, which `CLAUDE.md`'s own scar puts in `verify` as a file read rather than in a registry as a measurement.
   **The exhaustive match is twenty-two arms and two named refusals.** A canvas is drawn by application code on the application's machine and no opcode carries it; an image's content is a capability in the *declaring* peer's table. Each refusal names the node, the role and the reason and fails the whole frame, because a placeholder would be a frame whose sender believes it contains a canvas. Replacing twenty-one arms with a wildcard moves a census the test holds — `(1, 0, 21, 0, 0)` against `(6, 4, 10, 1, 1)` — which is the half the compiler cannot hold.
-  **What the link does not carry is argued rather than assumed, and it is the largest thing here.** No constraints cross, so the far side's layout is not the author's; `abi/src/semantic.rs` had already named that gap from the other side. Style does not cross — the state does, and a rule turning a state into a paint would be a second place a colour is chosen. Content does not cross. RFC 0121. **Two findings worth a reader's time:** the settings panel is twenty-three staged entries against a frame maximum of twenty-four, so a sixteenth node does not fit and a sender that split it owes an answer about what the receiver presents in between; and a `Layout` is about three quarters of a megabyte, so two in one test frame overflow a thread's stack — found by overflowing one.
+  **What the link does not carry is argued rather than assumed, and it is the largest thing here.** No constraints cross, so the far side's layout is not the author's; `abi/src/semantic.rs` had already named that gap from the other side. Style does not cross — the state does, and a rule turning a state into a paint would be a second place a colour is chosen. Content does not cross. RFC 0121. **Two findings worth a reader's time:** the settings panel is twenty-three staged entries against a frame maximum of twenty-four, so a sixteenth node that declares no state fits exactly — twenty-four staged against a frame maximum of twenty-four — and only one that **also carries state** overflows. The bound is reached by state and not by structure, which is the more interesting statement: what decides whether a sender has to split a frame is how many nodes *stand somehow*, not how many there are, and a sender that splits one owes an answer about what the receiver presents in between. Corrected on 2026-09-24 after an audit counted; and a `Layout` is about three quarters of a megabyte, so two in one test frame overflow a thread's stack — found by overflowing one.
   *exit:* **met.** one declaration presented at two densities and two refresh rates from one unmodified application, the bytes counted against what pixels would have cost with the comparison's own upper-bound nature stated, and the far side's `Role` match exhaustive with two named refusals.
   *needs:* E3-B06f
 - [x] **E3-B06i** `M` The screen-reader projection: `canvas.rs`'s `linearise` generalised from one arrangement to a whole tree.
