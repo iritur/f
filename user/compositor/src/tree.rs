@@ -46,36 +46,52 @@
 //! *user* of the pairs: nothing draws, so nothing asks `Resolved::on` for a node
 //! yet. The projection that will is `E3-B06g`.
 //!
-//! # The rung is assigned in one place, and that is the whole of `E3-B02b`
+//! # The rung is assigned in one place, and the type is what says so
 //!
-//! [`Held::new`] is the only line in this crate that writes [`Story::rung`], and
-//! every other field of [`Story`] is written again on every frame that closes.
-//! That asymmetry is the decision: RFC 0080 forecloses a compositor that
-//! promotes itself, on the grounds that a rung change moves the cost
-//! distribution `crate::pacing` estimates from underneath the estimator, and the
-//! cheapest way to keep that promise is for there to be no second assignment to
-//! find.
+//! [`Held::new`] is the only line in this crate that builds a [`StartingRung`],
+//! and RFC 0080 is why it must stay that way: a compositor that promoted itself
+//! would move the cost distribution `crate::pacing` estimates from underneath
+//! the estimator, and this file's job is to make the second assignment something
+//! a reader can see is absent rather than something they have to search for.
 //!
-//! **Nothing in this crate enforces that, and a reader should not believe it
-//! does.** The type permits a second assignment — [`Story`] is a plain struct
-//! whose other fields are written every frame — and what catches one is the
-//! boot: a build that recomputed the rung from a report that had moved
-//! published a different word and `cargo xtask compositor serve` went red on
-//! *the compositor promoted itself*. That is the guard, and it lives one
-//! privilege boundary away from the code it guards. A type that made the second
-//! assignment impossible would be better and is not written here, because the
-//! rung is published in the same struct as four numbers that must move and
-//! splitting them would cost a reader the one place the frame's story is.
+//! **An earlier draft of this paragraph said the opposite, and `E3-B07g` is the
+//! reversal.** It read: *nothing in this crate enforces that, and a reader
+//! should not believe it does* — [`Story`] was a plain struct with a `rung`
+//! field beside four numbers rewritten every frame, the only guard was the boot
+//! one privilege boundary away, and the paragraph closed by saying a type that
+//! made the second assignment impossible would be better and was not written.
+//! RFC 0119 is that type, and the reason it is worth its diff is the clause
+//! `E3-B07g` carries: *the two mechanisms that share the word fallback, kept
+//! apart by something other than a paragraph*. Falling back a **rung** and
+//! falling back an **effect** are both spelled *fallback* in this system's
+//! prose, they were written into one struct, and one of the two is written every
+//! frame by a policy whose whole job is to give something up. A comment saying
+//! they are different is exactly the thing that was there.
 //!
-//! What a host test can show is that a frame closing does not move it and that a
-//! frame missing its deadline does not move it. What it cannot show is the case
-//! that matters most — a backend that *gains* a capability while the component
-//! runs — because nothing here reads the routing page twice and a test that
-//! handed [`Held`] a second [`Plan`] would be testing a constructor. That case
-//! is a boot: `kernel/src/compositor.rs` writes a better report onto the page
-//! after the first frame closes and requires the published rung to be the one
-//! this component started with. The two together are the clause, and neither is
-//! it alone.
+//! What is there now, in place of the paragraph:
+//!
+//! - [`Story`] **has no rung field**. The degradation path writes a `Story`;
+//!   there is no member on it a demotion could be written into, so the demotion
+//!   is not a line somebody can type and forget to review.
+//! - The rung is a [`StartingRung`], whose constructor is private to this module
+//!   and is called in [`Held::new`] and nowhere else, and which offers a word
+//!   and no arithmetic — nothing on it subtracts, orders or steps, so *demote by
+//!   one* has no spelling either.
+//! - The decision itself, `crate::pacing::chose`, takes a budget, a frame
+//!   ordinal and a duration and answers an ordinal. Not one of those types can
+//!   name a rung, so the function that chooses a reduction could not demote one
+//!   if it wanted to.
+//!
+//! What a host test can show is that no sequence of frames moves it —
+//! `a_rung_is_held_across_every_answer_the_degradation_policy_can_give` walks
+//! every ordinal the policy can produce against every rung of the ladder. What
+//! it cannot show is the case that matters most — a backend that *gains* a
+//! capability while the component runs — because nothing here reads the routing
+//! page twice and a test that handed [`Held`] a second [`Plan`] would be testing
+//! a constructor. That case is still the boot: `kernel/src/compositor.rs` writes
+//! a better report onto the page after the first frame closes and requires the
+//! published rung to be the one this component started with. The three together
+//! are the clause, and none of them is it alone.
 
 use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal};
 use f_abi::{Cqe, Sqe, error, flags};
@@ -84,7 +100,7 @@ use f_interface::token::{Report, Resolved, Theme, Token, resolve};
 use f_scene::arena::{Arena, Refusal as GraphRefusal};
 use f_scene::commit::{Batch, DELTAS_MAX, Offered, Refusal, Refused};
 
-use crate::pacing::{Decision, Pacing, Tick, degraded, degraded_word};
+use crate::pacing::{Decision, Pacing, Record, Tick, chose, degraded};
 use crate::waits::Waits;
 
 /// How many deltas one frame may carry before this component refuses it.
@@ -299,26 +315,73 @@ pub fn rung_word(bits: u64) -> u64 {
     }
 }
 
+/// The rung this component started on, in a form nothing can assign twice.
+///
+/// One `u64` behind a private field, and every part of that is the decision
+/// `E3-B07g` asks for. The constructor is private to this module, so no caller
+/// outside it can produce one at all; there is no method that takes `&mut self`,
+/// so a holder cannot move it; and the only thing it answers is the word a state
+/// node carries — no ordering, no `index`, no arithmetic — so *fall back one
+/// rung* is not an expression that exists. The module comment above says what
+/// was there before and why a paragraph was not enough.
+///
+/// Not `Default`, and that is load-bearing rather than tidy: [`Story`] derives
+/// `Default` and is rebuilt field by field, and a rung with a default would be a
+/// rung that can be produced by `..Default::default()` — which is precisely the
+/// second assignment this type exists to make unspellable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartingRung(u64);
+
+impl StartingRung {
+    /// The rung the machine described by `bits` selects.
+    ///
+    /// Private, and the privacy is the mechanism: `Held::new` is the only caller
+    /// in this crate and a crate outside cannot reach it, so *chosen once, at
+    /// start* is a property of who can call this rather than of who remembered
+    /// not to.
+    /// Unit of `bits`: none — a bitmask of capability indices.
+    const fn at_start(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Which rung, as the word `crate::routing::node::RUNG` carries.
+    ///
+    /// Computed here rather than stored, so that the only field is the machine's
+    /// own report and the ladder is read at the publish. It is the same answer
+    /// every time it is asked, because the bits it is asked about were captured
+    /// when this component started and nothing writes them again.
+    /// Unit: none — a rung ordinal, not a quantity.
+    #[must_use]
+    pub fn word(&self) -> u64 {
+        rung_word(self.0)
+    }
+}
+
 /// What this component publishes about the last frame it closed.
 ///
-/// `E3-B01k`'s five words, minus the one [`Counters`] already keeps: the frame
-/// token is a tally's business because it moves with `frames`, and the other
-/// four are here. Every field is a value this component computed or was told,
-/// and none of them is an opinion it holds about itself — which is the same
-/// property [`Counters`] has and the reason `kernel/src/compositor.rs` can check
-/// all of them against what its own script asked for.
+/// `E3-B01k`'s five words, minus the two that are not a frame's: the frame token
+/// is a tally's business because it moves with `frames`, and the rung is a
+/// [`StartingRung`] on [`Held`] because it is not about a frame at all — RFC
+/// 0119 is that move and the module comment is the argument. Every field here is
+/// a value this component computed or was told about **one frame**, and none of
+/// them is an opinion it holds about itself — which is the same property
+/// [`Counters`] has and the reason `kernel/src/compositor.rs` can check all of
+/// them against what its own script asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Story {
-    /// Which rung of RFC 0080's ladder, as [`rung_word`] spells it.
-    /// Unit: none — a rung ordinal.
-    pub rung: u64,
     /// The deadline the last closed frame carried, out of
     /// `f_abi::scene::Frame::deadline`.
     /// Unit: nanoseconds, in the channel's epoch.
     pub deadline_nanos: u64,
-    /// What was given up to fit it, as a `crate::pacing::degraded` ordinal.
-    /// Unit: none.
-    pub degraded: u64,
+    /// What was given up, one `crate::pacing::degraded` ordinal per frame, for
+    /// the last `crate::pacing::degraded::FRAMES` frames that closed.
+    ///
+    /// **A register and not the last frame's answer**, which is `E3-B07d` and
+    /// RFC 0118: a word carrying one snapshot is byte-identical between a build
+    /// that decided per frame and one that decided once, and this component's
+    /// manifest has no room for a second node. `crate::pacing::Record` carries
+    /// the whole argument.
+    pub degraded: Record,
     /// The scanout it was paced against, the estimate, the margin and the wake
     /// time the three of them make.
     pub decision: Decision,
@@ -527,6 +590,15 @@ pub struct Held<'a> {
     readability: Readability,
     /// What it publishes about the last frame it closed.
     story: Story,
+    /// Which rung of RFC 0080's ladder this component started on.
+    ///
+    /// **A field of its own rather than a member of [`Story`]**, which is
+    /// `E3-B07g` and RFC 0119: a rung is a property of the machine this
+    /// component was started on and is written once, and every field of `Story`
+    /// is a property of one frame and is written again whenever a frame closes.
+    /// Keeping the two in one struct put a value that must not move inside the
+    /// thing a degradation policy rewrites.
+    rung: StartingRung,
     /// Section 08's chain, and the trace of the frame that closed last.
     ///
     /// Owned, for [`Held::pacing`]'s reason and with the same arithmetic behind
@@ -582,11 +654,13 @@ impl<'a> Held<'a> {
             pacing: Pacing::ZERO,
             plan,
             readability: resolve_counting(theme, &mut resolves),
+            story: Story::default(),
             // The rung is decided **once**, here, and nothing below moves it.
             // RFC 0080's whole argument is that a compositor picks a rasteriser
-            // when it starts and never promotes, and the cheapest way to keep
-            // that promise is for the only assignment to be in the constructor.
-            story: Story { rung: rung_word(plan.backend_bits), ..Story::default() },
+            // when it starts and never promotes; RFC 0119 is why that promise is
+            // now a type with a private constructor rather than a comment saying
+            // the only assignment is in this line.
+            rung: StartingRung::at_start(plan.backend_bits),
             // Two timelines that have promised nothing, which admits no wait at
             // all. `crate::waits::Waits::ZERO` says why that is the right start.
             waits: Waits::ZERO,
@@ -621,6 +695,17 @@ impl<'a> Held<'a> {
     #[must_use]
     pub const fn story(&self) -> &Story {
         &self.story
+    }
+
+    /// Which rung of RFC 0080's ladder this component started on.
+    ///
+    /// Shared and never exclusive, for [`Held::graph`]'s reason with the
+    /// strongest version of it in this file: a `&mut StartingRung` handed out
+    /// here would be the second assignment RFC 0119 exists to make unspellable,
+    /// and it would be handed to whoever asked.
+    #[must_use]
+    pub const fn rung(&self) -> &StartingRung {
+        &self.rung
     }
 
     /// The theme as values, the notes resolving it produced, and how many times
@@ -786,8 +871,25 @@ impl<'a> Held<'a> {
         // rather than a negative span, and a compositor handed one is a
         // compositor that is already late.
         let remaining_nanos = deadline_nanos.saturating_sub(now.nanos());
-        self.story.degraded = degraded_word(self.story.decision.estimate_nanos, remaining_nanos);
-        let fitted = self.story.degraded == degraded::FITTED;
+        // **The estimate travels as a `Budget` and never as a number**, which is
+        // `E3-B07c`. It is taken here, from this component's own window, and
+        // asked about this component's own frame ordinal — so the staleness is
+        // zero on every frame this build closes, and the bound is what a later
+        // build hits if it ever carries a budget from one frame into another.
+        // That is the point of putting the ordinal in the value: the gap does
+        // not exist today and the day somebody introduces one it is refused
+        // rather than unnoticed. `counters.frames` has already moved for this
+        // frame, which is why it is *which frame this is* and not *how many came
+        // before*.
+        let at_frame = self.counters.frames;
+        let chosen = chose(self.pacing.budget(at_frame), at_frame, remaining_nanos);
+        // Pushed and not assigned. `E3-B07d`'s clause is *every frame carries
+        // the reduction it chose*, and a word that is overwritten every frame
+        // carries the last one — which is the same word for a build that decided
+        // once as for a build that decided sixteen times. `crate::pacing::
+        // Record` is the whole argument and RFC 0118 is the decision.
+        self.story.degraded = self.story.degraded.pushing(chosen);
+        let fitted = chosen == degraded::FITTED;
         if !fitted {
             self.counters.late += 1;
         }
@@ -880,6 +982,9 @@ mod tests {
     use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
     use f_interface::ladder::Rung;
     use f_interface::token::{Metric, Note, Rgb};
+    use f_scene::degrade::Criterion;
+
+    use crate::pacing::criterion_word;
 
     use super::*;
 
@@ -1090,8 +1195,8 @@ mod tests {
         // Everything reported is the top rung, and the word is its index plus
         // one — so a build that published the index itself says 0, which is the
         // value reserved for a machine that satisfies no rung at all.
-        assert_eq!(held.story().rung, Rung::ALL[0].index() as u64 + 1);
-        assert_eq!(held.story().rung, 1);
+        assert_eq!(held.rung().word(), Rung::ALL[0].index() as u64 + 1);
+        assert_eq!(held.rung().word(), 1);
 
         // And it does not move while frames close. RFC 0080: chosen at start,
         // never promoted, and never demoted by a frame either.
@@ -1100,7 +1205,7 @@ mod tests {
             held.offer(entry, payload, clock.next());
         }
         assert_eq!(held.counters().frames, 1);
-        assert_eq!(held.story().rung, 1, "a closed frame moved the rung");
+        assert_eq!(held.rung().word(), 1, "a closed frame moved the rung");
     }
 
     #[test]
@@ -1147,8 +1252,8 @@ mod tests {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
         let held = Held::new(&mut graph, &mut batch, hybrid_plan(), &Theme::DEFAULT);
-        assert_eq!(held.story().rung, 2);
-        assert_eq!(held.story().rung, Rung::ALL[1].index() as u64 + 1);
+        assert_eq!(held.rung().word(), 2);
+        assert_eq!(held.rung().word(), Rung::ALL[1].index() as u64 + 1);
     }
 
     #[test]
@@ -1157,7 +1262,7 @@ mod tests {
         let mut batch = Batch::new();
         let mut held = Held::new(&mut graph, &mut batch, hybrid_plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
-        assert_eq!(held.story().rung, 2);
+        assert_eq!(held.rung().word(), 2);
 
         // `scene()`'s first commit carries a deadline of 900 nanoseconds and the
         // frame costs more than it has left, so this frame is **late** and the
@@ -1169,9 +1274,9 @@ mod tests {
             held.offer(entry, payload, clock.next());
         }
         assert_eq!(held.counters().late, 1, "the frame meant to be late was not");
-        assert_eq!(held.story().degraded, degraded::SHORT);
+        assert_eq!(held.story().degraded.latest(), degraded::SHORT);
         assert_eq!(
-            held.story().rung,
+            held.rung().word(),
             2,
             "a compositor answered a late frame by changing rasterisers, which is the one \
              response guaranteed to miss the next frame too",
@@ -1186,8 +1291,76 @@ mod tests {
         let (commit, payload) = wire(Entry::Commit(Commit { frame_token: 0x13 }), 50_000_000);
         held.offer(&commit, &payload, clock.next());
         assert_eq!(held.counters().frames, 2);
-        assert_eq!(held.story().degraded, degraded::FITTED);
-        assert_eq!(held.story().rung, 2, "the rung moved when a frame fitted again");
+        assert_eq!(held.story().degraded.latest(), degraded::FITTED);
+        assert_eq!(held.rung().word(), 2, "the rung moved when a frame fitted again");
+
+        // And the register holds **both** frames, which is `E3-B07d` read off
+        // the same run: a build that decided once publishes one answer twice and
+        // cannot produce the word below. The two assertions above are each
+        // satisfied by a snapshot; this one is not.
+        assert_eq!(held.story().degraded.nth_back(1), degraded::SHORT);
+        assert_eq!(
+            held.story().degraded,
+            Record::EMPTY.pushing(degraded::SHORT).pushing(degraded::FITTED),
+            "the two frames of this run did not each leave their own answer in the register",
+        );
+    }
+
+    /// Every answer the policy can give, against every rung of the ladder.
+    ///
+    /// `E3-B07g`'s exit asks for the two mechanisms that share the word
+    /// *fallback* to be kept apart by something other than a paragraph, and this
+    /// is the reading that says so from outside the types: whatever the
+    /// degradation register comes to hold, the rung word is the one the machine
+    /// selected at start. It is a cross product and not a sample, because a
+    /// sample is what a paragraph would be — a build that demoted on one
+    /// particular ordinal would survive any one case anybody thought to write.
+    ///
+    /// The `Record` is pushed directly rather than driven through frames, which
+    /// is deliberate: driving would only reach the ordinals this build's wire can
+    /// produce — `FITTED` and `SHORT` — and the clause is about the criteria
+    /// words too, which arrive the day an effect declaration does.
+    #[test]
+    fn a_rung_is_held_across_every_answer_the_degradation_policy_can_give() {
+        let mut every = [degraded::NONE; 4 + Criterion::COUNT];
+        every[1] = degraded::FITTED;
+        every[2] = degraded::SHORT;
+        every[3] = degraded::STALE;
+        for criterion in Criterion::ORDER {
+            every[4 + criterion.priority()] = criterion_word(criterion);
+        }
+        for start in [plan(), hybrid_plan()] {
+            let expected = rung_word(start.backend_bits);
+            let mut graph = Arena::EMPTY;
+            let mut batch = Batch::new();
+            let mut held = Held::new(&mut graph, &mut batch, start, &Theme::DEFAULT);
+            assert_eq!(
+                held.rung().word(),
+                expected,
+                "a compositor that has closed no frame is not on the rung its machine \
+                 selects, so the register being empty is already moving the answer",
+            );
+            // Written into the field directly, which a child module may do and
+            // a crate outside this one may not — the point being that this is the
+            // only place in the build where the register can be set to an answer
+            // no frame produced.
+            for answer in every {
+                held.story.degraded = held.story.degraded.pushing(answer);
+                assert_eq!(
+                    held.rung().word(),
+                    expected,
+                    "the rung moved when the degradation register took the word {answer}, which \
+                     is the demotion E3-B07g forecloses",
+                );
+            }
+            // Sixteen more answers, so the register wraps and every field has
+            // held something: a build whose rung was a function of the register
+            // would have had its whole range pushed past it.
+            for at in 0..degraded::FRAMES {
+                held.story.degraded = held.story.degraded.pushing(every[at % every.len()]);
+                assert_eq!(held.rung().word(), expected);
+            }
+        }
     }
 
     #[test]
@@ -1259,7 +1432,7 @@ mod tests {
             held.offer(entry, payload, clock.next());
         }
         assert_eq!(held.story().deadline_nanos, 900);
-        assert_eq!(held.story().degraded, degraded::SHORT);
+        assert_eq!(held.story().degraded.latest(), degraded::SHORT);
         assert_eq!(held.counters().late, 1);
 
         // The second frame is given a deadline a whole scanout away, and the
@@ -1273,7 +1446,7 @@ mod tests {
         held.offer(&commit, &payload, clock.next());
         assert_eq!(held.counters().frames, 2);
         assert_eq!(held.story().deadline_nanos, 50_000_000);
-        assert_eq!(held.story().degraded, degraded::FITTED);
+        assert_eq!(held.story().degraded.latest(), degraded::FITTED);
         assert_eq!(held.counters().late, 1, "a frame inside its deadline was counted late");
     }
 

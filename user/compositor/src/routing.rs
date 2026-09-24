@@ -349,16 +349,29 @@ pub mod node {
     /// things the frame told this component.
     /// Unit: nanoseconds.
     pub const PACING: u32 = 9;
-    /// What was given up to make the last frame fit.
+    /// What was given up, one answer per frame, for the last
+    /// `crate::pacing::degraded::FRAMES` frames that closed.
     ///
     /// A choice from `f_scene::degrade::Criterion::ORDER`, offset by
-    /// `crate::pacing::degraded::FIRST_CRITERION`, with two values below it for
-    /// the two answers that are not a criterion. **Not a boolean**, and
-    /// `crate::pacing::degraded` argues why at length: `E3-B07b`'s whole
-    /// decision is *which* effect goes first, and a node that said only
-    /// *something was degraded* would be publishing the existence of a policy
-    /// rather than its choice.
-    /// Unit: none — a `crate::pacing::degraded` ordinal.
+    /// `crate::pacing::degraded::FIRST_CRITERION`, with three values below it for
+    /// the answers that are not a criterion and `NONE` below those for a frame
+    /// that never happened. **Not a boolean**, and `crate::pacing::degraded`
+    /// argues why at length: `E3-B07b`'s whole decision is *which* effect goes
+    /// first, and a node that said only *something was degraded* would be
+    /// publishing the existence of a policy rather than its choice.
+    ///
+    /// **And not a snapshot either, which is `E3-B07d` and RFC 0118.** This node
+    /// carried the last frame's answer until 2026-09-24, and that word was
+    /// byte-identical between a compositor that decided per frame and one that
+    /// decided once at start — so the clause *every frame carries the reduction
+    /// it chose* could not be read off it at all. It is now a register: sixteen
+    /// fields of four bits, newest first, packed by `crate::pacing::Record`. The
+    /// alternative was a second node, and this manifest has none to give —
+    /// `f_abi::manifest::STATE_NODES_MAX` is sixteen and this component declares
+    /// sixteen — so the choice was between widening a wire bound every component
+    /// in this system pays for and making the word that already exists carry what
+    /// the line needs. RFC 0118 prices both.
+    /// Unit: none — sixteen packed `crate::pacing::degraded` ordinals.
     pub const DEGRADED: u32 = 10;
 
     // --- the resolved theme, `E3-B06d` --------------------------------------
@@ -580,8 +593,14 @@ pub mod reported {
     /// evidence behind it.
     /// Unit: samples.
     pub const SAMPLES: u32 = super::REPORT + 128;
-    /// What was given up to fit the last frame, as a
-    /// `crate::pacing::degraded` ordinal. Unit: none.
+    /// What was given up, one `crate::pacing::degraded` ordinal per frame, for
+    /// the last `crate::pacing::degraded::FRAMES` frames.
+    ///
+    /// The same register `super::node::DEGRADED` carries, which is where it is
+    /// argued. On the board as well as in the tree for `PUBLISHED`'s reason: the
+    /// frame requires the two to agree, and a component with two sets of
+    /// counters is what that comparison exists to catch.
+    /// Unit: none — sixteen packed ordinals.
     pub const DEGRADED: u32 = super::REPORT + 136;
     /// Which rung this compositor is holding, as `Rung::index()` plus one, or
     /// zero for a machine that satisfies none. Unit: none.

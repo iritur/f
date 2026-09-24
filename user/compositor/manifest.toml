@@ -429,7 +429,7 @@ name   = "pacing"
 kind   = "gauge"
 unit   = "nanoseconds"
 
-# What was given up to make the last frame fit.
+# What was given up, one answer per frame, for the last sixteen frames.
 #
 # **A choice from `E3-B07b`'s order and not a boolean**, which is the whole of
 # why this node is worth having. `scene/src/degrade.rs` opens by refusing an
@@ -437,17 +437,32 @@ unit   = "nanoseconds"
 # decision anybody made; a node that said only *something was degraded* would
 # repeat that mistake one layer up, publishing the existence of a policy rather
 # than its choice. The word is a `Criterion::priority()` offset by
-# `pacing::degraded::FIRST_CRITERION`, with two values below it for the two
-# answers that are not a criterion: the frame fitted, and the policy was asked
-# and had nothing left to give.
+# `pacing::degraded::FIRST_CRITERION`, with three values below it for the answers
+# that are not a criterion — the frame fitted, the policy was asked and had
+# nothing left to give, and there was no estimate worth asking it about — and
+# `NONE` below those for a frame that never happened.
 #
-# Today every over-budget frame answers the second of those, and the reason is a
-# wire format rather than a defect: `abi/src/scene.rs` has six opcodes and none
-# of them declares an effect, so the policy runs over an empty slice. That is
-# written down in `pacing::degraded::SHORT` with what would reverse it, and it is
-# why this node is declared now rather than when the criteria start being
-# reached — the id is permanent, and a reader comparing this component across
-# that change wants the same id on both sides of it.
+# **And sixteen of them and not one, which is `E3-B07d` and RFC 0118.** Until
+# 2026-09-24 this node carried the last frame's answer, and that word was
+# byte-identical between a compositor that decided per frame and one that decided
+# once at start — so *every frame carries the reduction it chose* was not a
+# sentence a reader of this tree could check. It is a register now: sixteen
+# fields of four bits, newest first. The honest alternative was a seventeenth
+# node, and **this manifest has none to give** — sixteen rows against
+# `abi::manifest::STATE_NODES_MAX` of sixteen — so the choice was between widening
+# a wire bound every component in this system pays for and making the word that
+# already exists carry what the line needs. RFC 0118 prices both and takes the
+# second, and the cost it names is stated rather than hidden: history older than
+# sixteen frames is gone, and a reader who wants a run-long record is reading
+# `late` on the board beside this.
+#
+# Today every over-budget frame answers `SHORT`, and the reason is a wire format
+# rather than a defect: `abi/src/scene.rs` has six opcodes and none of them
+# declares an effect, so the policy runs over an empty slice. That is written down
+# in `pacing::degraded::SHORT` with what would reverse it, and it is why this node
+# is declared now rather than when the criteria start being reached — the id is
+# permanent, and a reader comparing this component across that change wants the
+# same id on both sides of it.
 [[state]]
 id     = 10
 parent = "compositor"

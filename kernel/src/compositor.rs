@@ -73,19 +73,35 @@
 //!
 //! *An overloaded compositor holds its rung* is the serve half, and it is a
 //! conjunction of clauses rather than one: the second frame is submitted a
-//! nanosecond before its deadline, so `late` is one of two and `degraded` is
-//! `SHORT` — that is the overload — and in the same run the frame writes a
-//! **better** report onto the routing page once the first frame has closed, so
-//! the rung had somewhere to go. A component that recomputed its rung from that
-//! word would publish [`PROMOTED_RUNG`] and go red. The negative has a run
-//! behind it, which is the only form in which a negative is worth asserting.
+//! nanosecond before its deadline, so `late` is one of two, the estimate is
+//! more than [`OVERLOAD_TIMES`] the room that frame had — that is the overload,
+//! and it is a property of the script rather than of the host this ran on — and
+//! the degradation register is [`SERVE_REGISTER`]. In the same run the frame
+//! writes a **better** report onto the routing page once the first frame has
+//! closed, so the rung had somewhere to go. A component that recomputed its rung
+//! from that word would publish [`PROMOTED_RUNG`] and go red. The negative has a
+//! run behind it, which is the only form in which a negative is worth asserting.
+//!
+//! *Every frame carries the reduction it chose* is `E3-B07d`, and it is read off
+//! the same two halves rather than out of a new one. The word the component
+//! publishes is a **register** — one field per frame, newest first — so the serve
+//! half requires fitted-then-short and the waking half, which closes three
+//! frames with the short one in the middle, requires them to alternate. Before
+//! RFC 0118 that node carried the last frame answer alone, and a build deciding
+//! its degradation once published a word byte-identical to a build deciding per
+//! frame; what caught it then was `late` being one of two, which is a count and
+//! not a record. Both are kept: the count says how many, the register says
+//! which.
 
 use f_abi::manifest::Record;
 use f_abi::scene::{
     Commit, CreateNode, Delta, Entry, NO_NODE, PAYLOAD_BYTES, RemoveNode, SetPaint, kind,
 };
 use f_abi::{ABI_VERSION, Cqe, control, error, feature, state};
-use f_compositor::pacing::degraded;
+// `f_compositor::pacing::Record` under another name, because `f_abi::manifest::
+// Record` is already in scope above and the two are unrelated. The alias is the
+// noun this file uses about it anyway: what the component chose, per frame.
+use f_compositor::pacing::{Record as Chosen, degraded};
 use f_compositor::routing::{self, at, bell, life, node, reported, stopped};
 use f_compositor::tree::reported_capabilities;
 use f_env::{Env, SeededEnv};
@@ -162,6 +178,47 @@ const FRAME_ONE_SLACK_NANOS: u64 = SCANOUT_PERIOD_NANOS;
 /// the same word as one that decided per frame; what separates them is
 /// `Board::late`, which this script requires to be one out of two.
 const FRAME_TWO_SLACK_NANOS: u64 = 1;
+
+/// How far past its remaining budget this script drives the frame it overloads.
+///
+/// `E3-B07d`'s exit says *under 2x overload*, and on this boot that is a
+/// property of the **script** rather than a measurement on a named machine:
+/// [`FRAME_TWO_SLACK_NANOS`] is one nanosecond and every step of this boot's
+/// seeded clock is at least one, so the estimate the component publishes is
+/// thousands of times the room its second frame had. This constant is the floor
+/// the verdict checks against, not the ratio the script achieves — what it
+/// forbids is a later script softening the slack until the word *overload* stops
+/// being true, which would leave every clause below green over a run that was
+/// never overloaded. A claim gating on a frame *rate* is `E3-B07` and `E3-B07f`,
+/// which need runner-class-A hardware; nothing here borrows their sentence.
+/// Unit: none — a multiple of the remaining budget.
+const OVERLOAD_TIMES: u64 = 2;
+
+/// The degradation register the serving half's two frames must leave behind.
+///
+/// **The whole of `E3-B07d` on this half.** The first frame has a whole scanout
+/// period of room and the second has a nanosecond, so the two answers differ —
+/// and a register is the only published shape in which *they differed* is
+/// visible at all. A component that decided its degradation once and repeated it
+/// publishes `FITTED, FITTED` or `SHORT, SHORT`, both of which are a word this
+/// constant is not; the snapshot this node used to carry was **byte-identical**
+/// between those builds and the one that decides per frame, which is the
+/// mutation that made RFC 0118 worth its diff.
+///
+/// Oldest pushed first, which is the order the frames closed in.
+const SERVE_REGISTER: Chosen = Chosen::EMPTY.pushing(degraded::FITTED).pushing(degraded::SHORT);
+
+/// And the register the waking half must leave behind.
+///
+/// [`SERVE_REGISTER`] with the batched third frame on the end, which has a whole
+/// scanout period of room and therefore fits. **Fitted, short, fitted**, and the
+/// alternation is what this half is worth: a compositor that latched its worst
+/// answer — degraded once, degraded for ever — passes the serving half two-frame
+/// clause and cannot produce this word. Derived from the serving half constant
+/// rather than written out, because the two halves send the same script and a
+/// register that disagreed about its first two frames would be a boot checking
+/// two different runs.
+const WAKE_REGISTER: Chosen = SERVE_REGISTER.pushing(degraded::FITTED);
 
 /// The seed this boot's clock and its frame costs are drawn from.
 ///
@@ -1238,7 +1295,8 @@ impl Report {
         // And the last frame's own state, against the last frame's own word. The
         // trace is one frame's, so the outstanding count is about the frame the
         // degradation word describes and the two have to say the same thing.
-        if (self.board.waits != 0) != (self.board.degraded != degraded::FITTED) {
+        if (self.board.waits != 0) != (Chosen::of(self.board.degraded).latest() != degraded::FITTED)
+        {
             return Err(
                 "the last frame has a wait outstanding and the component says it fitted, or it \
                  fitted and something is still waiting on it — one of the two words is about a \
@@ -1437,6 +1495,30 @@ impl Report {
                  has a nanosecond of room and the other two have a whole scanout period each, \
                  so a component answering the same way for all three is not reading the \
                  deadline",
+            );
+        }
+        // --- `E3-B07d`, on the half that closes three frames -----------------
+        //
+        // **This is the reading the serving half cannot give.** Three frames,
+        // and the one with no room is the *middle* one, so the register
+        // alternates: fitted, short, fitted. Two builds survive the serving
+        // half two-frame version of this clause and die here — one that decides
+        // once, which leaves one answer three times, and one that *latches* its
+        // worst answer, which is the shape a reader would write if they thought
+        // a degradation was a mode rather than a per-frame choice. Neither can
+        // produce a word whose middle field differs from both its neighbours.
+        //
+        // Out of the **tree** and not the board, which is `E3-B07d` exit
+        // sentence: *read out of the component subtree rather than the serial
+        // log*. The equality above already requires the two to agree, so reading
+        // the tree here costs nothing and says what the exit asks for.
+        if Chosen::of(self.tree[8]) != WAKE_REGISTER {
+            return Err(
+                "the degradation register on this half is not fitted, short, fitted: three \
+                 frames closed, the middle one had a nanosecond of room and the other two had \
+                 a whole scanout period each, so a compositor choosing per frame leaves an \
+                 alternating register. A build that decided once leaves one answer three \
+                 times, and one that latched its worst answer never comes back up",
             );
         }
         self.crossings_and_chain_held()
@@ -1695,10 +1777,52 @@ impl Report {
                  that answers the same way for both is not reading the deadline",
             );
         }
-        if self.board.degraded != degraded::SHORT {
+        // --- `E3-B07d`: the choice, per frame, and the load it was made under
+        //
+        // The load first, because a per-frame record of a run that was never
+        // overloaded is evidence of nothing. The estimate is what the component
+        // measured and the slack is what this script left, so their ratio is the
+        // overload — a script rather than a wall clock, which is what makes this
+        // clause reproducible from `PACING_SEED` alone.
+        if self.board.estimate < FRAME_TWO_SLACK_NANOS.saturating_mul(OVERLOAD_TIMES) {
+            return Err("the frame this script meant to overload was not overloaded: what the \
+                 component estimates a frame costs here is less than twice the room the second \
+                 commit left it, so every clause below is about a compositor that was \
+                 comfortable");
+        }
+        let register = Chosen::of(self.board.degraded);
+        if register != SERVE_REGISTER {
+            return Err(
+                "the degradation register does not carry one answer per frame: the first frame \
+                 had a whole scanout period of room and the second a single nanosecond, so a \
+                 component deciding per frame leaves two different answers in it. A build that \
+                 decided once leaves one answer twice — and before this register existed, such \
+                 a build published a word byte-identical to the right one",
+            );
+        }
+        if register.latest() != degraded::SHORT {
             return Err("the last frame was submitted a nanosecond before its deadline and the \
                  component did not answer that it was short: nothing on this wire can declare \
                  an effect, so there is nothing for the policy to give back");
+        }
+        // And the frame *before* it, which is the half a snapshot cannot carry.
+        if register.nth_back(1) != degraded::FITTED {
+            return Err(
+                "the frame before the last one is not recorded as having fitted, though it was \
+                 given a whole scanout period of room — so the register is holding one answer \
+                 for every frame rather than each frame its own",
+            );
+        }
+        // Nothing before those two, because nothing before those two closed. A
+        // field carrying an answer there would be a component reporting a frame
+        // this client never sent, which is what `degraded::NONE` exists to make
+        // legible: zero is the absence of a frame and not a frame that fitted.
+        if register.nth_back(2) != degraded::NONE {
+            return Err(
+                "the degradation register carries an answer for a frame that never closed: \
+                 this run closed two, and every older field of the register should say that \
+                 nothing was recorded there",
+            );
         }
         if self.board.deadline != self.submitted_deadline {
             return Err(
@@ -1775,7 +1899,7 @@ impl Report {
             || self.tree[5] != FRAME_TWO
             || self.tree[6] != self.submitted_deadline
             || self.tree[7] != self.board.estimate
-            || self.tree[8] != degraded::SHORT
+            || Chosen::of(self.tree[8]) != SERVE_REGISTER
         {
             return Err(
                 "the five words E3-B01k publishes are not in the component's subtree: a reader \
@@ -2010,12 +2134,25 @@ pub fn report_lines(report: &Report) {
             );
             crate::kprintln!(
                 "  compositor    state tree rung {}, frame {}, deadline {} ns, pacing {} ns, \
-                 degraded {}",
+                 degraded 0x{:x}",
                 report.tree[4],
                 report.tree[5],
                 report.tree[6],
                 report.tree[7],
                 report.tree[8],
+            );
+            // The register, newest frame first, one field per frame that closed.
+            // Printed beside the packed word rather than instead of it: the word
+            // is what the tree carries and what a mutation moves, and the fields
+            // are what a reader of this log is actually asking about — *did this
+            // compositor decide once, or once per frame*.
+            let register = Chosen::of(report.tree[8]);
+            crate::kprintln!(
+                "  compositor    degraded per frame, newest first: {} {} {} {}",
+                register.nth_back(0),
+                register.nth_back(1),
+                register.nth_back(2),
+                register.nth_back(3),
             );
             crate::kprintln!(
                 "  compositor    state tree resolves {}, notes {}, rules owed {}; the report \

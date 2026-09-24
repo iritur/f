@@ -478,8 +478,15 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::DROPPED, u64::from(readability.report().dropped()));
         let _ = board.write64(reported::CLEAN, u64::from(readability.report().is_clean()));
         let _ = board.write64(reported::RULES, readability.rules_owed());
-        let _ = board.write64(reported::DEGRADED, story.degraded);
-        let _ = board.write64(reported::RUNG, story.rung);
+        // The degradation register, `E3-B07d`: one field per frame for the last
+        // `crate::pacing::degraded::FRAMES` frames, and not the last frame's
+        // answer. `crate::pacing::Record` argues why a snapshot cannot be
+        // evidence of a per-frame decision, and RFC 0118 is the entry.
+        let _ = board.write64(reported::DEGRADED, story.degraded.word());
+        // The rung comes off `Held` and not off the story, which is RFC 0119: a
+        // value written once when this component started does not belong in the
+        // struct a degradation policy rewrites every frame.
+        let _ = board.write64(reported::RUNG, held.rung().word());
         let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
         // The boundary crossings, `E3-B01j`. Three words where one would do, for
         // `reported::WAKE`'s reason: the exit's sentence is an addition and a
@@ -568,11 +575,11 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
         (node::EDITS, counters.edits),
         (node::NODES, held.live()),
         (node::REFUSED, counters.refused),
-        (node::RUNG, story.rung),
+        (node::RUNG, held.rung().word()),
         (node::FRAME, counters.token),
         (node::DEADLINE, story.deadline_nanos),
         (node::PACING, story.decision.estimate_nanos),
-        (node::DEGRADED, story.degraded),
+        (node::DEGRADED, story.degraded.word()),
         // The resolved theme, `E3-B06d`. `len()` is a `usize` in a crate that
         // compiles for two architectures, so the widening is written rather than
         // inferred; on neither of them can a count bounded by

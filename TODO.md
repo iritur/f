@@ -1353,6 +1353,33 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the eleventh wave, 2026-09-24.** Fifty-one `[x]`, one `[>]`, forty-three
+`[ ]` of ninety-five. **The wave opened on a defect rather than a task.** The
+nightly's rollback job had been red since the merge of 2026-09-23, printing *no
+module this machine was offered folds to the root it was asked for* — and the
+subsystem that sentence names was the one behaving. `MAX_RESERVED` was one short,
+the reservation list stopped at its bound **and said nothing**, so a module
+nobody reserved was handed out by the frame allocator and the page-table builder
+got its first page. The repair had already landed on a branch the day before the
+run went red, so the schedule reported, a day late, a defect nobody could connect
+to its fix. Two things changed: a reservation that does not fit now ends the boot
+by name, and `cargo xtask lint-bounds` evaluates the four boot-path relations that
+were resting on comments — four file reads, inside `verify`, which is the check
+RFC 0101 named in *What would reverse this* and declined to write.
+`docs/postmortem/0003` and RFC 0116.
+
+**Then three lines of the interface closed and the fourth follows from them.**
+`E3-B06f` holds the equality the whole semantic layer is built to be abandoned
+under: one scene fed both ways produces **byte-identical** graphs, on a whole
+frame and on a frame that is a difference. `E3-B07c` makes the age of a pacing
+estimate a property of its type rather than an assumption, with the staleness
+bound derived from the window's own depth assertion. `E3-B07d` turns the
+degradation word into a **register** of sixteen frames instead of widening a wire
+bound every component pays for, because a word holding one snapshot is
+byte-identical between a compositor that decides per frame and one that decided
+once at start. And `E3-B07g` moves the rung out of the struct a degradation policy
+rewrites, which reverses a paragraph `tree.rs` had already written against itself.
+
 **After the tenth wave, 2026-09-24.** Forty-seven `[x]`, one `[>]`, forty-seven
 `[ ]` of ninety-five — the denominator moved by one for `E3-B03e0`, which RFC
 0114 named and the decomposition did not contain. **The compositor's frame is now
@@ -1925,11 +1952,17 @@ thing it will measure would be blocking a ruler on a wall.
   **Met, and the test does not restate the order it is checking.** `scene/src/degrade.rs` reads `Criterion::ORDER` back through `sense()` and asserts, for every adjacent pair, that every criterion above the deciding one read equal and the deciding one ran the way its own line says — then asserts that **every row decided at least one pair**, so a criterion that orders nothing goes red rather than sitting in the table. The one-seed-one-sequence half pins a digest literal that both architecture jobs assert, which is the cross-architecture check without a second run to compare against.
   *exit:* **met.** the order is a table a test reads rather than the order branches happen to be written in; one overload from one seed produces the same downgrades in the same sequence on both architectures.
   *needs:* E3-B07a
-- [ ] **E3-B07c** `M` The running estimate against the remaining budget.
-  *exit:* integers with their scale in their names, taken from the compositor's own rolling p99 through `Env` and from no other clock; the estimate's staleness is bounded by a stated number of frames rather than assumed fresh.
+- [x] **E3-B07c** `M` The running estimate against the remaining budget.
+  **Met on 2026-09-24, and the estimate's age is carried by the type rather than assumed.** `pacing::Budget` holds the estimate and the frame ordinal it was taken at, its fields are private and `Pacing::budget` is its only constructor — so a figure whose age nobody checked is not a value this build can spell, which is the exit's *from no other clock* made structural instead of promised. `Budget::against` answers three states and not two: it fits, it is over by this much, and **I have no evidence**, because those are different facts and a build that has only the first two must call the third one of them.
+  **The bound is derived and not chosen.** The p99 is decided by the top `depth(held)` samples, `pacing`'s own `const` block already held `depth <= 2`, and one closed frame inserts one sample — so `STALE_AFTER_FRAMES` is `DEPTH_MAX - 1` as an expression, and it moves on its own the day `WINDOW` passes two hundred. Past it the frame degrades to the floor under a word of its own, `degraded::STALE`, and the direction is argued where the variant is: assuming a stale estimate fits wakes the application against a number nobody measured and the picture is gone before anyone can act, with nothing in the record saying the estimate was why; assuming it does not costs picture on a frame that might have been fine, which is visible and lands in that frame's own field of the register. `STALE` is deliberately not `SHORT` — one is a statement about the scene and the other about the compositor.
+  **The honest half is that nothing in this build produces a stale budget.** `close` takes the budget at the frame it asks about, so staleness is zero on every frame and `degraded::STALE` is unreachable at run time today; the bound is reached by a host test and by no boot. What the work buys is that the gap cannot be introduced later without being refused, which is what *rather than assumed fresh* is for — and the call site says so rather than leaving a reader to find out.
+  *exit:* **met.** integers with their scale in their names, taken from the compositor's own rolling p99 and from no other clock — structurally, because no other value can occupy that position — with the staleness bound stated, derived from the window's own depth assertion, and reached by a test.
   *needs:* E3-B07b, E3-B01h
-- [ ] **E3-B07d** `M` The choice recorded per frame in the component's own tree — moved here from the parent's exit, because it is a boot and the parent's half is a measurement.
-  *exit:* under 2x overload every frame carries the reduction it chose, read out of the component's subtree rather than the serial log; `E1-B15` closed, so the tree this is written into already exists.
+- [x] **E3-B07d** `M` The choice recorded per frame in the component's own tree — moved here from the parent's exit, because it is a boot and the parent's half is a measurement.
+  **Met on 2026-09-24, and `STATE_NODES_MAX` was not widened — RFC 0118 prices what widening it would have cost.** The `degraded` node became a **register**: sixteen four-bit fields in the word it already had, newest frame in the low field. The reason this line needed one is the mutation it was warned about — a word holding one snapshot is **byte-identical** between a compositor that decides per frame and one that decides once at start, and the only thing that reddened that before was a count of late frames, which says how many rather than which.
+  **Zero is now `NONE` and not `FITTED`**, because a register's unreached fields have to mean something and *a frame that fitted* is the worst thing they could mean — it also makes a board a component never wrote read as *nothing was said*, which is what a page of zeroes is actually telling you. The serving half reads `degraded 0x12` out of the subtree over two frames; the waking half, which closes three with the late one in the middle, reads `0x121`. **The third frame is what earns the alternation:** a build that latched its worst answer passed the serving half outright and died on the waking one.
+  ***Under 2x overload* is a script property and is checked as one.** `OVERLOAD_TIMES` is a floor the verdict tests before it believes the record — this script clears it by about eight thousand times — so a later script softening the slack cannot leave every clause below it green over a run that was never overloaded. No wall clock and no named machine, and no sentence borrowed from `E3-B07` or `E3-B07f`, which need `runner-class-A` and are in the register.
+  *exit:* **met.** under 2x overload every frame carries the reduction it chose, read out of the component's subtree rather than the serial log — `0x12` over two frames and `0x121` over three, with the tree and the board required to agree separately so that reading the tree costs nothing.
   *needs:* E3-B07c, E1-B15
 - [ ] **E3-B07e** `M` The compositor is the lowest-ranked deadline task on the machine and its submissions are bandwidth-capped.
   *exit:* an explicit cap, declared in the manifest and enforced rather than advisory, and a frame that tries to exceed it and is stopped.
@@ -1937,8 +1970,10 @@ thing it will measure would be blocking a ruler on a wall.
 - [ ] **E3-B07f** `M` Section 10's measurable form: a deadline workload's p99.9 must not move.
   *exit:* published either way, with the workload named and its baseline distribution established before the compositor is overloaded; a move says the isolation is decorative and is reported as that rather than re-scoped.
   *needs:* E3-B07e, E0-D10, E0-P18
-- [ ] **E3-B07g** `S` A missed frame never changes the rung.
-  *exit:* an overloaded compositor degrades effects and holds the rung it started at, asserted in a test — the two mechanisms that share the word *fallback*, kept apart by something other than a paragraph.
+- [x] **E3-B07g** `S` A missed frame never changes the rung.
+  **Met on 2026-09-24 by moving the rung out of the struct a degradation policy rewrites, which reverses a paragraph this tree already carried.** `tree.rs` said *a type that made the second assignment impossible would be better and is not written here*; it is written now, and **RFC 0119** quotes the old sentence rather than deleting it. `Story` — the struct every closing frame rewrites — has no rung field; `StartingRung` has a private constructor and no arithmetic, no ordering and no index, so *fall back one rung* has no spelling; and `pacing::chose` takes a budget, a frame ordinal and a duration, not one of which can name a rung.
+  **Kept apart by something other than a paragraph, in three layers**, which is the clause's own demand: the type, an **exhaustive cross product** of every rung of the ladder against every ordinal the policy can produce — because a sample is what a paragraph would be — and the boot's existing promotion clause. What is **not** claimed is that the type stops everybody: Rust privacy is module-wide, so `tree.rs` can still assign the field and the test does exactly that to drive the cross product. What it buys is that the degradation path cannot, and that no other crate can at all. RFC 0119 says that in as many words rather than overselling the type.
+  *exit:* **met.** an overloaded compositor degrades effects and holds the rung it started at, asserted over a cross product rather than a sample, and held at boot.
   *needs:* E3-B07d, E3-B02b
 - [x] **E3-B07h** `M` The wire carries an effect's declaration.
   **Filed on 2026-09-21 out of `E3-B07a`'s fourth adversarial round, and the finding was that the exit stated a condition nobody owned.** RFC 0084 narrowed `E3-B07a` on two measurements and named a seventh opcode as the reversal; `grep -rn SET_EFFECT` returned three hits, all of them the sentence itself, and `E3-B07`'s `needs:` named none of it. A reversal condition charged to no line is a sentence that reads like a plan and is not one.
