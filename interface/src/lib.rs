@@ -33,6 +33,12 @@
 //! - [`token`] — the typed token layer and what a theme cannot break. `E3-D03`, RFC 0079.
 //! - [`ladder`] — the renderer fallback ladder. `E3-D04`, RFC 0080.
 //!
+//! # The declaration the projections are pointed at
+//!
+//! - [`example`] — the settings panel, shipped rather than kept in a test, so
+//!   that *one unmodified application* is a property of the call a projection
+//!   makes and not a claim in a report. `E3-B06g`, `E3-B06h`.
+//!
 //! # The stages between a declaration and a scene
 //!
 //! - [`solve`] — layout from constraints, with the work bounded by the change
@@ -53,6 +59,7 @@
 pub mod agent;
 pub mod backend;
 pub mod canvas;
+pub mod example;
 pub mod ladder;
 pub mod node;
 pub mod reader;

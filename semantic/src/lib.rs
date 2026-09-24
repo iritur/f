@@ -96,11 +96,22 @@
 //! one**, so that this layer can be measured and abandoned without the renderer
 //! going with it. `E3-B06f`, RFC 0117.
 
+//! # The fourth, and it is the same join across a machine boundary
+//!
+//! [`remote`] — the declaration on a link, and the far side presenting it at its
+//! own density and its own refresh rate. It is the third crate-shaped argument
+//! made a fourth time: the wire is `abi`'s, the meaning is `interface`'s, the
+//! graph is `scene`'s, and a remote needs all three at once. What it adds is the
+//! answer to *what does a receiver do with what the format does not carry* —
+//! there is no layout entry, so the far side's arrangement is the far side's,
+//! and RFC 0121 is where that is argued rather than assumed. `E3-B06h`.
+
 #![no_std]
 
 pub mod agent;
 pub mod emit;
 pub mod registry;
+pub mod remote;
 pub mod tree;
 pub mod vocabulary;
 

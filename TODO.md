@@ -1353,6 +1353,37 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the twelfth wave, 2026-09-24.** Fifty-two `[x]`, three `[>]`, forty
+`[ ]` of ninety-five. **The remote projection closed** and the clause it turns on
+is *one unmodified application*: the settings panel is promoted out of a test
+module and asserted equal to itself after being presented at two densities and
+two refresh rates, with no remote-only stage anywhere — the far side declares,
+solves and emits through the same three functions, because the first thing two
+layout engines do is disagree. The bytes are counted against what pixels would
+have cost and the comparison's own upper-bound nature is published with it, and
+**no claim row was taken**, because arithmetic over constants has no baseline, no
+workload and no machine.
+
+**Two lines went `[>]` rather than `[x]`, on a blocker that is policy and not
+effort.** The late latch and the prediction it consumes are both met at host
+level, against the real frame trace and the real chain sequence — *by exactly the
+motion injected* is two equalities, and *and by nothing else* is bytes. What no
+boot here can do is give the component a **stamped** position: the only route is
+the frame, the frame may not hold a clock reading, and naming one in `kernel/`
+needs a row the tree's one `rdtsc` turns red. The boot therefore requires *0
+report(s) taken, 0 frame(s) latched, 1 declined* and is written to go red the day
+that route exists. That boot also found a defect no test had: a routing page
+nobody had written read as a report of the origin at the beginning of time.
+
+**And the standing item that had been failing quietly is answered.** `A-06` asks
+that a schedule stay green or stay **loud**, and two post-mortems say the loud
+half did not exist. Every scheduled workflow now opens one issue when it goes red
+and closes it when it goes green, the body carries the *the repair may already
+exist* range that postmortem 0003 is about, and `cargo xtask lint-schedules`
+refuses a scheduled job nothing is listening to. The reading also found that the
+one notification this tree already had could never have run: naming `permissions:`
+on that step had dropped the scope that pulls its container.
+
 **After the eleventh wave, 2026-09-24.** Fifty-one `[x]`, one `[>]`, forty-three
 `[ ]` of ninety-five. **The wave opened on a defect rather than a task.** The
 nightly's rollback job had been red since the merge of 2026-09-23, printing *no
@@ -1915,8 +1946,13 @@ thing it will measure would be blocking a ruler on a wall.
 - [ ] **E3-B06g** `M` The display projection, end to end.
   *exit:* the settings-panel tree `interface/src/node.rs` already builds reaches pixels with no application code beyond its declaration, and this projection matches `Role` exhaustively with no wildcard arm — a role it has nothing to draw is a named refusal rather than a silent skip.
   *needs:* E3-B06f, E3-B02e
-- [ ] **E3-B06h** `M` The remote projection: the tree at the far side's density and refresh rate, not an encoded pixel stream.
-  *exit:* one declaration presented at two densities and two refresh rates from one unmodified application; the bytes crossing the link are counted and compared against what the same frame would have cost as pixels; and the far side's `Role` match is exhaustive with no wildcard arm, which is what stops a role the remote cannot present from crossing as nothing.
+- [x] **E3-B06h** `M` The remote projection: the tree at the far side's density and refresh rate, not an encoded pixel stream.
+  **Met on 2026-09-24, and the application is unmodified in the one way that can be checked rather than claimed.** `semantic/src/remote.rs` sends a declaration as `f_abi::semantic` entries — a handshake, one `DeclareNode` per node, one `SetState` per node that stands somehow, one `Commit` — and the far side turns what landed back into vocabulary nodes and presents them. The application is `f_interface::example::settings_panel()`, promoted out of a test module unchanged, and the test asserts it is still equal to itself after both presentations: a copy would have been a second application, which is the failure the clause is written against. **There is no remote-only stage** — the far side declares, solves and emits through the same three functions, because the first thing two layout engines do is disagree.
+  **Two densities and two refresh rates, and the test separates what each one reaches.** The theme's density reaches the **solve**: the panel's fifteen offsets are one table at ×1.000 and a different one at ×2.000, both derived by hand from the theme before the first run. The panel's pixels per point reach the **transform only**, and the assertion that shows it is a third panel identical to the desk but twice as sharp re-declaring the same demands and the solver reporting **nothing to do** — which it could only report if sharpness had reached none of the layout. A further assertion says the two panels do not differ by a scale factor, which is what a density folded in at the end would have produced. Refresh rate reaches pacing and nothing else: from **identical bytes on the link**, 60 Hz shows three of six arrivals and folds three, 30 Hz shows two and folds four, and a folded frame is applied to the tree rather than dropped.
+  **The bytes are counted and published unflattered.** Twenty-four entries at 120 bytes is 2 880, counted at the encoder and cross-checked by an independent tally in the sink, against 1 422x for a 1 280x800 desk frame, 3 510x for a handset, and 85 333x for one still second at 60 Hz. The honest half is in the module, the RFC and the claim register's absence: the pixel figure is an **upper bound**, a raw framebuffer copy, so the defensible sentence is *three orders of magnitude smaller than the raw framebuffer and an unmeasured amount smaller than a compressed one*. **No `claims/` row was taken**, and RFC 0121 argues why rather than leaving it implicit: these numbers have no baseline, no workload and no machine — they are arithmetic over constants a unit test holds exactly, which `CLAUDE.md`'s own scar puts in `verify` as a file read rather than in a registry as a measurement.
+  **The exhaustive match is twenty-two arms and two named refusals.** A canvas is drawn by application code on the application's machine and no opcode carries it; an image's content is a capability in the *declaring* peer's table. Each refusal names the node, the role and the reason and fails the whole frame, because a placeholder would be a frame whose sender believes it contains a canvas. Replacing twenty-one arms with a wildcard moves a census the test holds — `(1, 0, 21, 0, 0)` against `(6, 4, 10, 1, 1)` — which is the half the compiler cannot hold.
+  **What the link does not carry is argued rather than assumed, and it is the largest thing here.** No constraints cross, so the far side's layout is not the author's; `abi/src/semantic.rs` had already named that gap from the other side. Style does not cross — the state does, and a rule turning a state into a paint would be a second place a colour is chosen. Content does not cross. RFC 0121. **Two findings worth a reader's time:** the settings panel is twenty-three staged entries against a frame maximum of twenty-four, so a sixteenth node does not fit and a sender that split it owes an answer about what the receiver presents in between; and a `Layout` is about three quarters of a megabyte, so two in one test frame overflow a thread's stack — found by overflowing one.
+  *exit:* **met.** one declaration presented at two densities and two refresh rates from one unmodified application, the bytes counted against what pixels would have cost with the comparison's own upper-bound nature stated, and the far side's `Role` match exhaustive with two named refusals.
   *needs:* E3-B06f
 - [x] **E3-B06i** `M` The screen-reader projection: `canvas.rs`'s `linearise` generalised from one arrangement to a whole tree.
   **Met on 2026-09-23, and RFC 0104 is the decision it forced.** Twenty-two roles, twenty-two phrases, one exhaustive `match` with no wildcard — so a twenty-third role is `error[E0004]` here as well as in the vocabulary. The exit says *rather than a table a new variant can silently miss* and it means it: a `[&str; Role::COUNT]` indexed by `Role::index` compiles fine against a twenty-third role and yields the wrong phrase, which is RFC 0077's closed vocabulary closed for nothing.
