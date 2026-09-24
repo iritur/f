@@ -1,5 +1,6 @@
 # RFC 0122: A red schedule is loud in this repository, and whether anybody looks is not a question about the report
 
+- Filed under a shortened slug on 2026-09-24. The file was `0122-a-red-schedule-is-loud-in-this-repository-and-whether-anybody-looks-is-not-a-question-about-the-report.md`, which is over ustar's 100-byte name field, so `cargo xtask release` could not pack the tree and two CI jobs refused it. The title is unchanged; the slug is not a summary and the number is what anything cites
 - Status: accepted
 - Date: 2026-09-24
 - Affects: `.github/workflows/nightly.yml`, `weekly.yml`, `maintain.yml`,

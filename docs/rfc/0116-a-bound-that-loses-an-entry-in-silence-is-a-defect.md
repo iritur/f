@@ -1,5 +1,6 @@
 # RFC 0116: A bound that loses an entry in silence is a defect in a subsystem that did not move
 
+- Filed under a shortened slug on 2026-09-24. The file was `0116-a-bound-that-loses-an-entry-in-silence-is-a-defect-in-a-subsystem-that-did-not-move.md`, which is over ustar's 100-byte name field, so `cargo xtask release` could not pack the tree and two CI jobs refused it. The title is unchanged; the slug is not a summary and the number is what anything cites
 - Status: accepted
 - Date: 2026-09-24
 - Affects: `kernel/src/main.rs` (`MAX_RESERVED`, `FIXED_RESERVED`,

@@ -1,5 +1,6 @@
 # RFC 0114: A property table is generated into the permissive tree, and the corpus it is tested against is not
 
+- Filed under a shortened slug on 2026-09-24. The file was `0114-a-property-table-is-generated-into-the-permissive-tree-and-the-corpus-it-is-tested-against-is-not.md`, which is over ustar's 100-byte name field, so `cargo xtask release` could not pack the tree and two CI jobs refused it. The title is unchanged; the slug is not a summary and the number is what anything cites
 - Status: accepted
 - Date: 2026-09-24
 - Affects: `LICENSING.md` — its table, which has two rows and needs three, and its

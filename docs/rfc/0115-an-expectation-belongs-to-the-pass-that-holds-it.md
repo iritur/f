@@ -1,5 +1,6 @@
 # RFC 0115: An expectation belongs to the pass that holds it, and the corpus stays the input half
 
+- Filed under a shortened slug on 2026-09-24. The file was `0115-an-expectation-belongs-to-the-pass-that-holds-it-and-the-corpus-stays-the-input-half.md`, which is over ustar's 100-byte name field, so `cargo xtask release` could not pack the tree and two CI jobs refused it. The title is unchanged; the slug is not a summary and the number is what anything cites
 - Status: accepted
 - Date: 2026-09-24
 - Affects: `text/src/corpus.rs` — its *What is deliberately not here* section,
