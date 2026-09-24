@@ -104,6 +104,12 @@ Added when the same mistake happens twice. Each line is a scar.
 - Writing a directory walker with its own copy of the skip list. Five carry one
   now; the four that forgot `.claude` read four *other* checkouts of this
   repository and reported their findings against this one.
+- Trusting a check that only the nightly runs. Twice now a red schedule went
+  unread for a day — `docs/postmortem/0002` and `0003` — and the second time the
+  repair was already committed on a branch, so the schedule reported a defect
+  nobody could connect to its fix. If a check rests on arithmetic between two
+  constants, it is a file read and belongs in `verify`; the expensive workload
+  stays nightly and stops being the only observer.
 - Taking a registry number by looking at the tree you can see. Three RFCs were
   numbered 0085 and all three were cited, so the number identified nothing.
   Check the peers — `git worktree list`, then every branch — before taking one,

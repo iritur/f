@@ -947,6 +947,7 @@ fn main() -> ExitCode {
         "lint-boundary" => lint_boundary(),
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
+        "lint-bounds" => lint_bounds(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
         "lint-units" => lint_units(),
@@ -1209,6 +1210,9 @@ cargo xtask <command>
                      prohibited surfaces. Needs a compile first. RFC 0092
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
+  lint-bounds        Every boot-path bound still dominates the count that
+                     decides it. RFC 0101's rule, read out of the source.
+                     RFC 0116
   lint-mutations     No deliberate defect is on by default
   lint-claims        No document cites a claim value the claim no longer has
   lint-units         R03: every public abi field states its unit
@@ -14758,6 +14762,11 @@ fn lint_all() -> Result<(), String> {
     lint_licensing()?;
     lint_unsafe()?;
     lint_percpu()?;
+    // The rule RFC 0101 named and did not write. Four bounds on the boot path
+    // are each larger than a count kept in another file, every relation was
+    // written in a comment, and the last time one of them decayed it was a
+    // six-boot nightly claim that noticed, a day later. Four file reads.
+    lint_bounds()?;
     lint_mutations()?;
     lint_claims()?;
     // The three rules from `docs/what-must-be-stated.html` section 15 that
@@ -20864,6 +20873,210 @@ fn lint_percpu() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// One bound on the boot path, and the count that decides how large it must be.
+///
+/// `at_least` is the whole of the rule: a bound is wrong the moment it stops
+/// dominating what it counts, and every one of these dominates by an arithmetic
+/// nobody was evaluating.
+struct BootBound {
+    /// The constant that must be large enough, as `(file, name)`.
+    /// Unit: none — a source location and an identifier.
+    bound: (&'static str, &'static str),
+    /// What it is a bound over, as a human sentence for the failure text.
+    /// Unit: none — prose.
+    over: &'static str,
+    /// The smallest value the bound may hold, given the counts read.
+    /// Unit: the bound's own unit.
+    at_least: fn(&BTreeMap<String, u64>) -> Option<u64>,
+    /// Why, in one sentence, and what breaks when it is one short.
+    /// Unit: none — prose.
+    because: &'static str,
+}
+
+/// Where each constant this check reads lives.
+///
+/// Read from source rather than linked against, because three of the four are
+/// in crates `xtask` cannot depend on — `kernel` is `no_std`, `test = false`
+/// and built for a bare-metal target — and the fourth being readable the other
+/// way would make this two mechanisms for one rule. `lint_gate` reads source
+/// for the same reason and says so at greater length.
+const BOUND_SOURCES: &[(&str, &str)] = &[
+    ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
+    ("kernel/src/main.rs", "FIXED_RESERVED"),
+    ("kernel/src/main.rs", "MAX_RESERVED"),
+    ("kernel/src/component.rs", "PLACES_MAX"),
+    ("abi/src/reserve.rs", "RESERVATIONS_MAX"),
+];
+
+/// Every boot-path bound still dominates the count that decides it.
+///
+/// # The rule, and the incident that named it
+///
+/// RFC 0101: *a constant derived from a count is only as good as the claim that
+/// the count is what is being counted, and that claim decays silently.* It
+/// decays by addition — one more component — and the failure surfaces nowhere
+/// near the addition. Two bounds of that shape were repaired in one hour on
+/// 2026-09-22, and the RFC ends by naming the check that would have caught
+/// either, adding that *a rule deserves its own task rather than a paragraph in
+/// the RFC that motivates it*. This is that task.
+///
+/// # What it costs, and why that matters here
+///
+/// Four file reads and no build. That is the entire argument for this being in
+/// `cargo xtask verify` rather than beside the claim it protects: the route
+/// that *did* catch `MAX_RESERVED` at thirteen is `cargo xtask rollback`, which
+/// is three generation builds and six boots, runs only in the nightly, and went
+/// red at 03:11 on a day nobody was reading it — on a merge whose author had
+/// already repaired the cause on a branch and could not know. Five green local
+/// gates said nothing, because none of them evaluates an arithmetic that is
+/// written in a comment. RFC 0116.
+///
+/// # What it cannot see
+///
+/// A bound whose relation is not one of the four below, and a constant written
+/// as anything more than a sum of integers and other constants this reads —
+/// the resolver is deliberately small, and a value it cannot evaluate is a
+/// finding rather than a pass. What it also cannot see is whether
+/// [`FIXED_RESERVED`] still equals the number of fixed reservations
+/// `reserved_ranges` adds: that is a count of assignments in a function body,
+/// and the frame refuses the boot on it instead.
+///
+/// # Errors
+///
+/// A bound that no longer dominates its count, a constant that is not where
+/// this expects it, or a value that does not resolve.
+fn lint_bounds() -> Result<(), String> {
+    let mut read: BTreeMap<String, u64> = BTreeMap::new();
+    let mut findings: Vec<String> = Vec::new();
+
+    for (file, name) in BOUND_SOURCES {
+        let path = root().join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {file} for `{name}`: {e}"))?;
+        match constant_value(&text, name, &read) {
+            Some(value) => {
+                read.insert((*name).to_string(), value);
+            }
+            None => findings.push(format!(
+                "  {file}  `{name}` is not a `const {name}: usize = <sum of integers and \
+                 constants this check already read>;` — so its value cannot be compared \
+                 with anything"
+            )),
+        }
+    }
+
+    // The four relations. Each is written here and nowhere else, so that a
+    // reader who disagrees with one has one place to argue with it.
+    let bounds: &[BootBound] = &[
+        BootBound {
+            bound: ("kernel/src/main.rs", "MAX_RESERVED"),
+            over: "the ranges the frame allocator must be told not to hand out",
+            at_least: |read| Some(read.get("FIXED_RESERVED")? + read.get("MAX_MODULES")?),
+            because: "a module whose reservation did not fit is a module the allocator \
+                      offers as free memory, and the symptom is the reader of that module \
+                      failing, arbitrarily far away. This was the literal 13 against a \
+                      MAX_MODULES of 16 for a day",
+        },
+        BootBound {
+            bound: ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
+            over: "the modules a boot menu offering two generations places",
+            // init, one module per place, one successor for a swap, two
+            // generations. `cargo xtask rollback` is the boot that needs every
+            // one of them at once and the only one that does.
+            at_least: |read| Some(1 + read.get("PLACES_MAX")? + 1 + 2),
+            because: "`cargo xtask rollback` offers both generations beside every \
+                      component file; a module past this bound is dropped by the loader \
+                      reader, and the boot then cannot fold to the root it was asked for. \
+                      This was 8 against a menu needing 9",
+        },
+        BootBound {
+            bound: ("abi/src/reserve.rs", "RESERVATIONS_MAX"),
+            over: "the grants outstanding while places are refilled",
+            // RFC 0101's own sentence: places plus refills in flight, and a
+            // refill holds two entries for one place until the first is
+            // released. Twice the places is the bound that follows.
+            at_least: |read| Some(2 * read.get("PLACES_MAX")?),
+            because: "`kernel::component::fill` grants after the spawn, so a refilled \
+                      place holds two entries until the first is released. RFC 0101 names \
+                      exactly this check as the repair that closes its residue rather than \
+                      padding it",
+        },
+        BootBound {
+            bound: ("kernel/src/component.rs", "PLACES_MAX"),
+            over: "the component files this tree builds",
+            at_least: |_| u64::try_from(COMPONENTS.len()).ok(),
+            because: "a component file with no place is a component no downstream count \
+                      ever looks for — the ninth walked past a silent `continue` and was \
+                      reported as a stale or partial build",
+        },
+    ];
+
+    for bound in bounds {
+        let (file, name) = bound.bound;
+        let Some(have) = read.get(name).copied() else { continue };
+        let Some(want) = (bound.at_least)(&read) else { continue };
+        if have >= want {
+            continue;
+        }
+        findings.push(format!(
+            "  {file}  `{name}` is {have} and must be at least {want} — it bounds {}.\n\
+             \x20     {}",
+            bound.over, bound.because
+        ));
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-bounds: ok  ({} boot-path bound(s) still dominate their counts)",
+            bounds.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} boot-path bound(s) no longer dominate what they count:\n{}\n\n\
+         RFC 0101: a constant derived from a count is only as good as the claim\n\
+         that the count is what is being counted, and that claim decays silently —\n\
+         by addition, with the failure surfacing nowhere near the addition.\n\n\
+         Raise the bound in the same diff as the count. Lowering the count to fit,\n\
+         or widening this check, is the repair that hides the next one: the route\n\
+         that caught the last of these was a six-boot nightly claim, a day late.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// The value of `const NAME: usize = ...;` in `text`, resolved against `known`.
+///
+/// A sum of decimal integers and names already read, and deliberately nothing
+/// more. Underscored digit separators are accepted; a path is taken by its last
+/// segment, so `arch::x86_64::multiboot::MAX_MODULES` resolves as `MAX_MODULES`
+/// — which is exactly the spelling `MAX_RESERVED` uses and the one a reader
+/// would have to follow anyway.
+///
+/// `None` for anything else, which is a finding rather than a pass: a bound
+/// this cannot evaluate is a bound nothing is comparing, and that is the state
+/// this check exists to end.
+fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Option<u64> {
+    let needle = format!("const {name}: usize = ");
+    let (_, rest) = text.split_once(&needle)?;
+    let (expression, _) = rest.split_once(';')?;
+    let mut total: u64 = 0;
+    for term in expression.split('+') {
+        let term = term.trim();
+        let term = term.rsplit("::").next()?;
+        if term.is_empty() {
+            return None;
+        }
+        let value = if term.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
+            term.replace('_', "").parse::<u64>().ok()?
+        } else {
+            *known.get(term)?
+        };
+        total = total.checked_add(value)?;
+    }
+    Some(total)
 }
 
 /// One entry from `TODO.md`.

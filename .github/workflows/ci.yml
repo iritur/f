@@ -174,6 +174,7 @@ jobs:
       - run: cargo xtask lint-licensing
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
+      - run: cargo xtask lint-bounds
       - run: cargo xtask lint-mutations
       # The three rules from docs/what-must-be-stated.html section 15 that
       # could be made executable. CONTRIBUTING.md carries all twelve and says
