@@ -11,6 +11,9 @@ checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 [[package]]
 name = "f-abi"
 version = "0.0.1"
+dependencies = [
+ "f-env",
+]
 
 [[package]]
 name = "f-assembler"
@@ -51,6 +54,7 @@ version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-env",
+ "f-input",
  "f-interface",
  "f-ring",
  "f-scene",
@@ -171,6 +175,7 @@ version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-interface",
+ "f-scene",
 ]
 
 [[package]]

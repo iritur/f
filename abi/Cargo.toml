@@ -34,6 +34,27 @@ mutate-relaxed-routing = []
 # the one pair of demands it tries; the proof is what says *no* pair.
 mutate-overlapping-grant = []
 
+# A dev-dependency and never a dependency, and this is the first row of any kind
+# this crate has carried. What it is for: `abi/src/trace.rs`'s exit is *byte-
+# identical for one seed*, and a seed in this tree means `f_env::SeededEnv` — the
+# one generator RFC 0026 says there is. A local expansion of a seed here would be
+# a second transcription of it, drawn for reproducibility and not for quality,
+# which is the admission that RFC entry says stopped being affordable.
+#
+# Why it does not weaken what this crate is. Nothing under `[dependencies]`
+# changed, so no record here gains a field somebody else's crate decides the
+# layout of, and no image links `f-env` because of this row. `f-env` is `no_std`
+# with no dependencies of its own and does not take `f-abi`, so there is no cycle
+# and the AArch64 compile is unaffected. `ring/Cargo.toml` states the same
+# arrangement for the same reason one crate up: the tests drive the thing from
+# outside while a seeded `Env` decides what the world does to it.
+#
+# *Reversal:* the day a record in this crate wants a value from an `Env` at run
+# time. That is a dependency and not a dev one, and it is an argument this row
+# does not make.
+[dev-dependencies]
+f-env.workspace = true
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"

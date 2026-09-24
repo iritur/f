@@ -26,5 +26,22 @@ f-abi.workspace = true
 # is no longer abandonable and that crate's own comment is what has changed.
 f-interface.workspace = true
 
+# The graph's vocabulary of kinds, for `emit.rs` — `E3-B06f`. A projection has
+# to decide what kind of scene node a role becomes, and deciding it against
+# `f_abi::scene::kind`'s `u16` constants would be deciding it against numbers:
+# `f_scene::kind::Kind` is the type whose closedness the compiler enforces, and
+# `Kind::family` is what makes *a paint belongs where a mark is* derived rather
+# than decided a second time.
+#
+# The direction of this row is the whole of why it is safe. `scene/` does not
+# take this crate and must not: a retained graph that depended on the meaning
+# layer would be a graph the meaning layer could take down with it, and part
+# III's one property of part II is that it cannot. Deleting `interface` and
+# `semantic` leaves `scene` standing, which is the property stated as a
+# dependency direction rather than as a paragraph. *Reversal:* `scene/`
+# acquiring a row for `f-interface` or `f-semantic`, which is the abandonment
+# argument gone.
+f-scene.workspace = true
+
 [lints]
 workspace = true

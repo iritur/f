@@ -61,6 +61,17 @@ name: nightly
 # `join` re-runs the boot-to-workload join on a schedule, because the gap it
 # declares (`JOIN_GAP`) closes by somebody else's work landing rather than by
 # anything in this file changing. RFC 0036.
+#
+# ## And the floor under all of them, which took two post-mortems
+#
+# The four things above are what the *sweep* does when it finds something. Every
+# other job in this file did one of them — go red — and the twelve paragraphs
+# below arguing that a self-explanatory report needs no notification are all
+# correct and all answer the wrong question. `docs/postmortem/0002`: five
+# consecutive red nights, unread. `docs/postmortem/0003`: `rollback` red at 03:11
+# UTC with the repair already on a branch, unread for a day. The `alarm` job at
+# the bottom watches every job in this file and opens one issue when any of them
+# fails; its own header carries the argument, and RFC 0122 is the reversal.
 
 on:
   schedule:
@@ -74,6 +85,24 @@ on:
         description: "How many seeds per scenario"
         required: false
         default: "65536"
+      # The half of the alarm a person can exercise without waiting for a night.
+      #
+      # A mechanism nobody can run is the one that is broken when it is needed,
+      # which is `docs/postmortem/0002` in one sentence. `dry-run` makes the
+      # `alarm` job compute the decision, the title and the whole issue body and
+      # write them to the run summary, and open nothing — so the thing a reviewer
+      # is being asked to trust can be read before it has ever run for real.
+      # `post` is the deliberate end-to-end test and will open a real issue in
+      # this repository; `off` is for a dispatch that wants neither.
+      #
+      # A `schedule` run ignores this and always posts. That is the whole point:
+      # the route that matters is the one nobody chose.
+      alarm:
+        description: "On a manual run: dry-run (default), post, or off"
+        required: false
+        type: choice
+        default: "dry-run"
+        options: ["dry-run", "post", "off"]
 
 env:
   REGISTRY: ghcr.io
@@ -593,11 +622,19 @@ jobs:
   #
   # ## What it does *not* do
   #
-  # It opens no issue. The sweep above does, because a finding there is a seed
-  # nobody can reproduce from the log alone; a failed proof is a counterexample
-  # Kani prints in full, and `--concrete-playback` turns it into a test case. The
-  # report is kept as an artifact for ninety days and the job goes red, which is
-  # what a deterministic failure on a fixed input needs and no more.
+  # It opens no issue *of its own*. The sweep above does, because a finding there
+  # is a seed nobody can reproduce from the log alone; a failed proof is a
+  # counterexample Kani prints in full, and `--concrete-playback` turns it into a
+  # test case. The report is kept as an artifact for ninety days and the job goes
+  # red, which is what a deterministic failure on a fixed input needs and no more.
+  #
+  # That paragraph is right about the *content* of a notification and was taken
+  # for three epochs as settling whether to send one. It does not: whether a
+  # report explains itself and whether anybody reads it are different questions,
+  # and this file answered the first three times while the second went unanswered
+  # twice — `docs/postmortem/0002` and `0003`. The `alarm` job at the bottom is
+  # the floor under every job here, including this one, and it changes nothing
+  # about this job. RFC 0122.
   prove:
     name: the capability properties, the ring's validation paths and the frame's
       watermark, proved
@@ -710,10 +747,17 @@ jobs:
   #
   # Read `claims/0030`'s `[diagnosis]` before anything else: it names what each
   # row going red implies, written while the system was understood. The report
-  # is kept as an artifact rather than opened as an issue, for the `cut` job's
-  # reason — a failure here is deterministic on a fixed input and reproduces
-  # from the command in the claim, so there is nothing a notification would
-  # carry that the report does not.
+  # is kept as an artifact rather than opened as an issue *by this job*, for the
+  # `cut` job's reason — a failure here is deterministic on a fixed input and
+  # reproduces from the command in the claim, so there is nothing a notification
+  # would carry that the report does not.
+  #
+  # This is the job that proved that argument answers the wrong question. It went
+  # red at 03:11 UTC on 2026-09-23, nobody read it for a day, and the repair was
+  # already committed on a branch — `docs/postmortem/0003`, the second time a red
+  # schedule went unread. The report did carry everything; nobody opened it. The
+  # `alarm` job at the bottom of this file is what changed, and this job's own
+  # argument stands unedited above. RFC 0122.
   rollback:
     name: a generation broken, rolled back, and compared three ways
     needs: [environment, image]
@@ -778,3 +822,184 @@ jobs:
       - name: the generation root across two checkout paths
         run: cargo xtask claim generation-roots-across-paths
 
+
+  # A red schedule is loud, and until this job existed it was not.
+  #
+  # ## The incident this answers, which is the second of its kind
+  #
+  # The `rollback` job went red at 03:11 UTC on 2026-09-23 and nobody read it
+  # for a day. `docs/postmortem/0003` is the record, and the part that makes it
+  # worth a mechanism rather than an apology is what the day cost: the repair
+  # had already been committed — on a branch, the day *before* the run — so the
+  # schedule reported a defect nobody could connect to its fix. Before that,
+  # `docs/postmortem/0002`: five consecutive red nights, unread, in which the
+  # one job built to reach a person was itself the broken one. `CLAUDE.md`'s
+  # *Common mistakes* gained the line on 2026-09-24, and `TODO.md`'s **A-06**
+  # said in as many words that the mechanism was earned and not built. This is
+  # the mechanism.
+  #
+  # ## Why a job and not a step
+  #
+  # Because the failure this file has actually had was a job that never started.
+  # The `sweep` job's `open an issue for it` step could not run on five red
+  # nights: naming `permissions:` there dropped `packages: read`, the container
+  # could not be pulled, and `if: failure()` cannot run a step inside a job that
+  # does not exist. A step can only report the job it is in. This one is outside
+  # every job it watches, so a job that failed to *start* is `failure` in its
+  # `needs` context and is reported like any other.
+  #
+  # ## Why it is not in the container
+  #
+  # Same reason, one level down. The image is a thing that can fail, and a
+  # watcher that needs the image cannot report the image failing. `ubuntu-latest`
+  # carries `gh`, `jq`, `awk` and `sed`, which is everything below.
+  #
+  # ## Why these three permissions and not a broader set
+  #
+  # A job that names `permissions:` replaces the default set rather than adding
+  # to it, so this list is exhaustive and each row is here for one call:
+  #
+  #   contents: read   checkout, and one API read of the default branch's head
+  #   actions:  read   the failing job's log, which is where the first line is
+  #   issues:   write  open, comment, close — the whole point
+  #
+  # Deliberately absent: `packages:`, because this pulls no image;
+  # `contents: write`, because this commits nothing and a machine that can open
+  # an issue should not also be able to push; `pull-requests:`, for the same
+  # reason one level over. `maintain.yml` is the file in this repository that
+  # does hold `contents: write`, and it holds it to push a branch a person then
+  # reads — a different job with a different argument.
+  #
+  # ## What it says, and why that and not a summary
+  #
+  # `docs/postmortem/0003`'s finding was not *nobody was told*. It was *the fix
+  # already existed and the notification could not have said so*. So the body
+  # carries the job, the commit the run tested, the first failing line, a link —
+  # and, when the default branch has moved past the commit under test, the
+  # `git log --oneline <sha>..<branch>` that would have closed that incident in
+  # a minute. `ops/alarm.sh` builds all of it and is tested against fixtures in
+  # `cargo xtask test`; the three `gh` calls below are the half only a real
+  # failure can exercise, and that is stated rather than implied.
+  #
+  # ## The second consecutive failure, and what closes the issue
+  #
+  # Both are the question A-06 is really about, because both are how a
+  # mechanism becomes muted without anybody choosing to mute it.
+  #
+  # A second issue for the same failure is noise, and noise is what a reader
+  # learns to skip. So the title is a signature — the workflow and the sorted
+  # set of failing jobs — and a night that finds the same set again comments on
+  # the open thread. A *different* set is a different title and a different
+  # thread, which is right: two failures are two findings.
+  #
+  # And a green run closes what it opened. A stale issue is the same training in
+  # the other direction: a reader who learns that these issues outlive their
+  # defects has learned to ignore them. The close is a comment and a close on
+  # every open thread whose title this workflow could have written, and the
+  # comment says which run closed it, so the thread reads as a story rather than
+  # as a thing that went quiet.
+  #
+  # ## What this does not do
+  #
+  # It does not replace the two issue-opening steps above it. The `sweep` job
+  # opens an issue titled with the smallest reproduction it found, and that is a
+  # better title than this job can construct from a job name; same for the
+  # weekly comparison's named leaf. Those stay, and this is the floor under
+  # everything they do not cover — which, until today, was every other job in
+  # this file.
+  #
+  # It also cannot report itself. If this job fails, nothing opens an issue about
+  # that, and no job in a workflow can watch itself. What covers it instead is
+  # the local half: `cargo xtask lint-schedules` runs in `verify` and in the
+  # pull-request gate and refuses a scheduled workflow whose alarm does not name
+  # every other job in its file, so the way this rots — somebody adds a job and
+  # forgets this list — is a red pull request rather than a silence.
+  #
+  # And it reads `ops/alarm.sh` out of the commit under test, so a commit that
+  # breaks that script silences its own alarm. That is the residue, it is named
+  # here rather than discovered, and it is why the script has tests that run per
+  # commit.
+  alarm:
+    name: a red run says so in this repository
+    needs:
+      [
+        environment,
+        image,
+        image_full,
+        harness,
+        sweep,
+        join,
+        hostile,
+        cut,
+        miri,
+        entries,
+        prove,
+        rechunk,
+        rollback,
+        gating-claims,
+      ]
+    # Not `failure()`. This job has to run on a green night too, because closing
+    # a stale issue is half of what it is for.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: what happened, and what to say about it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          ALARM_JOBS: alarm/jobs.tsv
+          ALARM_WORKFLOW: nightly
+          ALARM_SHA: ${{ github.sha }}
+          ALARM_BRANCH: ${{ github.event.repository.default_branch }}
+          ALARM_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALARM_LOG: alarm/log.txt
+          ALARM_OUT: alarm
+        run: |
+          mkdir -p alarm
+          # The `needs` context is the only place a job can read its siblings'
+          # conclusions, and it arrives as JSON with each job's outputs in it —
+          # `maintain.yml`'s `detect` puts a whole report in one — so this is jq
+          # and not sed. One expression, and the table it writes is the only
+          # thing ops/alarm.sh reads.
+          printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"' > alarm/jobs.tsv
+          cat alarm/jobs.tsv
+
+          # The failing jobs' logs, per job rather than per run. The run-level
+          # archive `gh run view --log-failed` downloads is not served until the
+          # whole run has finished, and this job is part of the run — so asking
+          # for it here is asking for a 404. The per-job endpoint is served as
+          # soon as the job is, which is the property that makes this readable
+          # from inside the run it is about.
+          : > alarm/log.txt
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+                        --jq '.jobs[] | select(.conclusion == "failure") | .id' || true); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" >> alarm/log.txt || true
+          done
+
+          # The head of the default branch, read now rather than at queue time.
+          # This is the one line post-mortem 0003 is about: when it differs from
+          # the commit under test, the repair may already be written, and the
+          # body says so with the range to read.
+          ALARM_HEAD=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ALARM_BRANCH" --jq .sha || true) \
+            bash ops/alarm.sh
+
+          # The run summary carries the whole body whether or not anything is
+          # posted, which is what makes a `dry-run` dispatch worth running.
+          {
+            echo "## $(cat alarm/title)"
+            echo
+            echo "decision: \`$(cat alarm/decision)\`"
+            echo
+            cat alarm/body.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: open it, comment on it, or close it
+        if: github.event_name == 'schedule' || github.event.inputs.alarm == 'post'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ops/alarm-post.sh

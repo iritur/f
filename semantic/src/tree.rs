@@ -387,6 +387,27 @@ impl Tree {
         self.nodes.iter().flatten().count()
     }
 
+    /// Every node, in the order this tree's slots hold them.
+    ///
+    /// **A projection needs a walk and not only a lookup**, which is what
+    /// [`Self::node`] gives: an automation that knows an identifier asks for it,
+    /// and a projection that is presenting the whole tree has no identifier to
+    /// ask with. `E3-B06h` is the first consumer and it is the shape every
+    /// projection of a received tree has.
+    ///
+    /// The order is **slot order**, and what that is worth is worth stating.
+    /// [`Self::apply`] fills the first free slot and refuses a declaration whose
+    /// parent it does not already hold, so a tree that has only ever grown is in
+    /// declaration order and every node's parent is before it. A removal frees a
+    /// slot in the middle, and the next declaration fills it — so the property is
+    /// a fact about a *history* rather than about this type, and a consumer that
+    /// needs parents first checks rather than assumes.
+    /// `f_semantic::remote::restate` is where that check is, and
+    /// `Refused::OutOfOrder` is what it answers.
+    pub fn each(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter().flatten()
+    }
+
     /// Frames that closed into this tree. Unit: frames.
     #[must_use]
     pub const fn frames(&self) -> u64 {

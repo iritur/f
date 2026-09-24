@@ -157,6 +157,15 @@ pub const fn depth(held: usize) -> usize {
     if held == 0 { 0 } else { held - rank(held) + 1 }
 }
 
+/// How deep the estimate is allowed to sit, over every window this build holds.
+///
+/// Two, which is the second-largest sample, and the `const` block below is what
+/// holds it. It is named rather than written twice because a second thing is
+/// derived from it — [`STALE_AFTER_FRAMES`] — and a bound that appears as a
+/// literal in two arguments is a bound that will be raised in one of them.
+/// Unit: none — a one-based position from the top.
+pub const DEPTH_MAX: usize = 2;
+
 /// The two-register scan is correct for every window this build can hold.
 ///
 /// A `const` block and not a test, for `scene/src/degrade.rs`'s reason about its
@@ -169,13 +178,39 @@ const _: () = {
     let mut held = 1;
     while held <= WINDOW {
         assert!(
-            depth(held) <= 2,
+            depth(held) <= DEPTH_MAX,
             "the p99 of this window is deeper than the second-largest sample, so the one-pass \
              estimator in Pacing::estimate_nanos is answering with the wrong sample",
         );
         held += 1;
     }
 };
+
+/// How many frames an estimate may be carried before it stops being evidence.
+///
+/// **One, and it is derived rather than chosen.** The estimate is decided by the
+/// top [`DEPTH_MAX`] samples of the window — that is what [`depth`] is and what
+/// the `const` block above holds — and one closed frame puts one new sample in.
+/// So after `DEPTH_MAX` frames every sample that decided the published number
+/// can have been displaced, and what is being carried is a figure that is no
+/// longer the percentile of anything the window holds. The largest gap at which
+/// at least one deciding sample must still be there is `DEPTH_MAX - 1`, and that
+/// is this.
+///
+/// The clause `E3-B07c` exists for is *the estimate's staleness is bounded by a
+/// stated number of frames rather than assumed fresh*, and the word with teeth
+/// is **assumed**. A `u64` of nanoseconds handed from one frame to another
+/// carries no evidence of when it was taken, so nothing downstream can tell a
+/// figure measured this frame from one measured a second ago; [`Budget`] is the
+/// repair, and this is the number it enforces.
+///
+/// *What would reverse this:* a window whose [`depth`] reached three — 200
+/// samples is the first, which is the same reversal the module comment gives for
+/// the one-pass estimator — at which point two frames of drift still leaves a
+/// deciding sample in place and this becomes two. It moves on its own when that
+/// happens, which is why it is written as an expression and not as a `1`.
+/// Unit: frames — UI frames.
+pub const STALE_AFTER_FRAMES: u64 = DEPTH_MAX as u64 - 1;
 
 /// The last [`WINDOW`] frame costs, and nothing else.
 ///
@@ -282,6 +317,152 @@ impl Pacing {
             wake_nanos: wake_nanos(scanout_nanos, estimate_nanos, margin_nanos),
         }
     }
+
+    /// The running estimate, stamped with the frame it was taken at.
+    ///
+    /// The one constructor of a [`Budget`], and it is a method here rather than
+    /// a `Budget::new` taking two numbers for the reason
+    /// `f_scene::degrade::Overrun` is a newtype: the estimate and the ordinal
+    /// are read in one expression, from the two things that hold them, so there
+    /// is no call site at which a caller can pair a fresh number with a stale
+    /// ordinal or the reverse. A `Budget` assembled by hand is the defect
+    /// `E3-B07c` is about, and there is no way to assemble one.
+    /// Unit of `at_frame`: none — a frame ordinal, not a quantity.
+    #[must_use]
+    pub fn budget(&self, at_frame: u64) -> Budget {
+        Budget { estimate_nanos: self.estimate_nanos(), taken_at_frame: at_frame }
+    }
+}
+
+/// The running estimate and the frame it was taken at, which travel together.
+///
+/// # Why a number is not enough
+///
+/// `E3-B07c` asks for the estimate to be run against the remaining budget and
+/// says how: *the estimate's staleness is bounded by a stated number of frames
+/// rather than assumed fresh*. A bare `u64` of nanoseconds cannot carry that
+/// bound, because a figure taken at frame 3 and a figure taken at frame 300 are
+/// the same value of the same type — so every consumer either re-derives the
+/// freshness from something else it happens to know, or assumes it. Both of
+/// those are the defect. This type makes the ordinal part of the value, and
+/// [`Budget::against`] is the only way to get a decision out of it, so the
+/// question *how old is this* is asked by the type rather than remembered by the
+/// caller.
+///
+/// Both fields are private and the only constructor is [`Pacing::budget`], which
+/// is what makes *the estimate came from this compositor's own rolling p99 and
+/// from no other clock* structural: there is no literal a test or a future
+/// caller can put in this position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    /// The rolling p99 at the frame below. Unit: nanoseconds.
+    estimate_nanos: u64,
+    /// Which frame it was taken at. Unit: none — a frame ordinal.
+    taken_at_frame: u64,
+}
+
+impl Budget {
+    /// How many frames have closed since this estimate was taken.
+    ///
+    /// Saturating, because an ordinal that appears to move backwards is a caller
+    /// asking about a frame older than the one the estimate came from, and the
+    /// honest reading of that is *no frames have passed* rather than an enormous
+    /// number that would read as stale. What it costs is that a caller which
+    /// asked about the wrong frame gets a fresh answer; what the alternative
+    /// costs is a wrapped subtraction that refuses every frame, which is a
+    /// failure nobody would look for here.
+    /// Unit: frames — UI frames.
+    #[must_use]
+    pub const fn staleness_frames(self, at_frame: u64) -> u64 {
+        at_frame.saturating_sub(self.taken_at_frame)
+    }
+
+    /// Whether this estimate is still evidence about the frame `at_frame`.
+    #[must_use]
+    pub const fn is_fresh_at(self, at_frame: u64) -> bool {
+        self.staleness_frames(at_frame) <= STALE_AFTER_FRAMES
+    }
+
+    /// Where this frame stands against the time it has left.
+    ///
+    /// The whole of `E3-B07c`. Three answers and not two, because *it fits*,
+    /// *it is over by this much* and *there is no usable estimate* are three
+    /// different states of the world and a build that spelled the third as one
+    /// of the first two would be publishing a verdict it did not have the
+    /// evidence for.
+    ///
+    /// Unit of `remaining_nanos`: nanoseconds — how long there is between now
+    /// and this frame's own deadline.
+    pub fn against(self, at_frame: u64, remaining_nanos: u64) -> Standing {
+        if !self.is_fresh_at(at_frame) {
+            return Standing::Stale { staleness_frames: self.staleness_frames(at_frame) };
+        }
+        let over_nanos = self.estimate_nanos.saturating_sub(remaining_nanos);
+        // `div_ceil` on the nanoseconds and then a narrowing that saturates: an
+        // overrun wider than a `u32` of `_us_x100` units is forty-three seconds
+        // of lateness, which is not a frame, and clamping it is a truer answer
+        // than wrapping it round into a small one. The rounding direction is the
+        // decision and it rounds **up**: a frame over budget by less than ten
+        // nanoseconds is still over budget, and rounding it down would answer
+        // *fits* for a late frame — the one wrong answer here, because it is the
+        // one a reader would not go looking behind.
+        let over_us_x100 =
+            u32::try_from(over_nanos.div_ceil(NANOS_PER_US_X100)).unwrap_or(u32::MAX);
+        match Overrun::new(over_us_x100) {
+            None => {
+                Standing::Fits { spare_nanos: remaining_nanos.saturating_sub(self.estimate_nanos) }
+            }
+            Some(overrun) => Standing::Over { overrun },
+        }
+    }
+}
+
+/// Where one frame stands against the time it has left.
+///
+/// Three variants and no flag, for `f_scene::degrade::Downgrades`'s reason one
+/// crate over: *fits, with 4 000 ns to spare* and *stale, having been taken 9
+/// frames ago* are not two fields that must agree about one fact, they are two
+/// states, and a struct holding both would have values meaning neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Standing {
+    /// The estimate fits inside what is left of the deadline.
+    Fits {
+        /// How much room the estimate did not use. Unit: nanoseconds.
+        spare_nanos: u64,
+    },
+    /// It does not, by this much.
+    Over {
+        /// How far past the remaining budget the estimate is, in the scale
+        /// `f_scene::degrade` measures savings in.
+        overrun: Overrun,
+    },
+    /// The estimate is older than [`STALE_AFTER_FRAMES`] and is not evidence
+    /// about this frame at all.
+    ///
+    /// **What happens next is the decision `E3-B07c` had to take, and it is:
+    /// degrade to the floor.** A compositor with no usable estimate has two
+    /// available assumptions, and they are not symmetric. Assuming the frame
+    /// fits wakes the application against a number nobody measured; if the
+    /// number was low the frame is late, the picture is already gone by the time
+    /// anybody could act, and nothing in the record says the estimate was the
+    /// reason. Assuming it does not fit spends picture on a frame that might
+    /// have been fine — which is visible, is recorded in this frame's own slot
+    /// of [`Record`], and is the failure a reader can find. So the answer is the
+    /// deepest reduction this policy has, published under a word of its own so
+    /// that it is never confused with a frame the policy was actually asked
+    /// about.
+    ///
+    /// *What would reverse this:* a compositor that can take a fresh estimate at
+    /// the point of decision rather than only at a close — which needs a clock
+    /// reading per frame rather than per entry, or an `Env` this component does
+    /// not have and RFC 0004 does not give it. On that day the answer to a stale
+    /// budget is *recompute*, and this variant becomes unreachable rather than
+    /// re-argued.
+    Stale {
+        /// How many frames old the estimate was. Unit: frames — UI frames.
+        staleness_frames: u64,
+    },
 }
 
 /// When the application should start the frame that lands at the next scanout.
@@ -364,16 +545,32 @@ pub const fn wake_nanos(scanout_nanos: u64, estimate_nanos: u64, margin_nanos: u
 /// the shape `scene/src/degrade.rs` opens by refusing: an order that is
 /// deterministic but unwritten is not a decision anybody made.
 ///
-/// So the word names a choice from `Criterion::ORDER`, with two values below the
-/// first criterion for the two answers that are not a criterion at all.
+/// So the word names a choice from `Criterion::ORDER`, with three values below
+/// the first criterion for the answers that are not a criterion at all — the
+/// frame fitted, the policy had nothing left, and there was no estimate worth
+/// asking it about — and a fourth, [`degraded::NONE`], below those for the
+/// absence of a frame. Sixteen of these words are what [`Record`] packs.
 pub mod degraded {
+    /// No frame said anything here.
+    ///
+    /// **Zero is the absence of an answer and not an answer**, which is the one
+    /// renumbering RFC 0118 performs and the reason it was worth a reversal.
+    /// [`super::Record`] packs one of these words per frame into a fixed-width
+    /// register, so the slots no frame has reached yet have to mean something,
+    /// and *the frame fitted* is the worst thing they could mean: a run that
+    /// closed two frames and a register of sixteen zeroes would read as fourteen
+    /// comfortable frames that never happened. It also buys the thing a page of
+    /// zeroes should always buy — a board the component never reached now reads
+    /// as *this component said nothing*, where before it read as a frame that
+    /// fitted.
+    pub const NONE: u64 = 0;
     /// The frame fitted, so the policy was never asked.
     ///
     /// Distinct from [`SHORT`] and it must be: *nothing was degraded* and
     /// *everything was degraded and it was not enough* are the two ends of this
     /// module's range, and a build that spelled them the same way would publish
     /// its best frame and its worst under one number.
-    pub const FITTED: u64 = 0;
+    pub const FITTED: u64 = 1;
     /// The policy was asked and had nothing left to give back —
     /// `f_scene::degrade::Downgrades::Short`.
     ///
@@ -387,14 +584,49 @@ pub mod degraded {
     /// *What would reverse this:* an effect declaration on the wire, at which
     /// point the criterion words start being reached and this one goes back to
     /// meaning what it says.
-    pub const SHORT: u64 = 1;
+    pub const SHORT: u64 = 2;
+    /// The estimate was older than [`super::STALE_AFTER_FRAMES`], so the policy
+    /// was never asked and the frame was reduced to the floor.
+    ///
+    /// **Its own word rather than [`SHORT`], and the distinction is the whole of
+    /// `E3-B07c`.** The two outcomes look identical from the outside — every
+    /// effect given up, and the frame still late — and they have opposite
+    /// meanings: `SHORT` is a policy that ran out of things to give back, which
+    /// is a statement about the scene, and this is a compositor that had no
+    /// estimate worth deciding from, which is a statement about the compositor.
+    /// A reader who cannot tell them apart cannot tell a busy machine from a
+    /// broken measurement, and would spend the difference looking at the wrong
+    /// half. `super::Standing::Stale` carries the argument for what happens and
+    /// what would reverse it.
+    pub const STALE: u64 = 3;
     /// What [`super::criterion_word`] adds to `Criterion::priority()`.
     ///
-    /// Two, so that the first criterion of the order is 2 and the two answers
-    /// above keep 0 and 1. A reader turning this back into a criterion subtracts
-    /// it; `super::criterion_word` is the only place either direction is
-    /// written.
-    pub const FIRST_CRITERION: u64 = 2;
+    /// Four, so that the first criterion of the order is 4 and the three answers
+    /// above keep 1, 2 and 3 with [`NONE`] below them. A reader turning this
+    /// back into a criterion subtracts it; `super::criterion_word` is the only
+    /// place either direction is written.
+    pub const FIRST_CRITERION: u64 = 4;
+    /// How many bits of [`super::Record`] one frame's answer occupies.
+    ///
+    /// A nibble. Four bits holds the three answers above, `NONE`, and twelve
+    /// criteria against the four `f_scene::degrade::Criterion::ORDER` declares
+    /// today — so the field is not tight, and the `const` block beside
+    /// [`super::Record`] is what turns the day it becomes tight into a build
+    /// failure rather than a neighbouring frame's answer being overwritten.
+    /// Unit: bits.
+    pub const FIELD_BITS: u32 = 4;
+    /// One frame's answer, with everything above it removed.
+    pub const FIELD_MASK: u64 = (1 << FIELD_BITS) - 1;
+    /// How many frames [`super::Record`] holds.
+    ///
+    /// Sixteen, and it is a division rather than a literal: a word is 64 bits,
+    /// a frame's answer is [`FIELD_BITS`] of them, and a register that claimed
+    /// to hold more frames than the arithmetic allows would drop the oldest
+    /// without saying so. At sixty hertz it is a quarter of a second of
+    /// decisions, which is the span a reader asking *was that one frame or a
+    /// run of them* is asking about.
+    /// Unit: frames — UI frames.
+    pub const FRAMES: usize = (u64::BITS / FIELD_BITS) as usize;
 }
 
 /// The word [`degraded`] publishes for one criterion.
@@ -407,6 +639,117 @@ pub const fn criterion_word(criterion: Criterion) -> u64 {
     degraded::FIRST_CRITERION + criterion.priority() as u64
 }
 
+/// Every answer this module can produce fits the field it is packed into.
+///
+/// A `const` block and not a test, for the reason the depth assertion above is
+/// one: a fifth criterion is an edit to `scene/src/degrade.rs`'s table, and what
+/// it must not be able to do is widen a word past its nibble and silently
+/// overwrite the answer of the frame beside it. A test would catch that on the
+/// day somebody ran it; this catches it on the day the table grows.
+const _: () = {
+    assert!(
+        degraded::FIRST_CRITERION + Criterion::COUNT as u64 - 1 <= degraded::FIELD_MASK,
+        "a criterion's word no longer fits one field of a Record, so packing it would overwrite \
+         the answer of the frame before it. Widen degraded::FIELD_BITS, which costs frames of \
+         history, or move the record off a single word",
+    );
+};
+
+/// What this compositor chose, for each of the last [`degraded::FRAMES`] frames.
+///
+/// # Why one word carries sixteen answers
+///
+/// Because `E3-B07d`'s exit is *every frame carries the reduction it chose*, and
+/// the word it is published in is a state node — `crate::routing::node::
+/// DEGRADED` — in a manifest that is **full**: sixteen rows against
+/// `f_abi::manifest::STATE_NODES_MAX` of sixteen. So the per-frame record either
+/// widens a wire bound that every component in this system pays for, or it fits
+/// in the word that already exists. RFC 0118 is the decision and prices both.
+///
+/// What a snapshot cannot do is the reason this is not one. A word holding only
+/// the last frame's answer is the same word whether the compositor decided per
+/// frame or decided once at start and repeated itself — **byte-identical**, on a
+/// run that goes green — and that mutation has already been run against this
+/// component's tree. A register cannot be fooled the same way: one decision
+/// repeated fills it with one answer, and a run whose frames differ leaves a
+/// register whose fields differ, so *per frame* is legible from the number
+/// rather than asserted beside it.
+///
+/// # Which end is which
+///
+/// The newest frame is the **low** field and pushing shifts left, so the oldest
+/// answers leave off the top and a register that has not filled yet has
+/// [`degraded::NONE`] in its high fields. Reading the newest out is a mask with
+/// no shift, which is the operation every reader performs and the one that
+/// should be cheapest to get right.
+///
+/// Zero-initialisable, which RFC 0100 requires of anything a component holds:
+/// [`Record::EMPTY`] is a zero word, and it means *no frame has answered*
+/// because [`degraded::NONE`] is zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Record(u64);
+
+impl Record {
+    /// A compositor that has closed no frame.
+    pub const EMPTY: Self = Self(0);
+
+    /// The register as the word a state node carries.
+    ///
+    /// Opaque in one direction only, and deliberately: a reader outside this
+    /// crate — `kernel/src/compositor.rs` is the one — needs the number to put
+    /// in a tree and needs to ask it questions, and both go through this type
+    /// rather than through arithmetic written twice.
+    /// Unit: none — sixteen packed `degraded` ordinals.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        self.0
+    }
+
+    /// The register a published word came from.
+    ///
+    /// For a reader that has taken the word out of a tree or a board. There is
+    /// no validation to do: every 64-bit pattern is sixteen fields, and a field
+    /// carrying an ordinal this build does not define is a component from
+    /// another build, which [`Record::nth_back`] hands back unchanged for its
+    /// reader to disagree with.
+    #[must_use]
+    pub const fn of(word: u64) -> Self {
+        Self(word)
+    }
+
+    /// This register with one more frame's answer in it.
+    ///
+    /// Takes `self` and answers a new one rather than mutating, so that a
+    /// caller cannot push into a register it has already published. The oldest
+    /// field falls off the top, which is the bound [`degraded::FRAMES`] states.
+    /// Unit of `choice`: none — a `degraded` ordinal.
+    #[must_use]
+    pub const fn pushing(self, choice: u64) -> Self {
+        Self((self.0 << degraded::FIELD_BITS) | (choice & degraded::FIELD_MASK))
+    }
+
+    /// What was chosen `back` frames ago, the last frame closed being zero.
+    ///
+    /// [`degraded::NONE`] past the end of the register, which is the same answer
+    /// a slot no frame has reached gives — and they are the same fact: this
+    /// record does not know what happened seventeen frames ago.
+    /// Unit: none — a `degraded` ordinal.
+    #[must_use]
+    pub const fn nth_back(self, back: usize) -> u64 {
+        if back >= degraded::FRAMES {
+            return degraded::NONE;
+        }
+        (self.0 >> (back as u32 * degraded::FIELD_BITS)) & degraded::FIELD_MASK
+    }
+
+    /// What was chosen for the last frame that closed.
+    /// Unit: none — a `degraded` ordinal.
+    #[must_use]
+    pub const fn latest(self) -> u64 {
+        self.nth_back(0)
+    }
+}
+
 /// How many nanoseconds one unit of `f_scene`'s cost scale is.
 ///
 /// `scene/src/effect.rs` declares estimates and savings in microseconds scaled
@@ -416,30 +759,25 @@ pub const fn criterion_word(criterion: Criterion) -> u64 {
 /// Unit: nanoseconds per `_us_x100` unit.
 pub const NANOS_PER_US_X100: u64 = 10;
 
-/// What the policy says about a frame whose estimate does not fit before its
-/// deadline.
+/// What this compositor chose about one frame.
 ///
 /// `remaining_nanos` is how long there is between now and the frame's own
 /// deadline — the one a commit carried, which `f_abi::scene::Frame::deadline`
-/// states and the wire refuses a commit without. A frame whose estimate fits
-/// inside that has nothing to decide and answers [`degraded::FITTED`].
-///
-/// The conversion into `f_scene`'s scale rounds **up**, and the direction is the
-/// decision: a frame over budget by less than ten nanoseconds is still over
-/// budget, and rounding it down would publish *fitted* for a late frame — which
-/// is the one wrong answer this word can give, because it is the one a reader
-/// would not go looking behind.
+/// states and the wire refuses a commit without. The estimate arrives inside a
+/// [`Budget`] and never as a number, which is `E3-B07c`'s clause: this function
+/// cannot be called with a figure whose age nobody checked, because there is no
+/// way to spell one.
 /// Unit: none — a [`degraded`] ordinal.
 #[must_use]
-pub fn degraded_word(estimate_nanos: u64, remaining_nanos: u64) -> u64 {
-    let over_nanos = estimate_nanos.saturating_sub(remaining_nanos);
-    // `div_ceil` on the nanoseconds and then a narrowing that saturates: an
-    // overrun wider than a `u32` of `_us_x100` units is forty-three seconds of
-    // lateness, which is not a frame, and clamping it is a truer answer than
-    // wrapping it round into a small one.
-    let over_us_x100 = u32::try_from(over_nanos.div_ceil(NANOS_PER_US_X100)).unwrap_or(u32::MAX);
-    let Some(overrun) = Overrun::new(over_us_x100) else {
-        return degraded::FITTED;
+pub fn chose(budget: Budget, at_frame: u64, remaining_nanos: u64) -> u64 {
+    let overrun = match budget.against(at_frame, remaining_nanos) {
+        Standing::Fits { .. } => return degraded::FITTED,
+        // The floor, under a word of its own. `Standing::Stale` argues the
+        // choice and its reversal; what is worth saying at the call site is that
+        // the policy is **not** asked here, because the input it would be asked
+        // about is the figure that is not evidence.
+        Standing::Stale { .. } => return degraded::STALE,
+        Standing::Over { overrun } => overrun,
     };
     // The policy, over the effects this frame declared — which is none of them,
     // for the reason `degraded::SHORT` states. It is called rather than
@@ -625,26 +963,162 @@ mod tests {
         assert_eq!(scanout_after(Tick(u64::MAX), PERIOD_NANOS), u64::MAX);
     }
 
-    #[test]
-    fn a_frame_that_fits_degrades_nothing_and_one_that_does_not_is_short() {
-        assert_eq!(degraded_word(1_000, 2_000), degraded::FITTED);
-        assert_eq!(degraded_word(2_000, 2_000), degraded::FITTED, "an estimate that just fits");
-        // The rounding direction: one nanosecond over is a tenth of one unit of
-        // `f_scene`'s scale, and rounding it down would answer `FITTED` for a
-        // late frame.
-        assert_eq!(degraded_word(2_001, 2_000), degraded::SHORT, "a nanosecond over rounds up");
-        // And a frame with no deadline left at all is short by its whole
-        // estimate rather than by nothing.
-        assert_eq!(degraded_word(5_000_000, 0), degraded::SHORT);
+    /// A budget holding `estimate_nanos`, taken at frame `at`.
+    ///
+    /// Through a `Pacing` and never by hand, because there is no by hand: the
+    /// fields are private and `Pacing::budget` is the only constructor, which is
+    /// the property `E3-B07c` rests on. One sample makes the window's depth one,
+    /// so the estimate is that sample exactly.
+    fn budget_of(estimate_nanos: u64, at: u64) -> Budget {
+        let mut pacing = Pacing::ZERO;
+        pacing.observe(estimate_nanos);
+        pacing.budget(at)
     }
 
     #[test]
-    fn the_criterion_words_are_distinct_from_the_two_answers_that_are_not_criteria() {
+    fn a_frame_that_fits_degrades_nothing_and_one_that_does_not_is_short() {
+        let budget = budget_of(1_000, 7);
+        assert_eq!(chose(budget, 7, 2_000), degraded::FITTED);
+        assert_eq!(
+            chose(budget_of(2_000, 7), 7, 2_000),
+            degraded::FITTED,
+            "an estimate that just fits"
+        );
+        // The rounding direction: one nanosecond over is a tenth of one unit of
+        // `f_scene`'s scale, and rounding it down would answer `FITTED` for a
+        // late frame.
+        assert_eq!(
+            chose(budget_of(2_001, 7), 7, 2_000),
+            degraded::SHORT,
+            "a nanosecond over rounds up"
+        );
+        // And a frame with no deadline left at all is short by its whole
+        // estimate rather than by nothing.
+        assert_eq!(chose(budget_of(5_000_000, 7), 7, 0), degraded::SHORT);
+    }
+
+    #[test]
+    fn the_criterion_words_are_distinct_from_the_answers_that_are_not_criteria() {
         for criterion in Criterion::ORDER {
             let word = criterion_word(criterion);
             assert!(word >= degraded::FIRST_CRITERION);
+            assert_ne!(word, degraded::NONE);
             assert_ne!(word, degraded::FITTED);
             assert_ne!(word, degraded::SHORT);
+            assert_ne!(word, degraded::STALE);
+            // And it fits the field it is packed into, which the `const` block
+            // beside `Record` holds for the build and this holds for the reader:
+            // a criterion whose word overflowed a nibble would be written into
+            // the frame before it.
+            assert_eq!(Record::EMPTY.pushing(word).latest(), word);
         }
+    }
+
+    #[test]
+    fn an_estimate_older_than_the_bound_is_refused_rather_than_used() {
+        // Taken at frame 4, with a comfortable estimate: 1 000 ns against 5 000
+        // of room is a frame that fits by any reading, so a build that ignored
+        // the ordinals answers `FITTED` for every line below.
+        let budget = budget_of(1_000, 4);
+        assert_eq!(budget.staleness_frames(4), 0);
+        assert_eq!(chose(budget, 4, 5_000), degraded::FITTED, "the frame it was taken at");
+        assert_eq!(budget.staleness_frames(4 + STALE_AFTER_FRAMES), STALE_AFTER_FRAMES);
+        assert_eq!(
+            chose(budget, 4 + STALE_AFTER_FRAMES, 5_000),
+            degraded::FITTED,
+            "the last frame the bound admits",
+        );
+        // And one frame past it. This is the line the whole of `E3-B07c` is
+        // about: the estimate is unchanged, the room is unchanged, and the
+        // answer moves — because what moved is how old the number is.
+        let past = 4 + STALE_AFTER_FRAMES + 1;
+        assert!(
+            !budget.is_fresh_at(past),
+            "an estimate a frame past the bound still reads as fresh, so STALE_AFTER_FRAMES \
+             is a constant nothing consults",
+        );
+        assert_eq!(
+            chose(budget, past, 5_000),
+            degraded::STALE,
+            "an estimate past the bound was used anyway, which is the defect E3-B07c exists to \
+             refuse",
+        );
+        // A stale budget is stale whatever the room says, which is what *the
+        // policy was not asked* means: a frame with no time left at all still
+        // answers `STALE` and not `SHORT`.
+        assert_eq!(chose(budget, past, 0), degraded::STALE);
+        // An ordinal before the one it was taken at is not a negative age.
+        assert_eq!(budget.staleness_frames(0), 0);
+    }
+
+    #[test]
+    fn the_standing_carries_what_it_was_asked_and_not_only_which_way_it_went() {
+        let budget = budget_of(1_000, 2);
+        assert_eq!(budget.against(2, 5_000), Standing::Fits { spare_nanos: 4_000 });
+        // 400 ns over, which is 40 units of `f_scene`'s hundredths-of-a-
+        // microsecond scale.
+        let Standing::Over { overrun } = budget.against(2, 600) else {
+            panic!("an estimate of 1 000 ns against 600 ns of room did not read as over budget");
+        };
+        assert_eq!(overrun.over_budget_us_x100().get(), 40);
+        assert_eq!(
+            budget.against(2 + STALE_AFTER_FRAMES + 1, 5_000),
+            Standing::Stale { staleness_frames: STALE_AFTER_FRAMES + 1 },
+        );
+    }
+
+    #[test]
+    fn a_register_tells_one_frame_from_the_one_before_it() {
+        // The shape `E3-B07d` is about: two frames answering differently. A
+        // build that decided once and repeated itself produces one of the two
+        // registers below it, and neither is this.
+        let alternating = Record::EMPTY
+            .pushing(degraded::FITTED)
+            .pushing(degraded::SHORT)
+            .pushing(degraded::FITTED);
+        let decided_once = Record::EMPTY
+            .pushing(degraded::SHORT)
+            .pushing(degraded::SHORT)
+            .pushing(degraded::SHORT);
+        assert_ne!(alternating.word(), decided_once.word());
+        assert_eq!(alternating.latest(), degraded::FITTED);
+        assert_eq!(alternating.nth_back(1), degraded::SHORT);
+        assert_eq!(alternating.nth_back(2), degraded::FITTED);
+        // Past the frames that have closed is *nothing said*, which is not
+        // *fitted* — and is the whole reason `NONE` exists.
+        assert_eq!(alternating.nth_back(3), degraded::NONE);
+        assert_ne!(degraded::NONE, degraded::FITTED);
+        // A register survives a round trip through the word a state node holds,
+        // which is how the frame reads it.
+        assert_eq!(Record::of(alternating.word()), alternating);
+    }
+
+    #[test]
+    fn a_register_holds_exactly_the_frames_it_says_it_does() {
+        // One distinct answer per slot, pushed oldest first, so every field has
+        // to be in its own place for this to come back.
+        let answers: [u64; degraded::FRAMES] =
+            core::array::from_fn(|at| (at as u64 % degraded::FIELD_MASK) + 1);
+        let mut record = Record::EMPTY;
+        for answer in answers {
+            record = record.pushing(answer);
+        }
+        for (back, answer) in answers.iter().rev().enumerate() {
+            assert_eq!(
+                record.nth_back(back),
+                *answer,
+                "field {back} is not the frame that wrote it"
+            );
+        }
+        assert_eq!(
+            record.nth_back(degraded::FRAMES),
+            degraded::NONE,
+            "past the end of the register"
+        );
+        // And the seventeenth push loses the oldest and nothing else, which is
+        // the bound `degraded::FRAMES` states rather than an overflow.
+        let pushed = record.pushing(degraded::STALE);
+        assert_eq!(pushed.latest(), degraded::STALE);
+        assert_eq!(pushed.nth_back(degraded::FRAMES - 1), answers[1]);
     }
 }

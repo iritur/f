@@ -39,13 +39,24 @@ Measured by `cargo xtask claim rollback-comparisons` — one invocation of
   boots                                        6
   generations offered on the menu              2
   comparisons matched                          3
-  module bytes delivered                   65348
-  component files in the module                4
+  module bytes delivered                  217844
+  component files in the module                8
   leaves moved by the break                    1
   unknown roots refused                        1
   tampered modules folding to the honest root  1
   tampered modules caught by the digest        1
   tampered members named by the assembler      1
+
+**The two rows that move are dated, and both moved for the same honest reason.**
+`module_bytes_delivered` and `component_files_in_the_module` read 65 348 and 4
+when this claim was written and read 217 844 and 8 as measured on 2026-09-24.
+Nothing about the demonstration changed: E2 and E3 added component files —
+`objects`, `compositor`, `panel` — and every one of them travels in this module.
+Both are floors in `[threshold]` precisely so that this happens without a red
+build, which is why they were stale for four components with nothing to notice;
+what a stale number costs here is a reader comparing a published figure against
+a run and concluding the run is wrong. The date is in this sentence rather than
+in the row, because a row carrying a date is a row somebody has to maintain.
 
 **The break is a real defect and not a byte this command flipped.**
 `mutate-unchecked-index` is `cargo xtask mutate`'s own — it removes a bounds
@@ -104,7 +115,7 @@ path        = "xtask/src/rollback.rs"
 second      = "xtask/src/generation.rs"
 builds      = 3
 boots       = 6
-notes       = "Three generation builds — the honest one, the broken one, and the honest one again after the break — and six boots: the broken generation dying on its provocation, the intact one surviving it, two selections out of a two-module menu, one refusal of a root nothing carries, and one boot of the tampered module. About five minutes in the development container. That is the claim's own cost and it is why this workload is not in `cargo xtask verify`, which runs `attest` and `swap`, and not in the pull-request gate either: neither is a place to spend five minutes on a property that moves when a *format* moves rather than when a line of code does. **It is on a schedule instead, which is the thing this note used to say was missing.** `.github/workflows/nightly.yml`'s `rollback` job runs `cargo xtask claim rollback-comparisons` — the reproduction line below, so the thresholds are compared and not only the workload run — every night at 03:11 UTC. Of the two candidates this note named, the nightly was taken and `E2-R01`'s release gate was not: a release gate would run this once per release, and a claim checked once per release is a claim that goes red at the worst moment. The residual is the one every scheduled job has and `nightly.yml`'s own header states: a red cross on a schedule is the easiest thing in a repository to stop seeing, and this job opens no issue. — What stands in, and it is most of the exit's setting: this is QEMU with `-kernel` and `-initrd`, not a machine with a disk and a boot loader. `cargo xtask generation --install` writes the `menuentry` fragment and nothing in this tree boots it; `docs/booting-on-hardware.md` and `docs/second-boot-outside-qemu.md` carry that gap."
+notes       = "Three generation builds — the honest one, the broken one, and the honest one again after the break — and six boots: the broken generation dying on its provocation, the intact one surviving it, two selections out of a two-module menu, one refusal of a root nothing carries, and one boot of the tampered module. About five minutes in the development container. That is the claim's own cost and it is why this workload is not in `cargo xtask verify`, which runs `attest` and `swap`, and not in the pull-request gate either: neither is a place to spend five minutes on a property that moves when a *format* moves rather than when a line of code does. **It is on a schedule instead, which is the thing this note used to say was missing.** `.github/workflows/nightly.yml`'s `rollback` job runs `cargo xtask claim rollback-comparisons` — the reproduction line below, so the thresholds are compared and not only the workload run — every night at 03:11 UTC. Of the two candidates this note named, the nightly was taken and `E2-R01`'s release gate was not: a release gate would run this once per release, and a claim checked once per release is a claim that goes red at the worst moment. The residual is the one every scheduled job has and `nightly.yml`'s own header states: a red cross on a schedule is the easiest thing in a repository to stop seeing, and this job opens no issue. **That residual fired on 2026-09-23**: this job went red at 03:11 UTC on `b74807ca` and was read a day later, on a cause already repaired on a branch the day before. What came out of it is not a cheaper version of this workload, because there is not one — it is that the *arithmetic* the boot menu rests on is four file reads, and `cargo xtask lint-bounds` now does them in `cargo xtask verify`. This claim is still the only thing that boots the menu; it is no longer the only thing that can tell the bound is one short. RFC 0116, `docs/postmortem/0003`. — What stands in, and it is most of the exit's setting: this is QEMU with `-kernel` and `-initrd`, not a machine with a disk and a boot loader. `cargo xtask generation --install` writes the `menuentry` fragment and nothing in this tree boots it; `docs/booting-on-hardware.md` and `docs/second-boot-outside-qemu.md` carry that gap."
 
 [metrics]
 # Counts, every one of them. No hash appears as a row: a threshold carrying a
@@ -152,7 +163,7 @@ unknown_roots_refused                       = { min = 1 }
 tampered_modules_folding_to_the_honest_root = { min = 1, max = 1 }
 tampered_modules_caught_by_the_digest       = { min = 1, max = 1 }
 tampered_members_named_by_the_assembler     = { min = 1, max = 1 }
-# What was actually delivered. A floor rather than the measured 65 348, because
+# What was actually delivered. A floor rather than the measured 217 844, because
 # the number moves whenever a component image does and a claim that pinned it
 # would go red on every unrelated build; what it rules out is a module that has
 # lost its files — at which point the digest above covers a tree and some
@@ -160,7 +171,16 @@ tampered_members_named_by_the_assembler     = { min = 1, max = 1 }
 module_bytes_delivered                      = { min = 4096 }
 # Every component `user/generation.toml` names. The floor moves up when a
 # component is added, and that is a diff naming the component.
-component_files_in_the_module               = { min = 4 }
+#
+# **It did not move for four of them**, which is the half of that sentence
+# nothing was enforcing: it read 4 against a generation carrying 8 from E2-B08
+# until 2026-09-24. A floor four below the truth is not a wrong number, it is a
+# threshold that had stopped being able to fail — a boot module that had lost
+# half its component files would have passed this row. Raised to 8 with the
+# rule restated rather than rewritten, and the reversal is the one it always
+# was: a component leaving `user/generation.toml` is a diff naming it, and this
+# line moves down in that diff or the claim goes red for the right reason.
+component_files_in_the_module               = { min = 8 }
 
 [hardware]
 runner = "runner-class-A"       # pinned bare metal, thermally stable
@@ -177,4 +197,5 @@ tampered_members_named_by_the_assembler_is_zero = "the assembler refused the tam
 unknown_roots_refused_is_zero = "a machine handed a root no module carries booted to success, so `f.root=` is a decoration rather than a selection. `kernel/src/generation.rs`'s `report` is where the refusal is, and it ends the boot on purpose: a machine that quietly booted a different generation is the exact failure a rollback test exists to catch. This boot used to publish an all-zero root as generation 1 *before* refusing, which was an open question against RFC 0012; it is answered — the frame now selects before it publishes anything, so the refusal boot publishes no identity at all — and it was never what this row is about"
 leaves_moved_by_the_break_is_not_one = "at zero the defect is not reaching the frame image and there is nothing to roll back from — check that `mutate-unchecked-index` is still declared in `kernel/Cargo.toml` and still changes the artefact. At two or more it has reached a component leaf as well, which means the build is leaking a feature into the component images and step six would be restoring more than the frame"
 boots_below_six = "the command returned before it had run every boot, which it normally does by refusing — so this row going red with no refusal above it means a step was skipped rather than failed. `BOOTS` in `xtask/src/main.rs` counts emulator processes actually started, so a five here is a boot that did not happen and not a boot that failed"
+a_boot_selecting_a_root_exits_35_with_nothing_folding = "step five is the boot menu, and a machine that was offered two generations and found one has usually not been told about the second — **read the module list in the boot log before reading the fold**. `no module this machine was offered folds to the root it was asked for` with `offered 1 boot module(s), 0 of them refused` names `f_generation::select`, which is the subsystem behaving: it looked for `MODULE_MAGIC`, and a module whose first page has been handed to somebody else does not carry it any more. The tell is in the same log — the `address space` line's root address is the base of one of the `module` lines above it. That is a reservation that did not fit, it was silent until 2026-09-24, and it is now a named refusal at the place it happens plus `cargo xtask lint-bounds` in the local loop. RFC 0116, `docs/postmortem/0003`"
 a_threshold_no_workload_printed = "`cargo xtask rollback` failed before its summary block, which for this claim is the ordinary way a real finding arrives — the seven steps each refuse with what they expected and what they got. Read the workload's own output above the table; the rows are the last thing it prints and their absence is a symptom rather than the disease"

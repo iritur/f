@@ -1,0 +1,369 @@
+# The one scene `claims/0033-raster-cost-per-rung.toml` prices four renderers
+# over. `README.md` beside this file is the argument; this file is the scene,
+# and the claim's `[workload]` names it by the SHA-256 of these bytes.
+#
+# **Why the argument is inside the file that is hashed.** Every `notes` row
+# below says what real interfaces do that the part does, which is the half of
+# this choice a number cannot carry. Editing one changes the hash, so the
+# claim's row goes stale and a reader is told that the scene moved rather than
+# discovering it from a number that drifted. A file whose prose could be edited
+# without the hash moving would be a file whose prose nobody has to keep true.
+#
+# **Why this is a specification and not a node dump.** Nine hundred and
+# ninety-five nodes written out one per row is a file nobody reads and a diff
+# nobody reviews. What is here is every count a renderer can be held to — nodes
+# per kind, paths, path segments, glyph runs, glyph scalars — so the graph an
+# encoder builds from it either has this census or is not this scene. The
+# obligation that goes with that is named in `README.md` and belongs to
+# `E3-B02`: nothing in this tree reads this file today.
+#
+# **No string of text is written here.** Every glyph run names an entry of
+# `text/src/corpus.rs` and a scalar count, so the scene cites the corpus rather
+# than copying it — a script removed from the corpus is a scene that cannot be
+# built, which is the failure this arrangement wants. `latin` runs draw the
+# first `scalars` scalars of that entry's sample, because it is the one entry
+# where a scalar is a cluster and a prefix is therefore a word; every other
+# script draws its whole sample, because a prefix of a cluster is not text.
+#
+# The scales are spelled as words — `micros_hundredths`, not `us_x100` — for
+# `claims/theme-corpus/README.md`'s reason: a bare key in this repository's TOML
+# subset carries no digits, and RFC 0004 asks for the scale in the name rather
+# than for a particular suffix.
+
+[scene]
+about        = "an audio timeline, one frame, at the moment the playhead moves"
+chosen_by    = "E3-B02j"
+chosen_for   = "raster-cost-per-rung"
+surface_width_px  = 2880
+surface_height_px = 1800
+scale_per_hundred = 200
+body_text_size_px = 14
+dirty_part        = "playhead"
+selection_track       = 3
+selection_from_millis = 4200
+selection_to_millis   = 6800
+notes = "The selection is section 13's own test of the pillar, in the integers this tree can spell: the clip between 4.2 s and 6.8 s on track 3. A scene that could not express that question is a scene that measures the rendering pillar while dodging the one the same document calls least settled."
+
+# Every part is a subtree. `parent` is another part's name, or the empty string
+# for the root. `kinds` are the six of `abi/src/scene.rs`, and the per-kind node
+# counts are in `[census]` rather than here so that no part carries two numbers
+# that have to agree about one fact.
+
+[[part]]
+part   = "surface"
+parent = ""
+kinds  = ["draw", "semantic"]
+nodes  = 2
+paths  = 1
+path_segments = 4
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "One opaque ground under everything, and one semantic root. Every window has both and neither costs anything, which is why they are stated rather than assumed away: a frame whose first mark is translucent is a frame with no opaque base to composite against, and a rung that discovered that at run time would be measuring a different blend depth from the rung above it."
+
+[[part]]
+part   = "chrome_bar"
+parent = "surface"
+kinds  = ["transform", "draw", "semantic"]
+nodes  = 44
+paths  = 17
+path_segments = 196
+glyph_runs    = 5
+glyph_scalars = 30
+scripts = ["latin"]
+notes = "Sixteen small icon paths, five short titles, four separators, under one transform. This is the part every benchmark of a window system already has, and it is here to be outweighed: a scene made of this and nothing else measures the widget layer, which is the smallest and cheapest thing a real frame contains."
+
+[[part]]
+part   = "track_headers"
+parent = "surface"
+kinds  = ["draw", "semantic"]
+nodes  = 49
+paths  = 24
+path_segments = 320
+glyph_runs    = 8
+glyph_scalars = 76
+scripts = ["latin", "arabic", "hebrew"]
+notes = "Eight rows, each a ground, a mute control, a level meter and a name. Two of the eight names are not Latin, and they are the two the corpus argues are impossible to tell apart otherwise: Arabic joins and reverses in one pass, Hebrew reverses and does not join, so a direction fault and a shaping fault are separable here and nowhere else in this scene."
+
+[[part]]
+part   = "viewport"
+parent = "surface"
+kinds  = ["clip"]
+nodes  = 1
+paths  = 1
+path_segments = 4
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "The scrolling viewport, as a clip. Every real interface clips its content region, and a scene without a clip lets a renderer skip the one stage where coverage has to be intersected rather than accumulated."
+
+[[part]]
+part   = "scroll"
+parent = "viewport"
+kinds  = ["transform"]
+nodes  = 1
+paths  = 0
+path_segments = 0
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "The content transform, and it did not change this frame. It is a separate node from the playhead's transform on purpose: a scene where the only moving thing is also the only transform cannot distinguish a renderer that re-encodes a subtree because it moved from one that re-encodes it because its parent was touched."
+
+[[part]]
+part   = "ruler"
+parent = "scroll"
+kinds  = ["draw"]
+nodes  = 264
+paths  = 240
+path_segments = 480
+glyph_runs    = 24
+glyph_scalars = 96
+scripts = ["latin"]
+notes = "Two hundred and forty tick marks and twenty-four short labels. Many tiny paths with almost no area is the shape that breaks a binning stage, because the per-path cost dominates and nothing amortises it: a scene of few large paths measures coverage, and this measures the part of the pipeline that decides which tile a path is in."
+
+[[part]]
+part   = "clip_bodies"
+parent = "scroll"
+kinds  = ["transform", "clip", "draw"]
+nodes  = 456
+paths  = 352
+path_segments = 34688
+glyph_runs    = 96
+glyph_scalars = 984
+scripts = ["latin", "hebrew", "arabic", "devanagari", "thai", "han", "hangul", "mixed"]
+notes = "Eight tracks of twelve clips: a rounded body, its stroke, a name clipped to the body, and for sixty-four of them a waveform of five hundred and twelve segments. This is where the scene stops being cheap, and the reason is a fact about real content rather than a choice: an audio waveform is one enormous polyline per clip, so most of the segment count in any real timeline is in a path nobody authored by hand. Twelve clip names per corpus entry, so the whole of the corpus is on the screen at once and the scene cannot be rendered by a text path that handles one script."
+
+[[part]]
+part   = "selection"
+parent = "scroll"
+kinds  = ["layer", "draw"]
+nodes  = 2
+paths  = 1
+path_segments = 4
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "One translucent layer over the selected clip. Blend depth is what the fine raster pays for, and a scene of opaque non-overlapping marks measures the binning stage while reporting a number that reads as a whole frame."
+
+[[part]]
+part   = "playhead"
+parent = "scroll"
+kinds  = ["transform", "draw"]
+nodes  = 3
+paths  = 2
+path_segments = 5
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "The one subtree that changed. Three nodes of nine hundred and ninety-five, which is what a playing timeline actually dirties per frame, and it is the whole reason the claim's tail row means anything: the encode stage touches changed nodes only, so a scene whose every node is dirty measures a first frame every frame and a renderer would be bounded on a state real interfaces are in once."
+
+[[part]]
+part   = "inspector"
+parent = "surface"
+kinds  = ["transform", "layer", "effect", "draw", "semantic"]
+nodes  = 54
+paths  = 7
+path_segments = 28
+glyph_runs    = 21
+glyph_scalars = 204
+scripts = ["latin"]
+notes = "A floating panel over live content, with a material behind it and a shadow under it, and a form of labels, fields and numbers inside it at body size. Two effects rather than one, because a material reads what is underneath and a shadow does not, and a renderer that conflates them is right about this frame and wrong about the next."
+
+[[part]]
+part   = "status_line"
+parent = "surface"
+kinds  = ["draw", "semantic"]
+nodes  = 2
+paths  = 0
+path_segments = 0
+glyph_runs    = 1
+glyph_scalars = 30
+scripts = ["latin"]
+notes = "One line of body text with no ground of its own. It is here because it is the one run in the scene that changes its content without changing its geometry, which is the cheapest thing a renderer can get wrong in the expensive direction."
+
+[[part]]
+part   = "canvas_model"
+parent = "viewport"
+kinds  = ["semantic"]
+nodes  = 117
+paths  = 0
+path_segments = 0
+glyph_runs    = 0
+glyph_scalars = 0
+scripts = []
+notes = "The canvas, its eight tracks, its ninety-six clips and twelve markers, as semantic nodes in the same tree and the same commit. It contributes nothing to the picture and it is not free: the encode stage walks it. Leaving it out would price a pipeline this system is not going to run, and section 13's test — select the clip between 4.2 s and 6.8 s on track 3, without seeing a pixel — would not be answerable about the thing being measured."
+
+# The two effect declarations, in the form `scene/src/effect.rs` believes: an
+# estimate and a saving, and nothing else. What is done instead is **derived**
+# from the two — a saving equal to the estimate is a skip, a smaller one is a
+# reduction — so it is not written here. That module removed exactly this pair
+# of fields that must agree about one fact from the wire, and a corpus file that
+# reintroduced it would be contradicting the file it is written against.
+
+[[effect]]
+effect = "material"
+part   = "inspector"
+estimate_micros_hundredths = 42_000
+saving_micros_hundredths   = 39_000
+notes = "A blurred material sampling the timeline under the panel. The saving is short of the estimate, so the fallback is a reduction rather than a skip: at lower fidelity the panel is still legible over moving content, and skipping it entirely leaves white text on a waveform."
+
+[[effect]]
+effect = "shadow"
+part   = "inspector"
+estimate_micros_hundredths = 6_000
+saving_micros_hundredths   = 6_000
+notes = "A drop shadow separating the panel from the canvas. The saving equals the estimate, so the fallback is a skip, which is the honest declaration for an effect whose reduced form is indistinguishable from its absence."
+
+# Every glyph run in the scene, by the corpus entry it draws and the part it is
+# in. These rows are what make the two `glyph_` columns above checkable rather
+# than asserted: a part's runs and scalars are the sum of its rows here, a row
+# of any script but `latin` states exactly `runs` times its entry's sample
+# length, and a `latin` row states no more than its runs times the length of the
+# control sample. The first draft of this file had the part totals and no rows,
+# so the only thing that could check them was a hand-written derivation in the
+# checker — a second copy of this file's composition, living beside the file it
+# was copied from, which is the defect this repository has recorded in four
+# different modules. The rows are here so that nothing outside this file has to
+# remember what is in it.
+
+[[run]]
+part   = "chrome_bar"
+script = "latin"
+runs   = 5
+scalars = 30
+about = "five short menu titles"
+
+[[run]]
+part   = "track_headers"
+script = "latin"
+runs   = 6
+scalars = 54
+about = "six of the eight track names"
+
+[[run]]
+part   = "track_headers"
+script = "arabic"
+runs   = 1
+scalars = 13
+about = "one track named in a script that joins"
+
+[[run]]
+part   = "track_headers"
+script = "hebrew"
+runs   = 1
+scalars = 9
+about = "one track named in a script that reverses and does not join, which is what separates a direction fault from a shaping one"
+
+[[run]]
+part   = "ruler"
+script = "latin"
+runs   = 24
+scalars = 96
+about = "twenty-four time labels of four scalars each"
+
+[[run]]
+part   = "clip_bodies"
+script = "latin"
+runs   = 12
+scalars = 144
+about = "twelve clip names in the control script"
+
+[[run]]
+part   = "clip_bodies"
+script = "hebrew"
+runs   = 12
+scalars = 108
+about = "twelve whole samples, because a prefix of a cluster is not text"
+
+[[run]]
+part   = "clip_bodies"
+script = "arabic"
+runs   = 12
+scalars = 156
+about = "twelve whole samples"
+
+[[run]]
+part   = "clip_bodies"
+script = "devanagari"
+runs   = 12
+scalars = 156
+about = "twelve whole samples, each with a vowel sign stored after the consonant it is drawn before"
+
+[[run]]
+part   = "clip_bodies"
+script = "thai"
+runs   = 12
+scalars = 144
+about = "twelve whole samples with no space in them"
+
+[[run]]
+part   = "clip_bodies"
+script = "han"
+runs   = 12
+scalars = 48
+about = "twelve whole samples that break almost anywhere"
+
+[[run]]
+part   = "clip_bodies"
+script = "hangul"
+runs   = 12
+scalars = 108
+about = "twelve whole samples, half precomposed and half jamo"
+
+[[run]]
+part   = "clip_bodies"
+script = "mixed"
+runs   = 12
+scalars = 120
+about = "twelve whole samples at three embedding levels, which is the entry nothing else in this scene asks for"
+
+[[run]]
+part   = "inspector"
+script = "latin"
+runs   = 21
+scalars = 204
+about = "twelve field labels, six field contents and three numbers"
+
+[[run]]
+part   = "status_line"
+script = "latin"
+runs   = 1
+scalars = 30
+about = "one line of status text"
+
+# The census, and the only place a node is counted by kind. Six rows summing to
+# `nodes`, and `nodes` equal to the sum of the parts above: two relations over
+# one set of numbers, so a part added without the census being edited is
+# arithmetic that does not close rather than a scene that quietly grew.
+
+[census]
+transforms = 12
+clips      = 97
+layers     = 2
+draws      = 703
+effects    = 2
+semantics  = 179
+nodes      = 995
+paths      = 645
+path_segments = 35_729
+glyph_runs    = 155
+glyph_scalars = 1_420
+dirty_nodes   = 3
+notes = "Nine hundred and ninety-five nodes is the size of one real window and not of a benchmark: a settings panel is eighty and a browser tab is tens of thousands, and this sits where an application somebody works in all day sits. The number that matters more is `dirty_nodes`, because three of nine hundred and ninety-five is the ratio the delta ring and the dirty-subtree walk were built for, and a scene that did not state it would let a run report a cold frame as a warm one."
+
+# What no rung in this tree can draw, with the task each needs. This table is
+# the point of the choice rather than an apology for it: the exit this file
+# closes says the argument must be representativeness and not reachability, and
+# a scene reachable today would be a scene drawn by a fixed-grid character
+# console, which is the only thing in this repository that puts anything on a
+# screen. Every row is a statement about this tree on 2026-09-24 and each one is
+# expected to stop being true.
+
+[unreachable]
+renderer = "No rung exists. E3-B02 has landed the ladder's vocabulary and no backend, so nothing here rasterises a path at all, and kernel/src/screen.rs writes single pixels of a five-by-seven grid inside the frame."
+shaper = "Every glyph run in this file is unbuildable. RFC 0082 put the shaper behind the licence boundary and third_party/ is empty, so there is no GSUB or GPOS for any of the eight scripts, including latin."
+reordering = "The mixed clip names need UAX 9 embedding levels, which is E3-B03e, which is blocked on the two decisions in RFC 0114 and RFC 0115."
+joining = "The arabic names need contextual joining, which is the imported half and not the written one."
+flattening = "The rounded clip bodies and the sixty-four waveforms are curves, and nothing in this tree flattens a path. On the tessellating floor they are triangles that no code here produces."
+material = "A blurred material is a stage of the fine raster on rung 1 and is not expressible as triangles at all on the floor, so this scene forces every rung to record what it did with the two declarations above rather than quietly rendering a cheaper picture."
+presentation = "There is no display path above the frame. E3-B01 stands a compositor up and counts what it was sent; no pixel it holds reaches a screen."

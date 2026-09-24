@@ -262,12 +262,122 @@ pub fn compose(into: &mut [u8], units_per_em: u32, advances: &[u16]) -> Result<u
     Ok(total)
 }
 
+/// The two faces this tree composes, and the one place their advances are
+/// written.
+///
+/// # Why this is in `text/` and not in the component that stocks them
+///
+/// Because three crates have to agree on them and only two of those could share
+/// a definition any other way. `user/objects` composes the declared face and
+/// puts it in its store; `user/objects/manifest.toml` declares the *address* of
+/// that composition; and `kernel/src/objects.rs` computes the same address for
+/// itself, refuses one the record does not declare, and reads the other back.
+/// A second transcription of these numbers anywhere would be a second face with
+/// a different address, and the symptom would be a read that resolves to nothing
+/// rather than a diff anybody can see.
+///
+/// # Why there are two of them
+///
+/// Because a boot that only ever loads a declared face cannot tell a working
+/// declaration from a check that answers yes. [`UNDECLARED`] is the same face
+/// with one advance one design unit larger: it composes, it hashes, it is put in
+/// the same store, [`Face::read`] believes it — and no `[[face]]` entry names
+/// its address. Everything about it is real except the permission, which is the
+/// only variable `E3-B03b`'s second clause is about.
+///
+/// *What would reverse this module:* a face that arrives from outside the build
+/// — RFC 0003's imported font, reached over a ring — at which point the declared
+/// address names an imported file, [`compose`] loses its only non-test caller,
+/// and these constants go with it.
+pub mod fixture {
+    use super::{Refusal, bytes_for, compose};
+
+    /// The design-unit grid both faces are written on.
+    ///
+    /// A thousand, which is the CFF convention rather than TrueType's 2048. The
+    /// choice matters only in that it is written down once: the address in
+    /// `user/objects/manifest.toml` is a function of this number, so moving it
+    /// is a red test rather than a silent second face.
+    /// Unit: design units per em.
+    pub const UNITS_PER_EM: u32 = 1000;
+
+    /// The advances of the face `user/objects/manifest.toml` declares.
+    ///
+    /// Four, and the values are chosen to be distinguishable rather than
+    /// typographic: a zero advance, because zero is a real advance and a reader
+    /// answering it for a glyph it does not carry has to be caught; and three
+    /// that differ from each other, so that a reader returning the wrong index
+    /// is caught too.
+    /// Unit: design units.
+    pub const DECLARED: [u16; 4] = [0, 512, 1024, 600];
+
+    /// The same face with one advance one design unit larger, declared by
+    /// nothing.
+    ///
+    /// One unit and not a hundred, deliberately: the difference has to be the
+    /// smallest one the format can carry, so that what separates the two faces
+    /// is their *address* and nothing a reader could plausibly notice about
+    /// their contents.
+    /// Unit: design units.
+    pub const UNDECLARED: [u16; 4] = [0, 513, 1024, 600];
+
+    /// How many bytes either of them occupies, and therefore how large a buffer
+    /// a caller needs.
+    /// Unit: bytes.
+    pub const BYTES: usize = bytes_for(DECLARED.len());
+
+    /// Write the declared face into `into`, and answer how long it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Truncated`] if `into` is shorter than [`BYTES`]. No other
+    /// refusal is reachable for these constants, and the `const` block below
+    /// this module is what holds them to that.
+    pub fn declared(into: &mut [u8]) -> Result<usize, Refusal> {
+        compose(into, UNITS_PER_EM, &DECLARED)
+    }
+
+    /// Write the undeclared twin into `into`, and answer how long it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`declared`].
+    pub fn undeclared(into: &mut [u8]) -> Result<usize, Refusal> {
+        compose(into, UNITS_PER_EM, &UNDECLARED)
+    }
+}
+
+// The twin differs from the declared face and differs by one advance, checked
+// by the machine rather than by reading two lists. A fixture whose two halves
+// drifted into being the same face would make `E3-B03b`'s refusal a boot that
+// refused the face it had just loaded, and every assertion about it would still
+// pass.
+const _: () = assert!(fixture::DECLARED.len() == fixture::UNDECLARED.len());
+// And the two things that make `Truncated` the only refusal either writer can
+// answer, which is what their doc comments claim: a grid inside the format's
+// bounds and a glyph count inside them. A fixture that drifted outside would
+// make `fixture::declared` fallible in a way its callers do not handle, and
+// `kernel/src/objects.rs` would report it as a defect in this crate — which it
+// would be, discovered at a boot rather than at a build.
+const _: () = assert!(fixture::UNITS_PER_EM > 0 && fixture::UNITS_PER_EM <= UNITS_PER_EM_MAX);
+const _: () = assert!(!fixture::DECLARED.is_empty() && fixture::DECLARED.len() <= GLYPHS_MAX);
+const _: () = assert!(fixture::DECLARED[1] != fixture::UNDECLARED[1]);
+const _: () = assert!(fixture::DECLARED[0] == fixture::UNDECLARED[0]);
+const _: () = assert!(fixture::DECLARED[2] == fixture::UNDECLARED[2]);
+const _: () = assert!(fixture::DECLARED[3] == fixture::UNDECLARED[3]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The face every test here composes, and the one `user/objects` stocks.
-    const ADVANCES: [u16; 4] = [0, 512, 1024, 600];
+    ///
+    /// Taken from [`fixture`] rather than spelled again, because a second
+    /// transcription is a second face: these bytes are hashed into
+    /// `user/objects/manifest.toml` and the frame recomputes the same address,
+    /// so a copy that drifted would be a test passing about a face nothing else
+    /// in the tree holds.
+    const ADVANCES: [u16; 4] = fixture::DECLARED;
 
     /// One byte wrong in a composed face, and what reading it should earn.
     ///
@@ -369,5 +479,40 @@ mod tests {
         assert!(Face::read(&first[..len]).is_ok());
         assert!(Face::read(&second[..len]).is_ok());
         assert_ne!(first, second);
+    }
+    #[test]
+    fn the_two_fixture_faces_are_both_faces_and_are_not_the_same_one() {
+        // The property the whole of `E3-B03b`'s second clause rests on: the
+        // undeclared twin is refused for its *address* and for nothing else, so
+        // it has to be as readable as the face beside it. A twin that failed
+        // `read` would make the boot's refusal ambiguous between a permission
+        // and a parse.
+        let mut declared = [0u8; fixture::BYTES];
+        let mut twin = [0u8; fixture::BYTES];
+        let one = fixture::declared(&mut declared).expect("the declared fixture composes");
+        let two = fixture::undeclared(&mut twin).expect("the undeclared fixture composes");
+        assert_eq!(one, two, "the two fixtures are the same length");
+        assert_eq!(one, fixture::BYTES);
+        assert_ne!(declared, twin, "two faces that compose to one run of bytes are one face");
+
+        let left = Face::read(&declared[..one]).expect("the declared fixture is a face");
+        let right = Face::read(&twin[..two]).expect("the undeclared fixture is a face too");
+        assert_eq!(left.units_per_em(), right.units_per_em());
+        assert_eq!(left.glyphs(), right.glyphs());
+        assert_ne!(left, right, "the twin differs where the format can see it");
+    }
+
+    #[test]
+    fn the_twin_differs_in_exactly_one_advance() {
+        let mut declared = [0u8; fixture::BYTES];
+        let mut twin = [0u8; fixture::BYTES];
+        let len = fixture::declared(&mut declared).expect("composes");
+        let _ = fixture::undeclared(&mut twin).expect("composes");
+        let differing =
+            declared[..len].iter().zip(twin.iter()).filter(|(left, right)| left != right).count();
+        // One byte, because 512 and 513 differ only in their low byte. Written
+        // as a count rather than as an index so that a fixture whose twin moved
+        // to a different glyph still holds this.
+        assert_eq!(differing, 1, "the twin is the smallest difference the format can carry");
     }
 }

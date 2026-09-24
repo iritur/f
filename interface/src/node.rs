@@ -2025,103 +2025,16 @@ mod tests {
         assert_eq!(set.push(TokenName::new("panel").expect("a name")), Err(Refused::TooManyTokens));
     }
 
-    /// The first hard interface: a settings panel.
+    /// The first hard interface: a settings panel — **the shipped one**.
     ///
-    /// Chosen because it is where *style is tokens, never values* and *layout is
-    /// constraints, never coordinates* are most tempting to break — a settings
-    /// panel is a column of labelled controls, and every toolkit that ever
-    /// shipped one grew a way to say *put this at 340 and make it blue*.
-    ///
-    /// Fifteen nodes and no role outside the vocabulary. The volume is a
-    /// [`Role::Number`] with bounds and a step, so an agent can set it without
-    /// guessing what is settable; the mute toggle says what it disables with
-    /// [`Relation::Controls`]; every control says which label names it, so no
-    /// projection has to infer a name from proximity.
-    fn settings_panel() -> [Node; 15] {
-        const SURFACE: NodeId = NodeId::new(1);
-        const RULE: NodeId = NodeId::new(2);
-        const OUTPUT: NodeId = NodeId::new(10);
-        const DEVICE_LABEL: NodeId = NodeId::new(11);
-        const DEVICE: NodeId = NodeId::new(12);
-        const SPEAKERS: NodeId = NodeId::new(13);
-        const HEADPHONES: NodeId = NodeId::new(14);
-        const VOLUME_LABEL: NodeId = NodeId::new(15);
-        const VOLUME: NodeId = NodeId::new(16);
-        const MUTE: NodeId = NodeId::new(17);
-        const APPLIED: NodeId = NodeId::new(18);
-        const INPUT: NodeId = NodeId::new(20);
-        const NAME_LABEL: NodeId = NodeId::new(21);
-        const NAME: NodeId = NodeId::new(22);
-        const RESET: NodeId = NodeId::new(23);
-
-        let percent = |value: i64| Quantity::whole(value, Unit::Ratio);
-
-        [
-            Node::new(SURFACE, NodeId::UNNAMED, Role::Surface)
-                .with_content(text("Sound"))
-                .with_layout(Constraints::flowing(Flow::Block))
-                .with_style(styled(&["surface-1"])),
-            Node::new(OUTPUT, SURFACE, Role::Group)
-                .with_content(text("Output"))
-                .with_layout(Constraints::flowing(Flow::Block).at_least(1200)),
-            Node::new(DEVICE_LABEL, OUTPUT, Role::Label).with_content(text("Device")),
-            related(
-                Node::new(DEVICE, OUTPUT, Role::Choice)
-                    .with_state(StateSet::ENABLED)
-                    .with_intent(CapRef::new(0x0051))
-                    .with_layout(Constraints::flowing(Flow::Block)),
-                &[Relation::LabelledBy(DEVICE_LABEL)],
-            ),
-            Node::new(SPEAKERS, DEVICE, Role::Item)
-                .with_content(text("Speakers"))
-                .with_state(StateSet::ENABLED.with(StateSet::SELECTED))
-                .with_intent(CapRef::new(0x0052)),
-            Node::new(HEADPHONES, DEVICE, Role::Item)
-                .with_content(text("Headphones"))
-                .with_state(StateSet::ENABLED)
-                .with_intent(CapRef::new(0x0053)),
-            Node::new(VOLUME_LABEL, OUTPUT, Role::Label).with_content(text("Volume")),
-            related(
-                Node::new(VOLUME, OUTPUT, Role::Number)
-                    .with_content(Content::Value(
-                        Reading::bounded(percent(70), percent(0), percent(100)).stepped(percent(5)),
-                    ))
-                    .with_state(StateSet::ENABLED)
-                    .with_intent(CapRef::new(0x0054))
-                    .with_layout(Constraints::flowing(Flow::Inline).growing(1)),
-                &[Relation::LabelledBy(VOLUME_LABEL)],
-            ),
-            related(
-                Node::new(MUTE, OUTPUT, Role::Toggle)
-                    .with_content(text("Mute"))
-                    .with_state(StateSet::ENABLED)
-                    .with_intent(CapRef::new(0x0055)),
-                &[Relation::Controls(VOLUME)],
-            ),
-            Node::new(APPLIED, OUTPUT, Role::Status)
-                .with_content(text("Applied"))
-                .with_style(styled(&["text.muted"])),
-            Node::new(RULE, SURFACE, Role::Separator),
-            Node::new(INPUT, SURFACE, Role::Group)
-                .with_content(text("Input"))
-                .with_layout(Constraints::flowing(Flow::Block)),
-            Node::new(NAME_LABEL, INPUT, Role::Label).with_content(text("Microphone name")),
-            related(
-                Node::new(NAME, INPUT, Role::Entry)
-                    .with_content(text("built-in"))
-                    .with_state(StateSet::ENABLED.with(StateSet::INVALID))
-                    .with_intent(CapRef::new(0x0056))
-                    .with_layout(Constraints::flowing(Flow::Inline).at_least(800).growing(1))
-                    .with_style(styled(&["field.danger"])),
-                &[Relation::LabelledBy(NAME_LABEL)],
-            ),
-            Node::new(RESET, INPUT, Role::Command)
-                .with_content(text("Reset to defaults"))
-                .with_state(StateSet::ENABLED)
-                .with_intent(CapRef::new(0x0057))
-                .with_style(styled(&["emphasis"])),
-        ]
-    }
+    /// It moved to [`crate::example`] and is imported rather than rebuilt
+    /// here. `E3-B06h`'s exit is about *one unmodified application*, and a
+    /// fixture only this file can reach is a fixture every projection copies;
+    /// two copies of a declaration are two applications, and the second one
+    /// stops being the one anybody declares the moment a node is added to the
+    /// first. The assertions below are unchanged and now run against the value
+    /// the projections are handed.
+    use crate::example::settings_panel;
 
     #[test]
     fn a_settings_panel_is_expressible() {

@@ -12,7 +12,7 @@ cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
 cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or stack
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
-cargo xtask cap        # eight boots: a process tries to escape its capabilities
+cargo xtask cap        # eleven boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
 cargo xtask attest     # what is this machine running; modify the frame, the answer moves
 cargo xtask iommu      # a real device transfers outside its domain, and is faulted
@@ -104,6 +104,14 @@ Added when the same mistake happens twice. Each line is a scar.
 - Writing a directory walker with its own copy of the skip list. Five carry one
   now; the four that forgot `.claude` read four *other* checkouts of this
   repository and reported their findings against this one.
+- Trusting a check that only the nightly runs. Twice now a red schedule went
+  unread for a day — `docs/postmortem/0002` and `0003` — and the second time the
+  repair was already committed on a branch, so the schedule reported a defect
+  nobody could connect to its fix. If a check rests on arithmetic between two
+  constants, it is a file read and belongs in `verify`; the expensive workload
+  stays nightly and stops being the only observer. What is left on a schedule now
+  opens an issue here when it goes red — `cargo xtask lint-schedules` is what
+  refuses a scheduled job nothing is listening to. RFC 0122.
 - Taking a registry number by looking at the tree you can see. Three RFCs were
   numbered 0085 and all three were cited, so the number identified nothing.
   Check the peers — `git worktree list`, then every branch — before taking one,

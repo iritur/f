@@ -1,0 +1,156 @@
+# `E3-B01j`: how many times one UI frame crosses the ring, counted on both sides.
+#
+# **What a crossing is, decided here and printed at the boot so a reader can
+# convert.** `E3-B01g` settled the neighbouring question and its record is the
+# precedent: a batch of four entries is one publish and one doorbell, and that boot
+# prints what a client charging per entry would have said instead. That makes the
+# *publish* the right unit for a doorbell, because what a doorbell costs is one
+# delivery.
+#
+# It is the wrong unit for a crossing. A client that batches four deltas into one
+# publish has still moved four payloads into the channel's arena, and still takes
+# four completions back out of it; what it saved is one interrupt, which is already
+# counted and published separately. So **a crossing here is one entry over the
+# boundary, in one direction** — and both directions count, because a delta going
+# out and its completion coming back are each a slot written on one side and read
+# on the other, and a client that submitted without reaping would be a client whose
+# ring fills.
+#
+# That is also the number the design cares about. `docs/design/ring-scene-boot.html`
+# wants boundary crossings per UI frame under ten, and the thing that reduces them
+# is `E3-B01l`'s reconciler emitting differences instead of a tree — which changes
+# how many *deltas* a frame costs and not how many publishes carry them. A crossing
+# counted per publish would report the batching and miss the design's subject.
+#
+# The control ring is not in it. It carries the frame's notices about this
+# component's life, which happen once per run rather than once per frame, so
+# folding them in would make a per-frame figure depend on how often a supervisor
+# spoke. *What would reverse this:* a control ring that carries something per
+# frame.
+#
+# **This is not `E3-B01`'s threshold and must not be read as one.** That line's
+# exit is *under ten per UI frame* and it belongs to the parent. The instrument
+# here is a client that submits **one delta at a time**, deliberately:
+# `kernel/src/compositor.rs`'s `drive` says so in its own comment — *a client that
+# batched here would be building `E3-B01j`'s evidence without its counter*. So the
+# eight below is what an un-batched client costs, which is a floor on the honest
+# figure and not the figure. A client with a reconciler in front of it sends fewer
+# deltas per frame and the number falls; nothing here has one, and inventing one to
+# publish a better number would be writing the measurement instead of taking it.
+#
+# **Both sides count and the boot requires them equal before a row is printed.**
+# That is the shape `claims/0037` established between a component and the frame and
+# the reason this claim's rows can be believed at all: the frame counts what it
+# submitted and what it reaped, the component counts what it drained and what it
+# answered, and neither number is derived from the other. A disagreement turns the
+# boot red and prints no rows, so a red row *here* is the number itself moving.
+#
+# **The rows were read before the bounds were written**, which is the order
+# `E0-D04`, RFC 0084 and `claims/0037` all argue for and which `claims/0037`
+# recorded costing it one wrong sentence. `cargo xtask compositor serve` was run
+# first; it printed 8 000, and the bound is that number rather than a target
+# somebody hoped for.
+
+name       = "ring-crossings-per-ui-frame"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E3"
+
+statement  = """
+One UI frame costs eight entries across the ring between a client and the
+compositor, counted as entries in either direction and not as publishes. Two
+frames of deltas — five creations and a paint, then a removal — go out one entry
+at a time and eight completions come back, so sixteen entries cross for two
+frames and the rate is 8 000 per frame times a thousand.
+
+Measured by `cargo xtask claim ring-crossings-per-ui-frame`, which runs the
+serving half of `cargo xtask compositor`:
+
+  ring_crossings_per_ui_frame_x1000          8000
+  ring_crossings_counted_by_the_frame          16
+  ring_crossings_counted_by_the_component      16
+  ring_entries_client_to_component              8
+  ring_entries_component_to_client              8
+  ui_frames_closed                              2
+
+The first two of those are counted on **opposite sides of the boundary** — the
+frame counts what it submitted and reaped, the component counts what it drained
+and answered — and the boot requires them equal before any row is printed. The
+same boot prints the conversion beside them, `per publish a client would say 8`,
+and the wake half of the same command prints `12 out, 12 back ... per publish a
+client would say 10`, which is where the two units can be told apart.
+
+**Eight is not E3-B01's figure.** That line's exit is under ten per UI frame and
+this client does not batch, on purpose. Eight is what an un-batched client costs.
+"""
+
+[baseline]
+system  = "none"
+notes   = "The comparison a reader wants is a surface-passing compositor, where a client hands over a buffer per frame and the crossing count is a property of a protocol nobody in this tree implements. That is not a configuration of anything under `claims/baselines/`, and writing one would be writing the opponent's submission for them. What takes its place is the conversion the same boot prints: sixteen entries as eight publishes on the serving half, twelve entries as ten publishes on the batching one. The useful comparison is not against another system but between the two units, because that is where a crossing count is usually wrong — a figure quoted per publish reports batching and misses what a frame costs."
+
+[owner]
+subsystem = "the scene ring between a client and the compositor"
+document  = "docs/design/ring-scene-boot.html"
+section   = "09"
+notes     = "Section 09 is where the frame budget is drawn and where a per-frame crossing count is spent. The subsystems that own the number are `kernel/src/compositor.rs` for the frame's two counts and `user/compositor/src/tree.rs` for the component's — `Counters::crossings` is the sum and `Counters::crossings_per_frame_x1000` the rate, both taken by the component so that the frame is comparing against something rather than computing both sides. `f_ring::doorbell::Bell` owns the publish count the conversion is printed from, which is `E3-B01g`'s and not this claim's."
+
+[workload]
+path   = "kernel/src/compositor.rs"
+frames = 2
+notes  = "The script is `script()` in that file: five creations and a paint, a commit naming frame one with a whole scanout period of room, a removal whose node has a child, and a commit naming frame two with one nanosecond. Eight entries, submitted one at a time and each waited for, because the payload travels in the channel's arena at a fixed offset and a second entry published before the first was answered would overwrite bytes the component had not read. That is why the workload does not batch and why the number is a floor: the same file's `drive` states it, and `batch_script()` beside it is `E3-B01g`'s workload and not this one's. A change to the script changes the number, which is the registry's own rule — the baseline is versioned with the claim — and the bound below is exact so that such a change re-declares the number rather than sliding past it."
+
+[metrics]
+primary   = "ring_crossings_per_ui_frame_x1000"
+secondary = [
+  "ring_crossings_counted_by_the_frame",
+  "ring_crossings_counted_by_the_component",
+  "ring_entries_client_to_component",
+  "ring_entries_component_to_client",
+  "ui_frames_closed",
+]
+
+[threshold]
+# Exactly the measured value, and the exactness is the point rather than
+# confidence. This is a count of ring entries over a fixed script with a fixed
+# seed: it is the same number on every host that runs the binary, so a bound with
+# room in it would be a bound that tolerates a change nobody decided. A script
+# that gains a delta moves this and should: the workload changed, and a claim
+# whose workload changed owes a re-declaration.
+#
+# It is deliberately **not** 10 000. Under ten per UI frame is `E3-B01`'s exit and
+# this instrument cannot establish it — the client does not batch — so gating on
+# the design's threshold here would be this claim borrowing a sentence it has not
+# earned.
+ring_crossings_per_ui_frame_x1000 = { min = 8000, max = 8000 }
+
+# The two sides, each exact. Their *equality* is required by the boot before these
+# rows are printed, so what the bounds add is the other failure: a run where both
+# sides agreed on a number that is not this workload's.
+ring_crossings_counted_by_the_frame = { min = 16, max = 16 }
+ring_crossings_counted_by_the_component = { min = 16, max = 16 }
+
+# The two directions. Without them the total above is satisfied by a component
+# that answered sixteen entries for nothing, or a client that submitted sixteen
+# and reaped none — and the first of those is the accounting change this claim is
+# most likely to be broken by.
+ring_entries_client_to_component = { min = 8, max = 8 }
+ring_entries_component_to_client = { min = 8, max = 8 }
+
+# The denominator. Without it the rate above is a rate over an unknown number of
+# frames, which is the failure this project has recorded under three names — most
+# recently in `claims/0036` and again in `claims/0037`.
+ui_frames_closed = { min = 2, max = 2 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so rather than pretending**, on `claims/0005`'s terms and `claims/0037`'s wording. A ring entry is an event both sides of the boundary observe; it does not depend on when anything happened, only on whether it happened, so every row here is the same number in the development container and on bare metal. `f_bench::Environment` refuses to record a timing here and this records none. The runner is named because `lint-reproduce` requires every claim to name one with a specification beside it. The number of this task that genuinely needs a machine is not here at all: what a crossing *costs* is RFC 0005's cross-domain call and `E1-P10`'s measurement, and `docs/TECHNICAL-DEBT.md` carries it."
+
+[reproduce]
+command = "cargo xtask claim ring-crossings-per-ui-frame"
+
+[diagnosis]
+# Written while the system is understood rather than at 2 a.m. when it is not.
+the_two_sides_disagree = "the frame and the component counted different events, and the boot refuses on this before the rows are printed — so reaching this claim with the two unequal means that check was weakened rather than that the counts diverged. When it is real, one of the two is counting something correlated with a crossing rather than a crossing: read `ring_entries_component_to_client` against the frame's completion count first, because the return leg is the one counted in two places for a reason. `user/compositor/src/component.rs` increments it where the ring accepted the completion, and a refactor that moved it to where the completion was produced would count completions the ring refused."
+rate_is_over = "one UI frame costs more entries than it did. That is the design's own subject and the number to act on, not to adjust: read the two direction rows to see which way it moved. More out is a client sending more deltas per frame, which is what a reconciler is for and what `E3-B01l` built; more back is a component answering entries it used to leave alone, which is usually a `flags::NO_CQE` that stopped being honoured. Do not respell the crossing as a publish to bring it under a bound — that is the one repair this claim's header spends four paragraphs refusing, because it reports batching and leaves the design's figure unmeasured."
+rate_is_under = "not automatically good news, and the row most likely to be misread. A falling rate with `ui_frames_closed` unchanged is a real reduction in what a frame costs; a falling rate with `ui_frames_closed` *risen* is a longer run averaging a fixed cost over more frames, which says nothing about the design. Read the denominator before believing the numerator, and read `ring_entries_client_to_component` against the script in `kernel/src/compositor.rs`: eight entries is what that script sends, and a smaller number is a client that stopped sending rather than a system that got cheaper."
+ui_frames_closed_is_short = "the rate is over fewer frames than the script closes, so it is a rate over an unknown interval and every other row here is about a run that did not finish. The boot refuses on the frame count before these rows are printed, so seeing it here means that check was removed or the row is being read from a half that does not own it. `outcome` in the boot log says why the component stopped."
+a_direction_is_zero = "the counter on that side cannot move at all, which leaves every other row looking plausible while measuring half a boundary. This is the row to read first when anything else here looks surprising: a zero out is a client that submitted nothing, and a zero back is a component whose completions never reached the ring — and in the second case the frame's own reap count would be zero too, so the equality clause above would have gone red first. If it did not, the equality clause is comparing a number against itself."

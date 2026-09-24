@@ -63,12 +63,14 @@
 use f_abi::control::{is_notice, notice};
 use f_abi::scene::PAYLOAD_BYTES;
 use f_abi::{Cqe, door, feature, state};
+use f_interface::token::Theme;
 use f_ring::adopt::{Adopted, Client, Server};
 use f_ring::device::Window;
 use f_ring::heap::Heap;
 use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
+use crate::latch::Reading;
 use crate::pacing::Tick;
 use crate::routing::{self, at, bell, life, node, reported, stopped};
 use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
@@ -161,7 +163,33 @@ fn serve() -> ! {
     // `crate::tree::Held`'s own comment says why: a kibibyte of zeroes is a
     // `memset` and costs the image nothing, which is RFC 0100's rule read the
     // way round that permits something rather than the way round that refuses.
-    let mut held = Held::new(&mut graph, &mut batch, parts.plan);
+    //
+    // **The theme, resolved here and never again.** `Theme::DEFAULT` is a
+    // constant of the resolver rather than something this component chose, and
+    // it is spelled here because nothing in this build carries a theme *to* a
+    // component: there is no word for one on the routing page and no ring that
+    // delivers one. The day either exists, the theme arrives beside the pacing
+    // inputs in `laid_out` and reaches this argument, and `crate::tree` does not
+    // change — which is the whole reason `Held::new` takes a theme instead of
+    // reading one.
+    //
+    // What it cost the image is **6 136 bytes, measured rather than estimated**:
+    // `cargo xtask component` reports 23 240 for this component without this
+    // argument and the three tree words that go with it, and 29 376 with them,
+    // against the 65 536 the frame maps and that command refuses past. The
+    // difference is the resolver's two hundred and fifty-six-entry sRGB transfer
+    // table and the clamp that walks it, and it is *not* a `Resolved` sitting in
+    // `.rodata` — RFC 0100's rule is about the constants a component
+    // materialises, and what this line produces is written at run time out of a
+    // theme rather than copied out of the image.
+    //
+    // It is worth a number rather than a reassurance because the number is what a
+    // future reader needs: a second theme resolved here would cost the table
+    // nothing and the `Resolved` about a kibibyte of stack, while a *constant*
+    // `Resolved` — the obvious optimisation, a palette baked at compile time —
+    // would cost the image the whole of it and would be RFC 0079's first reversal
+    // condition wearing a performance argument.
+    let mut held = Held::new(&mut graph, &mut batch, parts.plan, &Theme::DEFAULT);
 
     let mut route = Route { control: parts.control, told: false };
     let mut idle: u64 = 0;
@@ -290,10 +318,53 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
-        if let Some(answer) = held.offer(&entry, &payload, now)
-            && parts.data.post(answer).is_err()
-        {
-            break stopped::NO_RING;
+        // And the pointer, on exactly the ordering argument above and with the
+        // same `Release`/`Acquire` pair underneath it: the frame writes the three
+        // words and then publishes the entry, so a read taken after the pop sees
+        // what was written before the submission this turn is answering.
+        //
+        // Read every turn rather than only when a commit closes, because a
+        // velocity needs a window and a window needs every report — the latch
+        // re-reads the *predictor* between the commit and the submission, and
+        // what the predictor holds is everything this loop has been handed. A
+        // report that is not newer than the newest held is refused by the
+        // predictor and counted, which is what makes a page that stopped
+        // changing cost nothing: the same three words read twice are one report.
+        //
+        // A page that stops answering is a turn with no report rather than an
+        // ended run, for the tick's reason exactly.
+        if let (Ok(at_nanos), Ok(x), Ok(y)) = (
+            board.read64(at::POINTER_AT_NANOS),
+            board.read64(at::POINTER_X_X65536),
+            board.read64(at::POINTER_Y_X65536),
+        ) {
+            held.reported(Reading {
+                at_nanos,
+                // Back to signed, in the fixed point both the sample and the
+                // transform record are written in. The word is a two's-complement
+                // `u64` because a routing page holds words and not integers with
+                // opinions, and a pointer left of the origin is an ordinary place
+                // rather than an enormous one.
+                x_x65536: x as i32,
+                y_x65536: y as i32,
+            });
+        }
+
+        if let Some(answer) = held.offer(&entry, &payload, now) {
+            if parts.data.post(answer).is_err() {
+                break stopped::NO_RING;
+            }
+            // **The return leg of `E3-B01j`'s count, taken where the ring took
+            // the completion and not where it was produced.** A completion the
+            // ring refused never crossed the boundary, so counting it at the
+            // answer would count this component's intentions; and the frame
+            // requires this number to equal the completions its own client
+            // reaped, which is what makes the two counts independent rather than
+            // one derived from the other. The `if let` above was one condition
+            // with an `&&` until this line existed and had to come apart, because
+            // a short-circuit cannot tell *no completion was owed* from *the post
+            // failed*.
+            held.answered();
         }
     };
 
@@ -383,6 +454,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         backend_bits: board.read64(at::BACKEND_CAPABILITIES).ok()?,
         scanout_period_nanos: board.read64(at::SCANOUT_PERIOD_NANOS).ok()?,
         margin_nanos: board.read64(at::PACING_MARGIN_NANOS).ok()?,
+        // Narrowed here rather than in `crate::latch`, because a node identifier
+        // is a `u32` on the wire and this is the one place the page's word
+        // becomes one. A word naming a node outside that range is a frame this
+        // component cannot honour, and `f_abi::scene::NO_NODE` — zero — is what
+        // it becomes: no latch, published as a decline on every frame, rather
+        // than a truncation that would name a different node.
+        pointer_node: u32::try_from(board.read64(at::POINTER_NODE).ok()?).unwrap_or(0),
     };
 
     // Not refused at any value, and the reason is the same shape as the pacing
@@ -426,9 +504,83 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::MARGIN, story.decision.margin_nanos);
         let _ = board.write64(reported::WAKE, story.decision.wake_nanos);
         let _ = board.write64(reported::SAMPLES, held.samples());
-        let _ = board.write64(reported::DEGRADED, story.degraded);
-        let _ = board.write64(reported::RUNG, story.rung);
+        // The resolved theme, `E3-B06d`. **The report is carried out rather than
+        // consulted and dropped**, which is the clause: a compositor that
+        // resolved a theme, moved somebody's colours to clear a floor and then
+        // threw away the record of having done it would make RFC 0079's
+        // *clamped, not refused* an arrangement nobody could audit. Five words
+        // where a flag would do, for `reported::WAKE`'s reason — a reader handed
+        // only *clean* cannot tell a theme this layer agreed with from a report
+        // whose notes all fell out of the bottom.
+        let readability = held.readability();
+        let _ = board.write64(reported::RESOLVES, readability.resolves());
+        let _ = board.write64(reported::NOTES, readability.report().len() as u64);
+        let _ = board.write64(reported::DROPPED, u64::from(readability.report().dropped()));
+        let _ = board.write64(reported::CLEAN, u64::from(readability.report().is_clean()));
+        let _ = board.write64(reported::RULES, readability.rules_owed());
+        // The degradation register, `E3-B07d`: one field per frame for the last
+        // `crate::pacing::degraded::FRAMES` frames, and not the last frame's
+        // answer. `crate::pacing::Record` argues why a snapshot cannot be
+        // evidence of a per-frame decision, and RFC 0118 is the entry.
+        let _ = board.write64(reported::DEGRADED, story.degraded.word());
+        // The rung comes off `Held` and not off the story, which is RFC 0119: a
+        // value written once when this component started does not belong in the
+        // struct a degradation policy rewrites every frame.
+        let _ = board.write64(reported::RUNG, held.rung().word());
         let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
+        // The boundary crossings, `E3-B01j`. Three words where one would do, for
+        // `reported::WAKE`'s reason: the exit's sentence is an addition and a
+        // division, and a reader handed only the answer cannot check either. Both
+        // directions are already above — `DRAINED` and `ANSWERED` — and the sum is
+        // the component's own rather than the frame's, because the frame keeping
+        // the only sum is the *one side counts and the other trusts it*
+        // arrangement this line exists to prevent.
+        let _ = board.write64(reported::ANSWERED, counters.answered);
+        let _ = board.write64(reported::CROSSINGS, counters.crossings());
+        let _ = board
+            .write64(reported::CROSSINGS_PER_FRAME_X1000, counters.crossings_per_frame_x1000());
+        // The synchronisation state, `E3-B05f`. **Carried out rather than
+        // consulted and dropped**, which is this file's rule for every record it
+        // holds: a compositor that traced a frame's waits and threw the trace away
+        // would have made the one failure of this mechanism that leaves no
+        // evidence — `abi/src/sync.rs`'s third outcome, *a hang writes no log
+        // line* — leave no evidence again. Seven words where three have a node,
+        // and `crate::routing::reported` draws the division: three say what a
+        // reader of a running machine wants, and four are about whether the record
+        // those three come out of can be believed.
+        let waits = held.waits().published();
+        let _ = board.write64(reported::WAITS, waits.outstanding);
+        let _ = board.write64(reported::SIGNALLED, waits.signalled);
+        let _ = board.write64(reported::TIMEOUTS, waits.timeouts);
+        let _ = board.write64(reported::TRACED, waits.traced);
+        let _ = board.write64(reported::TRACE_DROPPED, waits.dropped);
+        let _ = board.write64(reported::TRACE_COMPLETE, waits.complete);
+        let _ = board.write64(reported::CHAIN_REFUSALS, waits.refusals);
+        // The latch, `E3-B01i`. Carried out rather than consulted and dropped,
+        // for the traces' reason above: the one thing this component does that no
+        // client asked for is the one thing a reader has no other way to see.
+        //
+        // Both ends of the transform and neither difference: `crate::latch::
+        // Latched` says why, and the short version is that a component
+        // publishing its own subtraction cannot be checked against itself.
+        let latch = held.latch();
+        let _ = board.write64(reported::POINTER_REPORTS, latch.reports());
+        let _ = board.write64(reported::POINTER_STALE, latch.stale());
+        let _ = board.write64(reported::POINTER_UNSTAMPED, latch.unstamped());
+        let _ = board.write64(reported::LATCHES, latch.latches());
+        let _ = board.write64(reported::LATCH_DECLINES, latch.declines());
+        let _ = board.write64(reported::LATCH_AIM_NANOS, latch.aimed_at_nanos());
+        if let Ok(latched) = latch.last() {
+            let _ = board.write64(reported::LATCH_ENTRY, u64::from(latched.before_entry()));
+            let _ =
+                board.write64(reported::LATCH_COMMITTED_X, latched.committed_tx_x65536() as u64);
+            let _ =
+                board.write64(reported::LATCH_COMMITTED_Y, latched.committed_ty_x65536() as u64);
+            let _ = board.write64(reported::LATCH_X, latched.latched_tx_x65536() as u64);
+            let _ = board.write64(reported::LATCH_Y, latched.latched_ty_x65536() as u64);
+            let _ = board.write64(reported::LATCH_LEAD_NANOS, latched.lead_nanos());
+            let _ = board.write64(reported::LATCH_EXTRAPOLATED, u64::from(latched.extrapolated()));
+        }
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
         // tree is the machine's answer to *what is it running*, and RFC 0013
@@ -465,23 +617,50 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
     let counters = held.counters();
     let story = held.story();
     let mut written = 0;
+    let waits = held.waits().published();
     // In `node::WRITTEN`'s order, and the frame reads it back in that order.
-    // Nine words and not four: the five `E3-B01k` adds are the frame's story —
+    // Fifteen words and not four: the five `E3-B01k` adds are the frame's story —
     // the rung it is drawing with, the frame it last closed, the deadline that
     // frame carried, what a frame costs on this machine, and what was given up
-    // to fit. Every one of them is a value this component already holds, which
-    // is RFC 0013's rule: a node with no counter behind it would be a
-    // serialisation with extra steps wearing RFC 0013's name.
+    // to fit — the three `E3-B06d` adds are the resolved theme, and the three
+    // `E3-B05f` adds are the synchronisation of the frame that closed last. Every
+    // one of them is a value this component already holds, which is RFC 0013's
+    // rule: a node with no counter behind it would be a serialisation with extra
+    // steps wearing RFC 0013's name.
+    //
+    // **Fifteen is this manifest full.** `f_abi::manifest::STATE_NODES_MAX` is
+    // sixteen and the subtree is one of them, so the next node this component
+    // wants is an RFC widening that bound and not a row in `manifest.toml`.
+    // `node::WRITTEN` says the same thing where the ids are, and it is said twice
+    // on purpose: the author who reaches for a sixteenth word will be in one of
+    // the two files and not necessarily this one.
+    let readability = held.readability();
     for (id, value) in [
         (node::FRAMES, counters.frames),
         (node::EDITS, counters.edits),
         (node::NODES, held.live()),
         (node::REFUSED, counters.refused),
-        (node::RUNG, story.rung),
+        (node::RUNG, held.rung().word()),
         (node::FRAME, counters.token),
         (node::DEADLINE, story.deadline_nanos),
         (node::PACING, story.decision.estimate_nanos),
-        (node::DEGRADED, story.degraded),
+        (node::DEGRADED, story.degraded.word()),
+        // The resolved theme, `E3-B06d`. `len()` is a `usize` in a crate that
+        // compiles for two architectures, so the widening is written rather than
+        // inferred; on neither of them can a count bounded by
+        // `f_interface::token::NOTES_MAX` fail to fit.
+        (node::RESOLVES, readability.resolves()),
+        (node::NOTES, readability.report().len() as u64),
+        (node::RULES, readability.rules_owed()),
+        // The synchronisation state, `E3-B05f`. Three of the seven this component
+        // reports, and the three a reader of a *running machine* wants: is
+        // anything still waiting, what value did this compositor reach, and how
+        // many frames has it abandoned. The other four are the trace's own
+        // integrity and are on the board, where the frame checks this component
+        // rather than reading the machine.
+        (node::WAITS, waits.outstanding),
+        (node::SIGNALLED, waits.signalled),
+        (node::TIMEOUTS, waits.timeouts),
     ] {
         if tree.set(id, value) {
             written += 1;

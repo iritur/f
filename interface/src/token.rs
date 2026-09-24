@@ -1936,6 +1936,73 @@ pub struct Paint {
     pub refused: Option<Token>,
 }
 
+impl Paint {
+    /// The ink, in linear light, scaled so that 65 535 is full.
+    ///
+    /// # Why the conversion is here and not in the projection that wants it
+    ///
+    /// `f_abi::scene::SetPaint` says in as many words that its channels are
+    /// **linear light and not sRGB-encoded**, because a compositor works in
+    /// linear space and a wire value that had to be decoded first would be a
+    /// colour whose meaning depends on who decoded it. A theme is written in
+    /// sRGB bytes, because that is what a designer writes. So something has to
+    /// convert, and the question is only which module.
+    ///
+    /// It is this one, and the argument is not taste: a projection that
+    /// converted for itself would be a **second transfer function**, and a
+    /// second transfer function is exactly how a colour comes to pass the
+    /// readability check here and reach a screen as something else. RFC 0079's
+    /// rule is that a colour outside this module travels with the pair it was
+    /// checked as; `cargo xtask lint-token-pair` enforces it by refusing
+    /// [`LINEAR_X100000`] by name anywhere else in the tree. This method is the
+    /// door that rule leaves open — the pair is right here on the same value,
+    /// and what crosses out is three integers rather than a colour.
+    ///
+    /// **The ink and not the ground**, because the only consumer today
+    /// (`f_semantic::emit`) paints marks, and a mark is drawn in its ink. A
+    /// ground is painted by whatever draws the surface behind it, and nothing
+    /// does yet; the day something does, this gains a sibling rather than a
+    /// parameter, so that neither caller can pass the wrong one.
+    ///
+    /// Rounded to nearest and not truncated. The division is by 100 000, and
+    /// truncating would move every channel of every interface downwards by up to
+    /// one part in 65 536 in the same direction — which is a tint, not a
+    /// rounding error.
+    /// Unit: none — three intensities, each scaled so that 65 535 is full.
+    #[must_use]
+    pub fn ink_linear_x65535(&self) -> (u16, u16, u16) {
+        (
+            linear_x65535(self.ink_rgb.r),
+            linear_x65535(self.ink_rgb.g),
+            linear_x65535(self.ink_rgb.b),
+        )
+    }
+}
+
+/// One sRGB channel as the linear-light intensity a compositor works in.
+///
+/// [`Paint::ink_linear_x65535`] is the public door and this is the arithmetic
+/// behind it: [`LINEAR_X100000`]'s answer, rescaled from hundred-thousandths to
+/// the 65 535 that `f_abi::scene::SetPaint` calls full, rounded to nearest. The
+/// product needs `u64` — 100 000 times 65 535 is past `u32` by a factor of
+/// sixty-five — and the widening is written out rather than inferred.
+/// Unit: none — an intensity, scaled so that 65 535 is full.
+fn linear_x65535(channel: u8) -> u16 {
+    /// What the wire calls full.
+    /// Unit: none — an intensity scale.
+    const INTENSITY_X65535: u64 = 65_535;
+    /// What [`LINEAR_X100000`] is scaled by.
+    /// Unit: none — the scale of a linearised channel.
+    const LINEAR_SCALE: u64 = 100_000;
+
+    let linear = u64::from(LINEAR_X100000[channel as usize]);
+    let scaled = linear
+        .saturating_mul(INTENSITY_X65535)
+        .saturating_add(LINEAR_SCALE / 2)
+        .saturating_div(LINEAR_SCALE);
+    u16::try_from(scaled).unwrap_or(u16::MAX)
+}
+
 /// How much room a node needs and may have, in tenths of a point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -2088,6 +2155,332 @@ fn clamp(metric: Metric, asked: i32, report: &mut Report) -> i32 {
     given
 }
 
+/// The two numbers `claims/0035-theme-refusals.toml` publishes, over a corpus of
+/// themes — or `None` when the corpus has no themes in it.
+///
+/// `(themes_resolving_clean_per_thousand, decisions_per_theme_x100)`.
+///
+/// # Why this is here and not in the command that prints it
+///
+/// Because the division and the emptiness rule have to be one definition.
+/// `claims/0034` asks the same of the canvas rate in so many words and
+/// `crate::node::canvas_census` is the answer there: the per-entry refusal and
+/// the corpus-level refusal are the *same function*, so the two cannot come to
+/// disagree about what *empty* means. The direction they would disagree in is the
+/// one that does damage quietly — a clean zero, or a flattering share, reported
+/// over a corpus nobody assembled.
+///
+/// `None` and not `Some((0, 0))`, for exactly that reason. Nought clean themes in
+/// nought themes is not a share; it is the absence of one, and a zero here would
+/// read as *this layer corrects every theme it is shown*, which is `claims/0035`'s
+/// floor firing about a corpus that does not exist.
+///
+/// # What a decision is, and why a dropped note is one
+///
+/// The second number counts `Report::len() + Report::dropped()` and not the
+/// length alone. A note that did not fit in the report was still a decision this
+/// layer made on somebody's behalf, and counting only what fitted would make the
+/// mean *fall* as the layer got noisier — which is precisely backwards for a row
+/// bounded above. `Report::dropped` is published beside this number rather than
+/// folded into it, because a truncated report is the one thing `claims/0035`'s
+/// `[diagnosis]` says to read first.
+///
+/// # The rounding, which is part of the number
+///
+/// The share **truncates** and the mean **rounds up**, and the two differ because
+/// the rows differ. The mean is bounded above only, so truncation moves every
+/// borderline corpus to the side that flatters this layer — a mean of 4.009 notes
+/// reported as 400 is a ceiling of 400 not firing on a corpus that met it — and
+/// rounding away from the bound is the same rule `claims/0034` applies to its
+/// rate and for the same reason. The share is bounded at *both* ends, so no
+/// rounding direction is uniformly flattering: truncation makes the floor a
+/// hundredth of a point stricter and the ceiling a hundredth of a point more
+/// lenient, and the error is under one part in a thousand whatever the corpus
+/// size, which is below the resolution either bound was argued at — `claims/0035`
+/// picks two hundred and nine hundred as thirds of the range, not as knife edges.
+///
+/// *What would reverse the share's rule:* a corpus small enough that one theme
+/// moves it across a bound. At that size the share is not readable at all and the
+/// answer is a run that refuses for being too small, not a cleverer rounding.
+#[must_use]
+pub fn census(themes: &[Theme]) -> Option<(u32, u32)> {
+    if themes.is_empty() {
+        return None;
+    }
+    let mut clean: u64 = 0;
+    let mut decisions: u64 = 0;
+    for theme in themes {
+        let (_, report) = resolve(theme);
+        if report.is_clean() {
+            clean += 1;
+        }
+        decisions += report.len() as u64 + u64::from(report.dropped());
+    }
+    let total = themes.len() as u64;
+    let share = clean * 1_000 / total;
+    let mean = (decisions * 100).div_ceil(total);
+    // Both fit: the share is at most a thousand, and the mean is at most a
+    // hundred times `NOTES_MAX` plus whatever one resolution can drop, which is
+    // bounded by the eighteen pairs, the five metrics and the three font slots.
+    // The conversions are written rather than inferred so that a future corpus
+    // reader cannot silently wrap one.
+    Some((u32::try_from(share).unwrap_or(u32::MAX), u32::try_from(mean).unwrap_or(u32::MAX)))
+}
+
+// ---------------------------------------------------------------------------
+// The demonstration. Seven themes, published rather than hidden in the tests,
+// because a corpus has to be refusable by a machine — RFC 0110.
+// ---------------------------------------------------------------------------
+
+/// A theme this module has no quarrel with, on the other side of the palette
+/// from [`Theme::DEFAULT`].
+///
+/// It is here for one assertion and it is an important one: two themes that
+/// look nothing alike both survive resolution untouched. A token layer that
+/// clamped everything into one safe palette would pass every readability
+/// test in this file, and would have made the theme layer decorative — which
+/// is the failure the exit is written to catch from the other side.
+pub const DARK: Theme = Theme {
+    surface_1: Rgb::new(0x12, 0x12, 0x12),
+    surface_2: Rgb::new(0x1E, 0x1E, 0x1E),
+    field: Rgb::new(0x0A, 0x0A, 0x0A),
+    text: Rgb::new(0xE8, 0xE8, 0xE8),
+    text_muted: Rgb::new(0xA0, 0xA0, 0xA0),
+    emphasis: Rgb::new(0x7F, 0xB3, 0xFF),
+    edge: Rgb::new(0x6E, 0x6E, 0x6E),
+    field_text: Rgb::new(0xE8, 0xE8, 0xE8),
+    field_danger: Rgb::new(0xFF, 0x8A, 0x80),
+    text_size_pt_x10: 110,
+    density_x1000: 1_250,
+    space_em_x100: 62,
+    stroke_em_x100: 8,
+    fonts: ["Source Sans 3", "", ""],
+};
+
+/// The theme the exit asks for: hostile in every dimension this module has.
+///
+/// Each field is an attack with a name rather than a bad value picked at
+/// random, and they are listed here so a reader can check the demonstration
+/// is not merely inconvenient.
+///
+/// - `surface_1` is a mid grey near where black and white are equally bad,
+///   which leaves the clamp a hundred and twenty-three parts in a thousand
+///   above the floor. A hostile theme that picked a dark ground would be
+///   handing the clamp an easy problem. It is *not* the tightest ground in
+///   the space — that one is not a grey, and [`HOSTILE_FLAT`] is where it is
+///   attacked with.
+/// - `text` is *identical to its ground*: one to one, the worst ratio there
+///   is, and the one a layer checking colours in isolation cannot see.
+/// - `text_muted` is `#787878`, a perfectly ordinary grey any designer might
+///   write, and illegible on `#767676`. The *legal individually, unreadable
+///   in combination* case, stated plainly.
+/// - `emphasis` is white on white and `field_text` is black on black, each
+///   one value away from being exactly so, because the exactly-equal case is
+///   the one a naive equality check would catch.
+/// - `field_danger` is a saturated red on a black ground. It is here to be
+///   *survived* rather than merely fixed: `a_clamp_is_not_a_collapse` asserts
+///   it is still red afterwards, on every ground.
+/// - `text_size_pt_x10` is zero — text with no size.
+/// - `density_x1000` is the most negative value the type holds, which is the
+///   scale factor that overflows, in the direction where negating it
+///   overflows too.
+/// - `space_em_x100` is a large negative: spacing that does not tighten a
+///   layout, it overlaps it.
+/// - `stroke_em_x100` is the largest value the type holds.
+/// - `fonts` names three things and none of them is a name: spaces, a control
+///   character, and a name too long to hold. A stack that looks populated and
+///   resolves to nothing. The empty string is deliberately *not* among them —
+///   an unused slot is absence rather than an attack, and `Theme::fonts` says
+///   why it is skipped in silence.
+pub const HOSTILE: Theme = Theme {
+    surface_1: Rgb::new(0x76, 0x76, 0x76),
+    surface_2: Rgb::new(0xFF, 0xFF, 0xFF),
+    field: Rgb::new(0x00, 0x00, 0x00),
+    text: Rgb::new(0x76, 0x76, 0x76),
+    text_muted: Rgb::new(0x78, 0x78, 0x78),
+    emphasis: Rgb::new(0xFF, 0xFF, 0xFE),
+    edge: Rgb::new(0x76, 0x76, 0x76),
+    field_text: Rgb::new(0x00, 0x00, 0x01),
+    field_danger: Rgb::new(0xD0, 0x20, 0x20),
+    text_size_pt_x10: 0,
+    density_x1000: i32::MIN,
+    space_em_x100: -30_000,
+    stroke_em_x100: i32::MAX,
+    fonts: ["   ", "\u{1}", "a name of thirty-three characters"],
+};
+
+/// The same hostility from the other direction, and it is not a duplicate.
+///
+/// [`HOSTILE`] attacks by collapse — zero, negative, identical — and a layer
+/// clamped against only that is half a layer, because every one of its bounds
+/// has two ends. This theme takes a legal palette and asks for the largest
+/// number the type holds in every metric, which is also the only way to reach
+/// the clamp on the *derived* em: seventy-two points at four times scale is
+/// four times the largest legal em, and both factors were legal when they
+/// were multiplied. A layer that checked only the factors would ship it.
+pub const HOSTILE_INFLATED: Theme = Theme {
+    surface_1: Rgb::new(0xFF, 0xFF, 0xFF),
+    surface_2: Rgb::new(0xF2, 0xF2, 0xF2),
+    field: Rgb::new(0xFF, 0xFF, 0xFF),
+    text: Rgb::new(0x1A, 0x1A, 0x1A),
+    text_muted: Rgb::new(0x59, 0x59, 0x59),
+    emphasis: Rgb::new(0x0B, 0x3D, 0x91),
+    edge: Rgb::new(0x76, 0x76, 0x76),
+    field_text: Rgb::new(0x1A, 0x1A, 0x1A),
+    field_danger: Rgb::new(0xA4, 0x00, 0x0F),
+    text_size_pt_x10: i32::MAX,
+    density_x1000: i32::MAX,
+    space_em_x100: i32::MAX,
+    stroke_em_x100: i32::MAX,
+    fonts: ["Inter", "a name of thirty-three characters", ""],
+};
+
+/// The third hostility, and the one this module did not answer at all until
+/// a reviewer pointed at it: **every ground is the same colour.**
+///
+/// Nothing here is out of any bound. Three free grounds set to one value is
+/// what the first category permits in so many words, and every ink still
+/// clears its floor against them, so the whole of the colour half of this
+/// file passed a theme in which no grouped region and no text field had a
+/// boundary anybody could see. [`Resolved::boundary`] is the answer and
+/// `a_region_that_sits_on_another_is_always_told_from_it` is where it is
+/// asserted.
+///
+/// The colour is chosen as well: `#008909` has the lowest
+/// [`best_reachable_x1000`] of anything in the twenty-four-bit space, so this
+/// theme is also the tightest possible test of the clamp itself — black and
+/// white both come to exactly [`REACHABLE_X1000`] against it, eighty-two
+/// parts in a thousand above the text floor and not one more.
+///
+/// Its metrics and fonts are the default's on purpose. An attack on the
+/// ground vocabulary should produce notes about colours and nothing else,
+/// and a theme hostile in every dimension at once could not show that.
+pub const HOSTILE_FLAT: Theme = Theme {
+    surface_1: Rgb::new(0x00, 0x89, 0x09),
+    surface_2: Rgb::new(0x00, 0x89, 0x09),
+    field: Rgb::new(0x00, 0x89, 0x09),
+    text: Rgb::new(0x00, 0x89, 0x09),
+    text_muted: Rgb::new(0x0A, 0x8F, 0x12),
+    emphasis: Rgb::new(0x00, 0x89, 0x09),
+    edge: Rgb::new(0x00, 0x89, 0x09),
+    field_text: Rgb::new(0x00, 0x89, 0x09),
+    field_danger: Rgb::new(0xB0, 0x00, 0x20),
+    text_size_pt_x10: 105,
+    density_x1000: 1_000,
+    space_em_x100: 50,
+    stroke_em_x100: 6,
+    fonts: ["Inter", "", ""],
+};
+
+/// The fourth, and the only one in which the boundary machinery has a
+/// *choice* to make: **two grounds that differ and do not part.**
+///
+/// [`HOSTILE_FLAT`] collapses the grounds, and when two grounds are the same
+/// colour every column of the resolved table holds the same rule, so a
+/// boundary drawn from the wrong one looks right. Here they are 2.645 to 1
+/// apart — visibly different, under the non-text floor — and the `edge` ink
+/// resolves to `#A3A3A3` on the raised ground and `#5B5B5B` on the one below
+/// it. Only the first is a rule; the second is 1.168 to 1 against the region
+/// it would be enclosing. That is the pair
+/// `a_region_that_sits_on_another_is_always_told_from_it` names, so that
+/// taking the wrong column is an edit somebody notices.
+///
+/// Its metrics and fonts are the default's, for [`HOSTILE_FLAT`]'s reason.
+pub const HOSTILE_ALIKE: Theme = Theme {
+    surface_1: Rgb::new(0x00, 0x00, 0x00),
+    surface_2: Rgb::new(0x51, 0x51, 0x51),
+    field: Rgb::new(0x00, 0x00, 0x00),
+    text: Rgb::new(0x00, 0x00, 0x00),
+    text_muted: Rgb::new(0x11, 0x11, 0x11),
+    emphasis: Rgb::new(0x00, 0x00, 0x00),
+    edge: Rgb::new(0x00, 0x00, 0x00),
+    field_text: Rgb::new(0x00, 0x00, 0x00),
+    field_danger: Rgb::new(0x2A, 0x00, 0x00),
+    text_size_pt_x10: 105,
+    density_x1000: 1_000,
+    space_em_x100: 50,
+    stroke_em_x100: 6,
+    fonts: ["Inter", "", ""],
+};
+
+/// The fifth, and the only one that attacks by subtraction.
+///
+/// The other four make things enormous or make them the same colour. This
+/// one asks for nothing: no stroke, no space, the smallest text it can name
+/// and the lowest density. It exists because
+/// [`Metric::Stroke`]'s floor shared [`Metric::Space`]'s until 2026-09-15,
+/// and a bound nothing pushes down on is a bound nobody has read. A theme
+/// asking for `stroke_em_x100 = 0` was inside every bound, produced no
+/// [`Note`], and left [`Report::is_clean`] true while taking to zero both
+/// the thickness of the rule [`Boundary`] owes and the floor
+/// [`Resolved::floor_pt_x10`] gives every [`Duty::See`] node.
+///
+/// Its colours are the default's, so that what this theme demonstrates is
+/// its metrics and nothing else — for [`HOSTILE_FLAT`]'s reason in the
+/// other direction.
+pub const HOSTILE_ERASED: Theme = Theme {
+    surface_1: Rgb::new(0xFF, 0xFF, 0xFF),
+    surface_2: Rgb::new(0xF2, 0xF2, 0xF2),
+    field: Rgb::new(0xFF, 0xFF, 0xFF),
+    text: Rgb::new(0x1A, 0x1A, 0x1A),
+    text_muted: Rgb::new(0x5E, 0x5E, 0x5E),
+    emphasis: Rgb::new(0x00, 0x3A, 0x8C),
+    edge: Rgb::new(0x6A, 0x6A, 0x6A),
+    field_text: Rgb::new(0x1A, 0x1A, 0x1A),
+    field_danger: Rgb::new(0x8C, 0x00, 0x14),
+    text_size_pt_x10: 0,
+    density_x1000: 0,
+    space_em_x100: 0,
+    stroke_em_x100: 0,
+    fonts: ["Inter", "", ""],
+};
+
+/// Every theme this module ships: the seven each structural assertion below is
+/// made against, and the seven a corpus may not be made of.
+///
+/// Named for what is true of all of them rather than for how many there are.
+/// `THE_SEVEN` would have been a count in a name, and the count is the thing most
+/// likely to change here — an eighth hostility is one reviewer away, and a
+/// constant whose name went stale on the day it was extended is the shape of rot
+/// this table exists to remove somewhere else.
+///
+/// Two legal and five hostile, because an assertion made only against a
+/// hostile theme cannot tell *this layer holds* from *this layer clamps
+/// everything*. The five hostile ones attack five different things —
+/// collapse, inflation, grounds that are one colour, grounds that differ
+/// without parting, and metrics asked for as nothing — and none of them is a
+/// rearrangement of another.
+///
+/// # Why this is published rather than a fixture, RFC 0110
+///
+/// Because `claims/0035-theme-refusals.toml` is a share over a corpus of themes
+/// *written by somebody not working on this module*, and a run that cannot
+/// recognise this module's own themes cannot refuse them. Until RFC 0110 these
+/// seven were `#[cfg(test)]` consts and the claim's protection against being
+/// measured over them was a sentence in the claim file — which is the shape of
+/// guard this repository has twice recorded the fate of.
+///
+/// So they are values, and `cargo xtask claim theme-refusals` compares every
+/// corpus entry against this table and refuses a corpus that is this module's
+/// own output. The refusal is by **value and not by name**, because a name is
+/// something a corpus entry writes and a value is not.
+///
+/// It is one table and not two: the tests below reach it through
+/// `use super::SHIPPED as THEMES`, so a theme added to the argument is a
+/// theme the refusal knows about and there is no second list to forget. That is
+/// the whole of what makes this arrangement not rot, and the reversal condition
+/// is its inverse — a second table of demonstration themes anywhere, at which
+/// point the refusal is reading one of them and passing the other.
+pub const SHIPPED: [(&str, Theme); 7] = [
+    ("default", Theme::DEFAULT),
+    ("dark", DARK),
+    ("hostile", HOSTILE),
+    ("hostile-inflated", HOSTILE_INFLATED),
+    ("hostile-flat", HOSTILE_FLAT),
+    ("hostile-alike", HOSTILE_ALIKE),
+    ("hostile-erased", HOSTILE_ERASED),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2096,226 +2489,7 @@ mod tests {
         check,
     };
 
-    /// A theme this module has no quarrel with, on the other side of the palette
-    /// from [`Theme::DEFAULT`].
-    ///
-    /// It is here for one assertion and it is an important one: two themes that
-    /// look nothing alike both survive resolution untouched. A token layer that
-    /// clamped everything into one safe palette would pass every readability
-    /// test in this file, and would have made the theme layer decorative — which
-    /// is the failure the exit is written to catch from the other side.
-    const DARK: Theme = Theme {
-        surface_1: Rgb::new(0x12, 0x12, 0x12),
-        surface_2: Rgb::new(0x1E, 0x1E, 0x1E),
-        field: Rgb::new(0x0A, 0x0A, 0x0A),
-        text: Rgb::new(0xE8, 0xE8, 0xE8),
-        text_muted: Rgb::new(0xA0, 0xA0, 0xA0),
-        emphasis: Rgb::new(0x7F, 0xB3, 0xFF),
-        edge: Rgb::new(0x6E, 0x6E, 0x6E),
-        field_text: Rgb::new(0xE8, 0xE8, 0xE8),
-        field_danger: Rgb::new(0xFF, 0x8A, 0x80),
-        text_size_pt_x10: 110,
-        density_x1000: 1_250,
-        space_em_x100: 62,
-        stroke_em_x100: 8,
-        fonts: ["Source Sans 3", "", ""],
-    };
-
-    /// The theme the exit asks for: hostile in every dimension this module has.
-    ///
-    /// Each field is an attack with a name rather than a bad value picked at
-    /// random, and they are listed here so a reader can check the demonstration
-    /// is not merely inconvenient.
-    ///
-    /// - `surface_1` is a mid grey near where black and white are equally bad,
-    ///   which leaves the clamp a hundred and twenty-three parts in a thousand
-    ///   above the floor. A hostile theme that picked a dark ground would be
-    ///   handing the clamp an easy problem. It is *not* the tightest ground in
-    ///   the space — that one is not a grey, and [`HOSTILE_FLAT`] is where it is
-    ///   attacked with.
-    /// - `text` is *identical to its ground*: one to one, the worst ratio there
-    ///   is, and the one a layer checking colours in isolation cannot see.
-    /// - `text_muted` is `#787878`, a perfectly ordinary grey any designer might
-    ///   write, and illegible on `#767676`. The *legal individually, unreadable
-    ///   in combination* case, stated plainly.
-    /// - `emphasis` is white on white and `field_text` is black on black, each
-    ///   one value away from being exactly so, because the exactly-equal case is
-    ///   the one a naive equality check would catch.
-    /// - `field_danger` is a saturated red on a black ground. It is here to be
-    ///   *survived* rather than merely fixed: `a_clamp_is_not_a_collapse` asserts
-    ///   it is still red afterwards, on every ground.
-    /// - `text_size_pt_x10` is zero — text with no size.
-    /// - `density_x1000` is the most negative value the type holds, which is the
-    ///   scale factor that overflows, in the direction where negating it
-    ///   overflows too.
-    /// - `space_em_x100` is a large negative: spacing that does not tighten a
-    ///   layout, it overlaps it.
-    /// - `stroke_em_x100` is the largest value the type holds.
-    /// - `fonts` names three things and none of them is a name: spaces, a control
-    ///   character, and a name too long to hold. A stack that looks populated and
-    ///   resolves to nothing. The empty string is deliberately *not* among them —
-    ///   an unused slot is absence rather than an attack, and `Theme::fonts` says
-    ///   why it is skipped in silence.
-    const HOSTILE: Theme = Theme {
-        surface_1: Rgb::new(0x76, 0x76, 0x76),
-        surface_2: Rgb::new(0xFF, 0xFF, 0xFF),
-        field: Rgb::new(0x00, 0x00, 0x00),
-        text: Rgb::new(0x76, 0x76, 0x76),
-        text_muted: Rgb::new(0x78, 0x78, 0x78),
-        emphasis: Rgb::new(0xFF, 0xFF, 0xFE),
-        edge: Rgb::new(0x76, 0x76, 0x76),
-        field_text: Rgb::new(0x00, 0x00, 0x01),
-        field_danger: Rgb::new(0xD0, 0x20, 0x20),
-        text_size_pt_x10: 0,
-        density_x1000: i32::MIN,
-        space_em_x100: -30_000,
-        stroke_em_x100: i32::MAX,
-        fonts: ["   ", "\u{1}", "a name of thirty-three characters"],
-    };
-
-    /// The same hostility from the other direction, and it is not a duplicate.
-    ///
-    /// [`HOSTILE`] attacks by collapse — zero, negative, identical — and a layer
-    /// clamped against only that is half a layer, because every one of its bounds
-    /// has two ends. This theme takes a legal palette and asks for the largest
-    /// number the type holds in every metric, which is also the only way to reach
-    /// the clamp on the *derived* em: seventy-two points at four times scale is
-    /// four times the largest legal em, and both factors were legal when they
-    /// were multiplied. A layer that checked only the factors would ship it.
-    const HOSTILE_INFLATED: Theme = Theme {
-        surface_1: Rgb::new(0xFF, 0xFF, 0xFF),
-        surface_2: Rgb::new(0xF2, 0xF2, 0xF2),
-        field: Rgb::new(0xFF, 0xFF, 0xFF),
-        text: Rgb::new(0x1A, 0x1A, 0x1A),
-        text_muted: Rgb::new(0x59, 0x59, 0x59),
-        emphasis: Rgb::new(0x0B, 0x3D, 0x91),
-        edge: Rgb::new(0x76, 0x76, 0x76),
-        field_text: Rgb::new(0x1A, 0x1A, 0x1A),
-        field_danger: Rgb::new(0xA4, 0x00, 0x0F),
-        text_size_pt_x10: i32::MAX,
-        density_x1000: i32::MAX,
-        space_em_x100: i32::MAX,
-        stroke_em_x100: i32::MAX,
-        fonts: ["Inter", "a name of thirty-three characters", ""],
-    };
-
-    /// The third hostility, and the one this module did not answer at all until
-    /// a reviewer pointed at it: **every ground is the same colour.**
-    ///
-    /// Nothing here is out of any bound. Three free grounds set to one value is
-    /// what the first category permits in so many words, and every ink still
-    /// clears its floor against them, so the whole of the colour half of this
-    /// file passed a theme in which no grouped region and no text field had a
-    /// boundary anybody could see. [`Resolved::boundary`] is the answer and
-    /// `a_region_that_sits_on_another_is_always_told_from_it` is where it is
-    /// asserted.
-    ///
-    /// The colour is chosen as well: `#008909` has the lowest
-    /// [`best_reachable_x1000`] of anything in the twenty-four-bit space, so this
-    /// theme is also the tightest possible test of the clamp itself — black and
-    /// white both come to exactly [`REACHABLE_X1000`] against it, eighty-two
-    /// parts in a thousand above the text floor and not one more.
-    ///
-    /// Its metrics and fonts are the default's on purpose. An attack on the
-    /// ground vocabulary should produce notes about colours and nothing else,
-    /// and a theme hostile in every dimension at once could not show that.
-    const HOSTILE_FLAT: Theme = Theme {
-        surface_1: Rgb::new(0x00, 0x89, 0x09),
-        surface_2: Rgb::new(0x00, 0x89, 0x09),
-        field: Rgb::new(0x00, 0x89, 0x09),
-        text: Rgb::new(0x00, 0x89, 0x09),
-        text_muted: Rgb::new(0x0A, 0x8F, 0x12),
-        emphasis: Rgb::new(0x00, 0x89, 0x09),
-        edge: Rgb::new(0x00, 0x89, 0x09),
-        field_text: Rgb::new(0x00, 0x89, 0x09),
-        field_danger: Rgb::new(0xB0, 0x00, 0x20),
-        text_size_pt_x10: 105,
-        density_x1000: 1_000,
-        space_em_x100: 50,
-        stroke_em_x100: 6,
-        fonts: ["Inter", "", ""],
-    };
-
-    /// The fourth, and the only one in which the boundary machinery has a
-    /// *choice* to make: **two grounds that differ and do not part.**
-    ///
-    /// [`HOSTILE_FLAT`] collapses the grounds, and when two grounds are the same
-    /// colour every column of the resolved table holds the same rule, so a
-    /// boundary drawn from the wrong one looks right. Here they are 2.645 to 1
-    /// apart — visibly different, under the non-text floor — and the `edge` ink
-    /// resolves to `#A3A3A3` on the raised ground and `#5B5B5B` on the one below
-    /// it. Only the first is a rule; the second is 1.168 to 1 against the region
-    /// it would be enclosing. That is the pair
-    /// `a_region_that_sits_on_another_is_always_told_from_it` names, so that
-    /// taking the wrong column is an edit somebody notices.
-    ///
-    /// Its metrics and fonts are the default's, for [`HOSTILE_FLAT`]'s reason.
-    const HOSTILE_ALIKE: Theme = Theme {
-        surface_1: Rgb::new(0x00, 0x00, 0x00),
-        surface_2: Rgb::new(0x51, 0x51, 0x51),
-        field: Rgb::new(0x00, 0x00, 0x00),
-        text: Rgb::new(0x00, 0x00, 0x00),
-        text_muted: Rgb::new(0x11, 0x11, 0x11),
-        emphasis: Rgb::new(0x00, 0x00, 0x00),
-        edge: Rgb::new(0x00, 0x00, 0x00),
-        field_text: Rgb::new(0x00, 0x00, 0x00),
-        field_danger: Rgb::new(0x2A, 0x00, 0x00),
-        text_size_pt_x10: 105,
-        density_x1000: 1_000,
-        space_em_x100: 50,
-        stroke_em_x100: 6,
-        fonts: ["Inter", "", ""],
-    };
-
-    /// The fifth, and the only one that attacks by subtraction.
-    ///
-    /// The other four make things enormous or make them the same colour. This
-    /// one asks for nothing: no stroke, no space, the smallest text it can name
-    /// and the lowest density. It exists because
-    /// [`Metric::Stroke`]'s floor shared [`Metric::Space`]'s until 2026-09-15,
-    /// and a bound nothing pushes down on is a bound nobody has read. A theme
-    /// asking for `stroke_em_x100 = 0` was inside every bound, produced no
-    /// [`Note`], and left [`Report::is_clean`] true while taking to zero both
-    /// the thickness of the rule [`Boundary`] owes and the floor
-    /// [`Resolved::floor_pt_x10`] gives every [`Duty::See`] node.
-    ///
-    /// Its colours are the default's, so that what this theme demonstrates is
-    /// its metrics and nothing else — for [`HOSTILE_FLAT`]'s reason in the
-    /// other direction.
-    const HOSTILE_ERASED: Theme = Theme {
-        surface_1: Rgb::new(0xFF, 0xFF, 0xFF),
-        surface_2: Rgb::new(0xF2, 0xF2, 0xF2),
-        field: Rgb::new(0xFF, 0xFF, 0xFF),
-        text: Rgb::new(0x1A, 0x1A, 0x1A),
-        text_muted: Rgb::new(0x5E, 0x5E, 0x5E),
-        emphasis: Rgb::new(0x00, 0x3A, 0x8C),
-        edge: Rgb::new(0x6A, 0x6A, 0x6A),
-        field_text: Rgb::new(0x1A, 0x1A, 0x1A),
-        field_danger: Rgb::new(0x8C, 0x00, 0x14),
-        text_size_pt_x10: 0,
-        density_x1000: 0,
-        space_em_x100: 0,
-        stroke_em_x100: 0,
-        fonts: ["Inter", "", ""],
-    };
-
-    /// The seven themes every structural assertion below is made against.
-    ///
-    /// Two legal and five hostile, because an assertion made only against a
-    /// hostile theme cannot tell *this layer holds* from *this layer clamps
-    /// everything*. The five hostile ones attack five different things —
-    /// collapse, inflation, grounds that are one colour, grounds that differ
-    /// without parting, and metrics asked for as nothing — and none of them is a
-    /// rearrangement of another.
-    const THEMES: [(&str, Theme); 7] = [
-        ("default", Theme::DEFAULT),
-        ("dark", DARK),
-        ("hostile", HOSTILE),
-        ("hostile-inflated", HOSTILE_INFLATED),
-        ("hostile-flat", HOSTILE_FLAT),
-        ("hostile-alike", HOSTILE_ALIKE),
-        ("hostile-erased", HOSTILE_ERASED),
-    ];
+    use super::SHIPPED as THEMES;
 
     fn content(value: &str) -> Content {
         Content::Text(Text::new(value).expect("fits within TEXT_MAX"))
@@ -2762,6 +2936,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_ink_crosses_as_linear_light_and_the_ends_of_the_range_are_exact() {
+        // The two values a wrong transfer cannot get wrong by accident, and the
+        // one it can. Black and white are the fixed points — a table, a cast and
+        // a wrong exponent all agree about them — so they are asserted to pin the
+        // *scale* rather than the curve, and `text`'s own grey is the third,
+        // where 0x1A is 1 033 hundred-thousandths of light and therefore 677 of
+        // 65 535. A truncating rescale answers 676 there and the same on both
+        // ends, which is why one of the three has to be off a round number.
+        let (resolved, _report) = resolve(&Theme::DEFAULT);
+        let mut white = Node::new(NodeId::new(1), NodeId::UNNAMED, Role::Surface);
+        white.style = TokenSet::EMPTY;
+        let paint = resolved.paint(&white);
+
+        assert_eq!(linear_x65535(0x00), 0, "black is none of the channel");
+        assert_eq!(linear_x65535(0xFF), 65_535, "white is all of it");
+        assert_eq!(linear_x65535(0x1A), 677);
+        assert_eq!(linear_x65535(0x76), 11_872);
+        assert_eq!(
+            paint.ink_linear_x65535(),
+            (
+                linear_x65535(paint.ink_rgb.r),
+                linear_x65535(paint.ink_rgb.g),
+                linear_x65535(paint.ink_rgb.b)
+            ),
+            "the three channels are not in the order they are named"
+        );
     }
 
     #[test]

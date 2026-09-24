@@ -56,7 +56,11 @@
 //! submission this build refuses; it is a value that cannot be constructed.
 //! [`Submission::decode`] reaches the same constructor, so a peer's bytes are
 //! admitted by the same function a local caller is, and there is no second
-//! statement of the rule to fall out of step with the first.
+//! statement of the rule to fall out of step with the first. What it *returns*
+//! is [`Arrived`] rather than a [`Submission`], because a driver is a receiver
+//! and a receiver holding the builder is a receiver that can add a wait the
+//! client never asked for — `E3-B05c`, RFC 0111, and the type's own paragraph
+//! is where the argument lives.
 //!
 //! That is the strongest form available, and it is worth saying what it is not:
 //! it is not a proof that the *number* is right, only that some timeline
@@ -117,7 +121,7 @@
 //! this genuinely cannot reuse one, `store::code`'s note is the precedent for
 //! how a new code is numbered.
 //!
-//! # A tenth refusal
+//! # An eleventh refusal
 //!
 //! The `refusals!` invocation below emits the variants, their messages, their
 //! packed codes and [`Refusal::ALL`] from one list, for `interface/src/node.rs`
@@ -126,8 +130,18 @@
 //! through on an arm that says nothing. Here the arm *is* the declaration, and
 //! a message that said nothing would not compile — the macro asserts each one
 //! non-empty at compile time.
+//!
+//! The eleventh is the evidence that was owed. [`Refusal::NoStage`] is
+//! [`crate::trace`]'s and not this module's, it arrived from a different file
+//! for a different record, and it cost **one declaration** — no arm in a
+//! `match`, no row in an `ALL`, no line in a test. The refusals live here rather
+//! than in a second enum of the same shape because the subject is the same: a
+//! trace entry is a wait that already happened, admitted by
+//! [`Timeline::wait`], so a second list of reasons a wait is not believed would
+//! be a second answer to one question.
 
 use crate::error;
+use crate::trace::{Stage, Trace};
 
 /// No timeline. Zero, so that a zeroed record names nothing.
 ///
@@ -380,6 +394,17 @@ refusals! {
     /// misunderstood. R04.
     Reserved => error::argument::RESERVED_NOT_ZERO,
         "a field this build does not read is not zero";
+
+    /// A field that must name a stage of the chain names none, or names one this
+    /// build does not have. [`crate::trace`]'s refusal rather than this
+    /// module's, and it is declared *here* rather than in a second enum of the
+    /// same shape because the subject is the same: a trace entry **is** a wait,
+    /// admitted by the same constructor, and two lists over one subject are two
+    /// lists that can disagree about what a wait is. It reuses a code that
+    /// already means what it says, for the reason the module header gives for
+    /// declining a tenth `argument` code.
+    NoStage => error::argument::UNKNOWN_FLAG,
+        "a field that must name a stage of the chain names none this build has";
 }
 
 /// The one place a [`Wait`] or a [`Signal`] is made.
@@ -397,7 +422,7 @@ refusals! {
 /// a rule structural, and it is deliberately more than a check at a call site
 /// somebody can stop making.
 mod proof {
-    use super::{Refusal, Timeline, UNSIGNALLED};
+    use super::{Refusal, SUBMISSION_BYTES, Submission, Timeline, UNSIGNALLED};
 
     /// A wait on a timeline value, which exists only because that timeline
     /// admitted it.
@@ -512,9 +537,148 @@ mod proof {
             self.value
         }
     }
+
+    /// A submission as a peer sent it: a record, and not a builder.
+    ///
+    /// # What this is for, in one sentence
+    ///
+    /// A driver is a *receiver*. [`Submission::decode`] returns this rather than
+    /// a [`Submission`] so that the value a receiver holds has **no constructor
+    /// that adds a wait to it** — no `waiting`, no `signalling`, and no way
+    /// back to the builder the bytes were admitted through. `E3-B05c`'s exit asks
+    /// for a submission that *refuses one that would let the driver insert its
+    /// own*, and the thing that would have let it was not a missing check: it
+    /// was that the decoded value was still a builder.
+    ///
+    /// # Why this is stronger than the check it replaces
+    ///
+    /// A check that refused an extra wait would have to run somewhere, on
+    /// something, at a moment a driver could be past. This has no moment. A
+    /// receiver that wanted to wait on one more timeline has to build a *new*
+    /// submission, which is a new record with its own bytes, its own admissions
+    /// and its own entry in a frame trace — visible, in other words, which is
+    /// the whole of what the parent task's negative asks for. What is not
+    /// available is the thing implicit synchronisation actually is: a wait
+    /// appearing inside the submission the client wrote, with the client's own
+    /// bytes still around it.
+    ///
+    /// # What it does not buy, said plainly
+    ///
+    /// Nothing here reaches an imported driver's internals. A third-party driver
+    /// behind the licence boundary can do as it likes with the hardware and this
+    /// tree cannot read its trace — `E3-B05c`'s exit says as much, and calls
+    /// this the half that still holds against such a driver. What holds is that
+    /// the *record* it was handed says what the client asked for and nothing
+    /// else, and that a wait it added is not expressible as the client having
+    /// asked for it. RFC 0111.
+    ///
+    /// # The two things that do not compile
+    ///
+    /// `ring/src/buffers.rs` is the precedent: a property the type system holds
+    /// is asserted by a fixture that fails to compile, with the error code
+    /// named, because a test that passes cannot tell *unrepresentable* apart
+    /// from *not currently done*.
+    ///
+    /// A receiver cannot add a wait to what arrived:
+    ///
+    /// ```compile_fail,E0599
+    /// use f_abi::sync::{Chain, Submission, Timeline};
+    /// use f_abi::trace::Trace;
+    /// let mut chain = Chain::new(
+    ///     Timeline::declare(1).unwrap(),
+    ///     Timeline::declare(2).unwrap(),
+    /// )
+    /// .unwrap();
+    /// let mut trace = Trace::EMPTY;
+    /// chain.application_signals(9).unwrap();
+    /// let built = chain.compositor_waits_and_signals(9, 4, &mut trace).unwrap();
+    /// let arrived = Submission::decode(&built.encode(), &chain.timelines()).unwrap();
+    /// let more = chain.application().wait(9).unwrap();
+    /// // The driver, inserting its own. There is no such function.
+    /// let _ = arrived.waiting(more);
+    /// ```
+    ///
+    /// And what arrived is not a [`Submission`], so no amount of passing it
+    /// along reaches one:
+    ///
+    /// ```compile_fail,E0308
+    /// use f_abi::sync::{Chain, Submission, Timeline};
+    /// use f_abi::trace::Trace;
+    /// let mut chain = Chain::new(
+    ///     Timeline::declare(1).unwrap(),
+    ///     Timeline::declare(2).unwrap(),
+    /// )
+    /// .unwrap();
+    /// let mut trace = Trace::EMPTY;
+    /// chain.application_signals(9).unwrap();
+    /// let built = chain.compositor_waits_and_signals(9, 4, &mut trace).unwrap();
+    /// let _: Submission = Submission::decode(&built.encode(), &chain.timelines()).unwrap();
+    /// ```
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Arrived(Submission);
+
+    impl Arrived {
+        /// Seal a submission the decoder has just admitted.
+        ///
+        /// `pub(super)` and reached from exactly one place. There is deliberately
+        /// no inverse: nothing in this crate or outside it turns an `Arrived`
+        /// back into a [`Submission`], because that function would be the door
+        /// this type exists to close, and a door with one caller is still a door.
+        pub(super) const fn sealed(submission: Submission) -> Self {
+            Self(submission)
+        }
+
+        /// How many waits this record carries.
+        /// Unit: waits.
+        #[must_use]
+        pub const fn wait_count(&self) -> usize {
+            self.0.wait_count()
+        }
+
+        /// The wait at `index`, or `None` for an index this record does not
+        /// carry.
+        ///
+        /// Hands out a [`Wait`], which is safe to hand out for the reason the
+        /// module above it exists: a `Wait` is evidence that some timeline
+        /// admitted a value, and evidence is not a capability to add one.
+        #[must_use]
+        pub const fn wait(&self, index: usize) -> Option<Wait> {
+            self.0.wait(index)
+        }
+
+        /// The signal this stage leaves, or `None` for a stage that leaves none.
+        #[must_use]
+        pub const fn signal(&self) -> Option<Signal> {
+            self.0.signal()
+        }
+
+        /// The record as it crosses, unchanged.
+        ///
+        /// Present so that a receiver can forward exactly what it was handed —
+        /// a supervisor persisting it, or a trace recording it — without the
+        /// bytes going back through a builder on the way. Re-encoding an
+        /// `Arrived` yields the image it was decoded from, which is what makes
+        /// *unchanged* checkable rather than asserted.
+        #[must_use]
+        pub fn encode(&self) -> [u8; SUBMISSION_BYTES] {
+            self.0.encode()
+        }
+    }
+
+    /// Compare what arrived against what somebody built.
+    ///
+    /// Here rather than on the caller's side, and asymmetric on purpose: it lets
+    /// a test say *the bytes decoded to the submission I built* without a
+    /// conversion existing in either direction. A `From<Arrived> for Submission`
+    /// would say the same thing and would also hand a receiver the builder.
+    impl PartialEq<Submission> for Arrived {
+        fn eq(&self, built: &Submission) -> bool {
+            self.0 == *built
+        }
+    }
 }
 
-pub use proof::{Signal, Wait};
+pub use proof::{Arrived, Signal, Wait};
 
 /// One timeline, as its producer has published it.
 ///
@@ -882,6 +1046,17 @@ impl Submission {
     /// `docs/postmortem/0001` records for a grammar split between a reader and
     /// a composer.
     ///
+    /// # What comes back is not a builder
+    ///
+    /// [`Arrived`] and not `Self`, and that is `E3-B05c`. A driver is a
+    /// receiver; if what a receiver held were a [`Submission`], it would hold
+    /// [`Submission::waiting`] too, and a driver inserting a wait of its own
+    /// into the client's record would be an ordinary use of a public function
+    /// rather than something the type refuses. The admission is unchanged —
+    /// every wait still goes through [`Timeline::wait`], the same door a local
+    /// caller uses — and what changed is that the door closes behind it. See
+    /// [`Arrived`] for what that does and does not buy. RFC 0111.
+    ///
     /// # Errors
     ///
     /// [`Refusal::Full`] for a count the record cannot frame;
@@ -890,7 +1065,7 @@ impl Submission {
     /// [`Refusal::Unreachable`]; and [`Refusal::Reserved`] for any byte this
     /// build does not read, which is established by rebuilding the image this
     /// build would have written and comparing all [`SUBMISSION_BYTES`] of it.
-    pub fn decode(raw: &[u8; SUBMISSION_BYTES], known: &[Timeline]) -> Result<Self, Refusal> {
+    pub fn decode(raw: &[u8; SUBMISSION_BYTES], known: &[Timeline]) -> Result<Arrived, Refusal> {
         let waits = raw[0] as usize;
         let signals = raw[1] as usize;
         if waits > MAX_WAITS || signals > 1 {
@@ -918,7 +1093,7 @@ impl Submission {
         if submission.encode() != *raw {
             return Err(Refusal::Reserved);
         }
-        Ok(submission)
+        Ok(Arrived::sealed(submission))
     }
 }
 
@@ -992,7 +1167,16 @@ impl Chain {
     }
 
     /// The compositor waits `n` on the application's timeline and promises `m`
-    /// on its own.
+    /// on its own, and the wait it enters is recorded in `trace`.
+    ///
+    /// The trace is an argument and not a field of the chain, which is the
+    /// decision worth stating: a chain that held its own trace would decide for
+    /// every caller how long a frame is, and *one frame* is the compositor's
+    /// unit rather than this type's. What the argument buys instead is that
+    /// there is no path through this function that enters a wait and does not
+    /// record it — `E3-B05b`'s *names every wait*, held at the door rather
+    /// than asked of a caller. `crate::trace` states exactly how far that
+    /// reaches and where it stops.
     ///
     /// # Errors
     ///
@@ -1000,37 +1184,61 @@ impl Chain {
     /// undertaken to signal — the case the whole module exists for, and the one
     /// that would otherwise be a compositor blocked forever on a frame an
     /// application never promised. Then whatever the compositor's own promise
-    /// and signal refuse.
-    pub fn compositor_waits_and_signals(&mut self, n: u64, m: u64) -> Result<Submission, Refusal> {
+    /// and signal refuse. A refusal records nothing, because a wait that was
+    /// refused was never entered.
+    pub fn compositor_waits_and_signals(
+        &mut self,
+        n: u64,
+        m: u64,
+        trace: &mut Trace,
+    ) -> Result<Submission, Refusal> {
         let wait = self.application.wait(n)?;
         let promised = self.compositor.promise(m)?;
         let submission = Submission::EMPTY.waiting(wait)?.signalling(promised.signal(m)?)?;
         self.compositor = promised;
+        trace.entering(Stage::Compositor, &submission, &self.timelines());
         Ok(submission)
     }
 
-    /// The present engine waits `m` on the compositor's timeline.
+    /// The present engine waits `m` on the compositor's timeline, and the wait
+    /// is recorded in `trace`.
     ///
     /// Takes `&self` and not `&mut self`, and that is the chain's third stage
     /// saying what it is: a stage that signals nothing changes no timeline, so
     /// there is no state for it to move. It is also why the chain holds two
-    /// timelines rather than three.
+    /// timelines rather than three. The trace is `&mut` and the chain is not,
+    /// which is the argument surviving the recording rather than being traded
+    /// for it: what changes is the record of the frame, not the pipeline. Had
+    /// the trace been a field of `Chain` this function would have had to become
+    /// `&mut self` and the sentence above would have been withdrawn for a
+    /// reason that has nothing to do with what a present engine is.
     ///
     /// # Errors
     ///
     /// [`Refusal::Unreachable`] if `m` is above what the compositor has
-    /// undertaken to signal.
-    pub fn present_waits(&self, m: u64) -> Result<Submission, Refusal> {
-        Submission::EMPTY.waiting(self.compositor.wait(m)?)
+    /// undertaken to signal. A refusal records nothing.
+    pub fn present_waits(&self, m: u64, trace: &mut Trace) -> Result<Submission, Refusal> {
+        let submission = Submission::EMPTY.waiting(self.compositor.wait(m)?)?;
+        trace.entering(Stage::Present, &submission, &self.timelines());
+        Ok(submission)
     }
 
-    /// Record that a signal landed on one of the chain's timelines.
+    /// Record that a signal landed on one of the chain's timelines, closing in
+    /// `trace` every wait that landing satisfied.
+    ///
+    /// This is where the trace's *who signalled it* is answered, and it is
+    /// answered at the landing rather than at the wait because that is where the
+    /// fact becomes true: a submitted signal is not a signal that happened
+    /// ([`Timeline::signalled`] says so), and a record that named a signaller
+    /// before the signal landed would say a frame was composited while it was
+    /// still queued.
     ///
     /// # Errors
     ///
     /// [`Refusal::NoSuchTimeline`] for an identifier that is neither of the
-    /// chain's, and whatever [`Timeline::landed`] refuses.
-    pub fn landed(&mut self, timeline: u32, value: u64) -> Result<(), Refusal> {
+    /// chain's, and whatever [`Timeline::landed`] refuses. A refusal closes
+    /// nothing in the trace: a landing that did not happen released no wait.
+    pub fn landed(&mut self, timeline: u32, value: u64, trace: &mut Trace) -> Result<(), Refusal> {
         if timeline == self.application.id() {
             self.application = self.application.landed(value)?;
         } else if timeline == self.compositor.id() {
@@ -1038,6 +1246,7 @@ impl Chain {
         } else {
             return Err(Refusal::NoSuchTimeline);
         }
+        trace.released(timeline, value);
         Ok(())
     }
 }
@@ -1057,7 +1266,7 @@ const fn self_blocked(wait: &Wait, signal: &Signal) -> bool {
 /// [`Refusal::NoSuchTimeline`]. A wait against a timeline whose ceiling is
 /// unknown is refused for the same reason a wait above a known ceiling is: in
 /// neither case can this side say anything will ever arrive.
-fn held(known: &[Timeline], id: u32) -> Result<Timeline, Refusal> {
+pub(crate) fn held(known: &[Timeline], id: u32) -> Result<Timeline, Refusal> {
     known.iter().copied().find(|timeline| timeline.id() == id).ok_or(Refusal::NoSuchTimeline)
 }
 
@@ -1083,14 +1292,14 @@ fn slot_at(raw: &[u8; SUBMISSION_BYTES], at: usize) -> (u32, u64) {
 }
 
 /// Eight little-endian bytes.
-fn u64_at(raw: &[u8], at: usize) -> u64 {
+pub(crate) fn u64_at(raw: &[u8], at: usize) -> u64 {
     let mut word = [0u8; 8];
     word.copy_from_slice(&raw[at..at + 8]);
     u64::from_le_bytes(word)
 }
 
 /// Four little-endian bytes.
-fn u32_at(raw: &[u8], at: usize) -> u32 {
+pub(crate) fn u32_at(raw: &[u8], at: usize) -> u32 {
     let mut word = [0u8; 4];
     word.copy_from_slice(&raw[at..at + 4]);
     u32::from_le_bytes(word)
@@ -1119,6 +1328,17 @@ mod tests {
     /// The application's timeline, and the compositor's.
     const APP: u32 = 0x0000_0011;
     const COMP: u32 = 0x0000_0022;
+
+    /// A trace nothing in this file reads.
+    ///
+    /// Every test below is about the record — its bytes, its refusals, its
+    /// admissions — and the trace is threaded through the chain's doors for a
+    /// different exit. `crate::trace`'s own tests are where what lands in it is
+    /// asserted, and a copy of those assertions here would be a second place one
+    /// property is checked and a second place it can be weakened.
+    fn untraced() -> Trace {
+        Trace::EMPTY
+    }
 
     /// A chain whose application has promised `n` and whose compositor has
     /// promised `m`.
@@ -1152,7 +1372,7 @@ mod tests {
         assert_eq!(timeline.encode(), expected);
 
         let mut pipeline = chain(9, 0x0102);
-        let composited = pipeline.compositor_waits_and_signals(9, 0x0102).unwrap();
+        let composited = pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap();
         #[rustfmt::skip]
         let expected: [u8; SUBMISSION_BYTES] = [
             // One wait, one signal, then six bytes this build does not read.
@@ -1199,11 +1419,15 @@ mod tests {
         for submission in [
             Submission::EMPTY,
             ahead.application_signals(9).unwrap(),
-            pipeline.compositor_waits_and_signals(9, 0x0102).unwrap(),
-            pipeline.present_waits(0x0102).unwrap(),
+            pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap(),
+            pipeline.present_waits(0x0102, &mut untraced()).unwrap(),
         ] {
             let raw = submission.encode();
-            assert_eq!(Submission::decode(&raw, &known), Ok(submission));
+            // `Arrived` and not a `Submission`, compared through the one
+            // asymmetric `PartialEq` there is: *the bytes decoded to the
+            // submission I built*, said without a conversion in either
+            // direction. RFC 0111.
+            assert_eq!(Submission::decode(&raw, &known).unwrap(), submission);
             // And the encoding is a function of the value alone, which is what
             // makes two architectures produce one wire image.
             assert_eq!(Submission::decode(&raw, &known).unwrap().encode(), raw);
@@ -1219,7 +1443,10 @@ mod tests {
         // is simply still there.
         let mut pipeline = chain(9, 0x0102);
         assert_eq!(pipeline.application().wait(10), Err(Refusal::Unreachable));
-        assert_eq!(pipeline.compositor_waits_and_signals(10, 0x0102), Err(Refusal::Unreachable));
+        assert_eq!(
+            pipeline.compositor_waits_and_signals(10, 0x0102, &mut untraced()),
+            Err(Refusal::Unreachable)
+        );
         // Refused *at submission*: the chain did not move, so a caller that
         // ignored the refusal has submitted nothing rather than submitted a
         // hang.
@@ -1227,13 +1454,13 @@ mod tests {
         // And on the value itself: 9 is admissible, 10 is not, and the boundary
         // is the promise rather than anything derived from it.
         assert!(pipeline.application().wait(9).is_ok());
-        assert_eq!(pipeline.present_waits(0x0103), Err(Refusal::Unreachable));
-        assert!(pipeline.present_waits(0x0102).is_ok());
+        assert_eq!(pipeline.present_waits(0x0103, &mut untraced()), Err(Refusal::Unreachable));
+        assert!(pipeline.present_waits(0x0102, &mut untraced()).is_ok());
 
         // The same refusal on the way in from a peer, reached through the same
         // constructor rather than through a second copy of the rule: take a
         // legal submission's bytes and raise the value one past the ceiling.
-        let legal = pipeline.compositor_waits_and_signals(9, 0x0102).unwrap();
+        let legal = pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap();
         let mut raw = legal.encode();
         raw[WAITS_AT] = 10;
         assert_eq!(
@@ -1367,21 +1594,42 @@ mod tests {
     }
 
     #[test]
+    fn what_arrived_forwards_the_bytes_it_arrived_as() {
+        // `E3-B05c`'s positive half, and the reason `Arrived::encode` exists at
+        // all: a receiver that must pass the record on — a supervisor
+        // persisting it, `E3-B05f`'s subtree — does it without the bytes going
+        // back through a builder, so *unchanged* is checkable rather than
+        // asserted. The two things a driver cannot do are asserted by the
+        // `compile_fail` fixtures on `Arrived`, because a test that passes
+        // cannot tell unrepresentable from not-currently-done.
+        let mut pipeline = chain(9, 0x0102);
+        let built = pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap();
+        let raw = built.encode();
+        let arrived = Submission::decode(&raw, &pipeline.timelines()).unwrap();
+        assert_eq!(arrived, built);
+        assert_eq!(arrived.encode(), raw, "what arrived re-encodes to what arrived");
+        assert_eq!(arrived.wait_count(), 1);
+        assert_eq!(arrived.wait(0), built.wait(0));
+        assert_eq!(arrived.signal(), built.signal());
+        assert_eq!(arrived.wait(MAX_WAITS), None);
+    }
+
+    #[test]
     fn a_timeline_this_side_does_not_hold_is_refused_rather_than_assumed() {
         // An unknown ceiling and an exceeded one are the same ignorance. A
         // decoder that admitted a wait on a timeline it had never heard of
         // would be admitting a wait it cannot say anything about, which is the
         // exit's clause with the check removed.
         let mut pipeline = chain(9, 0x0102);
-        let submission = pipeline.compositor_waits_and_signals(9, 0x0102).unwrap();
+        let submission = pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap();
         let raw = submission.encode();
         assert_eq!(Submission::decode(&raw, &[]), Err(Refusal::NoSuchTimeline));
         assert_eq!(
             Submission::decode(&raw, &[pipeline.compositor()]),
             Err(Refusal::NoSuchTimeline)
         );
-        assert_eq!(Submission::decode(&raw, &pipeline.timelines()), Ok(submission));
-        assert_eq!(pipeline.landed(0x33, 1), Err(Refusal::NoSuchTimeline));
+        assert_eq!(Submission::decode(&raw, &pipeline.timelines()).unwrap(), submission);
+        assert_eq!(pipeline.landed(0x33, 1, &mut untraced()), Err(Refusal::NoSuchTimeline));
     }
 
     #[test]
@@ -1403,9 +1651,8 @@ mod tests {
         for at in 0..SUBMISSION_BYTES {
             let mut damaged = raw;
             damaged[at] ^= 0xFF;
-            assert_ne!(
-                Submission::decode(&damaged, &known),
-                Ok(submission),
+            assert!(
+                !Submission::decode(&damaged, &known).is_ok_and(|arrived| arrived == submission),
                 "byte {at} of the submission is ignored"
             );
         }
@@ -1433,7 +1680,7 @@ mod tests {
         // beliefs about what just happened, and no way for either to find out.
         let mut pipeline = chain(9, 0x0102);
         let known = pipeline.timelines();
-        let submission = pipeline.compositor_waits_and_signals(9, 0x0102).unwrap();
+        let submission = pipeline.compositor_waits_and_signals(9, 0x0102, &mut untraced()).unwrap();
         let raw = submission.encode();
         let unused_slot = WAITS_AT + SLOT_BYTES;
         for at in (2..HEADER_BYTES)
@@ -1469,26 +1716,29 @@ mod tests {
 
         // Before the application has promised anything, the compositor cannot
         // wait on it. This is the ordering the type enforces.
-        assert_eq!(pipeline.compositor_waits_and_signals(1, 1), Err(Refusal::Unreachable));
+        assert_eq!(
+            pipeline.compositor_waits_and_signals(1, 1, &mut untraced()),
+            Err(Refusal::Unreachable)
+        );
 
         let signals_n = pipeline.application_signals(1).unwrap();
         assert_eq!(signals_n.wait_count(), 0);
         assert_eq!(signals_n.signal().unwrap().timeline(), APP);
         assert_eq!(signals_n.signal().unwrap().value(), 1);
 
-        let composites = pipeline.compositor_waits_and_signals(1, 1).unwrap();
+        let composites = pipeline.compositor_waits_and_signals(1, 1, &mut untraced()).unwrap();
         assert_eq!(composites.wait(0).unwrap().timeline(), APP);
         assert_eq!(composites.wait(0).unwrap().value(), 1);
         assert_eq!(composites.signal().unwrap().timeline(), COMP);
 
-        let presents = pipeline.present_waits(1).unwrap();
+        let presents = pipeline.present_waits(1, &mut untraced()).unwrap();
         assert_eq!(presents.wait(0).unwrap().timeline(), COMP);
         assert_eq!(presents.signal(), None);
 
         // The present engine cannot run ahead of a promise either, and the next
         // frame's wait is admitted only once the next frame is promised.
-        assert_eq!(pipeline.present_waits(2), Err(Refusal::Unreachable));
-        pipeline.landed(APP, 1).unwrap();
+        assert_eq!(pipeline.present_waits(2, &mut untraced()), Err(Refusal::Unreachable));
+        pipeline.landed(APP, 1, &mut untraced()).unwrap();
         pipeline.application_signals(2).unwrap();
         assert!(pipeline.application().wait(2).is_ok());
     }
@@ -1497,12 +1747,12 @@ mod tests {
     fn every_refusal_says_something_and_is_an_argument_error() {
         // RFC 0010's shape: a negative result in a domain a caller acts on,
         // with a code that already means what it says. The corpus is
-        // `Refusal::ALL`, emitted from the same list as the variants, so a
-        // tenth refusal is covered the day it is declared; and the messages are
+        // `Refusal::ALL`, emitted from the same list as the variants, so an
+        // eleventh refusal is covered the day it is declared; and the messages are
         // non-empty by a compile-time assertion in the macro rather than by
         // this loop, which is here to show that nothing has been arranged to
         // pass it.
-        assert_eq!(Refusal::ALL.len(), 10);
+        assert_eq!(Refusal::ALL.len(), 11);
         for refusal in Refusal::ALL {
             let packed = refusal.packed();
             assert!(packed < 0, "{}", refusal.message());

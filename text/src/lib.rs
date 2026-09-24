@@ -16,12 +16,21 @@
 //! a cache testable at all. Nothing here can inherit that type from somebody
 //! else's public signature.
 //!
+//! [`cache`] is that cache, and it kept the row empty: its key is the run, the
+//! face's address, the grid, the em and the feature set stored **verbatim**, so
+//! it hashes nothing and needs nobody's hasher. The sentence above turns out to
+//! have understated the problem — a seeded hasher makes the counts irreproducible,
+//! which is loud, while a *collision* returns the wrong shaping with the hit
+//! count intact, which is not — and that module is written around the second
+//! one.
+//!
 //! Where the shaper itself comes from is `E3-B03a`'s decision, and if the
 //! answer is *imported* then it arrives behind the licence boundary and is
 //! reached over a ring rather than by a dependency row here. RFC 0003.
 
 #![no_std]
 
+pub mod cache;
 pub mod corpus;
 pub mod face;
 pub mod metric;

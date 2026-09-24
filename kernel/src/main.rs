@@ -269,7 +269,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // SAFETY: every region came from a validated handoff, and the reserved list
     // covers the kernel image, the structures the loader still owns, and every
     // module it loaded.
-    unsafe { populate(&mut frames, &map[..regions], info, &boot) };
+    let dropped = unsafe { populate(&mut frames, &map[..regions], info, &boot) };
+    // Ahead of the free count, because the free count is a lie the moment this is
+    // non-zero: the frames it counts include a live module's. Nothing is printed
+    // on a boot that dropped nothing, so the trace fixture is unchanged.
+    if dropped > 0 {
+        refuse_dropped_reservations(dropped);
+    }
     kprintln!("  frames        {} free of {}", frames.free_count(), frames.total_count());
 
     let highest = map[..regions]
@@ -455,7 +461,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     let before = frames.free_count();
     // SAFETY: as the first pass, with everything below the old limit excluded
     // so that no frame is added twice.
-    unsafe { reclaim(&mut frames, &map[..regions], info, &boot) };
+    let dropped = unsafe { reclaim(&mut frames, &map[..regions], info, &boot) };
+    if dropped > 0 {
+        refuse_dropped_reservations(dropped);
+    }
     let reclaimed = frames.free_count() - before;
     if reclaimed > 0 {
         kprintln!("  reclaimed     {reclaimed} frame(s) above the old identity map");
@@ -3262,13 +3271,22 @@ fn semantic_boot(
 }
 
 /// `E2-B08`'s boot: a component that serves the objects ring, and this frame
-/// submitting on it.
+/// submitting on it — and, from `E3-B03b`, a typeface loaded across the same
+/// ring by content address.
 ///
-/// Two halves, and `kernel/src/objects.rs` argues why neither means anything
-/// alone: `objects=read` submits reads and requires every byte back, and
-/// `objects=quiet` submits nothing and requires the component to report that it
-/// was asked nothing. A delivered count of zero and a component nobody spoke to
-/// are the same number, and only the second half tells them apart.
+/// Two halves for `E2-B08`, and `kernel/src/objects.rs` argues why neither means
+/// anything alone: `objects=read` submits reads and requires every byte back,
+/// and `objects=quiet` submits nothing and requires the component to report that
+/// it was asked nothing. A delivered count of zero and a component nobody spoke
+/// to are the same number, and only the second half tells them apart.
+///
+/// `objects=face` and `objects=undeclared` are `E3-B03b`'s, and they take the
+/// `objects=` parameter rather than a `face=` one on purpose: it is this
+/// component, this store and this ring with one word on the board different, and
+/// a parameter of its own would suggest a second boot. The refusal the second of
+/// them exists for is the **frame's**, taken against the `[[face]]` table the
+/// loader placed in the component's own module — RFC 0108's section, not a field
+/// of the record — and the declared face loads in the same run as its control.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s is:
 /// it knows which half it asked for and what is in its own buffer afterwards.
@@ -3288,6 +3306,10 @@ fn objects_datapath(
         objects::Half::Provoke
     } else if boot.has_parameter(b"objects=written") {
         objects::Half::Written
+    } else if boot.has_parameter(b"objects=face") {
+        objects::Half::Face
+    } else if boot.has_parameter(b"objects=undeclared") {
+        objects::Half::Undeclared
     } else {
         return None;
     };
@@ -4844,19 +4866,59 @@ fn collect(boot: &BootInfo) -> ([Region; MAX_REGIONS], usize, bool) {
 /// `COMPONENTS` cannot drop a reservation again, because the list is as long as
 /// the module table it copies from — and the day `MAX_MODULES` moves, this moves
 /// with it rather than needing to be remembered.
+///
+/// **The derivation is read by `cargo xtask lint-bounds`**, which is the half
+/// that was missing while this was a literal: the relation held in a comment and
+/// in nobody's build, so the diff that raised `MAX_MODULES` from eight to sixteen
+/// left this at thirteen and nothing went red until a nightly six-boot claim did,
+/// a day later. RFC 0116.
 /// Unit: count of ranges.
-const MAX_RESERVED: usize = 5 + arch::x86_64::multiboot::MAX_MODULES;
+const MAX_RESERVED: usize = FIXED_RESERVED + arch::x86_64::multiboot::MAX_MODULES;
+
+/// How many of [`MAX_RESERVED`]'s slots are spoken for before the modules are.
+///
+/// Three unconditional — the kernel image, the loader's info structure, the
+/// memory map — plus the second pass's exclusion of everything the first already
+/// took, plus a framebuffer the loader may have given.
+///
+/// Named rather than left as a `5` in the line above, because that `5` is the
+/// half of the bound a reader cannot check. `MAX_MODULES` is a constant with a
+/// name, a file and a maintainer; this is a count of the assignments in
+/// [`reserved_ranges`] above the module loop, and a sixth one added there and not
+/// here is the literal thirteen again, one slot further along.
+///
+/// *Reversal:* a sixth fixed reservation. Raise this in the same diff — and the
+/// boot's refusal below is what happens when nobody does, which is a diagnosis
+/// rather than a substitute for this number being right.
+/// Unit: count of ranges.
+const FIXED_RESERVED: usize = 5;
 
 /// Everything inside usable memory that is already spoken for.
 ///
 /// `extra` is for the second pass, which must exclude everything the first pass
 /// already added. It is placed before the modules rather than after so that it
 /// cannot be the entry that falls off the end.
+///
+/// # What the third answer is for
+///
+/// The number of modules that did not fit. **It used to be nothing at all** —
+/// the loop below stopped at the bound and returned a list indistinguishable
+/// from a list nothing had been dropped from. What the caller then did with it
+/// was hand the allocator a region with a live module inside it, and the first
+/// symptom was three subsystems away: `no module this machine was offered folds
+/// to the root it was asked for`, with the address space's own root sitting at
+/// the address that module had been loaded at.
+///
+/// So it is counted and the boot refuses on it, which is
+/// `component::generations`'s rule — *counted, not merely skipped* — and
+/// `multiboot::BootInfo`'s, which has reported its own module-table overflow
+/// since E0. This list was the last bound on the boot path that could lose an
+/// entry in silence. RFC 0116.
 fn reserved_ranges(
     info: u32,
     boot: &BootInfo,
     extra: Option<mem::Reserved>,
-) -> ([mem::Reserved; MAX_RESERVED], usize) {
+) -> ([mem::Reserved; MAX_RESERVED], usize, usize) {
     let (mmap_base, mmap_len) = boot.mmap_extent();
     let mut list = [mem::Reserved::empty(); MAX_RESERVED];
 
@@ -4893,15 +4955,40 @@ fn reserved_ranges(
     // same loader called usable, which is what makes forgetting them a bug that
     // waits until something first depends on a module's contents — E0-B10 —
     // and then presents as that module being subtly wrong.
+    let mut dropped = 0;
     for module in boot.modules() {
         if count == MAX_RESERVED {
-            break;
+            dropped += 1;
+            continue;
         }
         list[count] = mem::Reserved { base: module.start, end: module.end };
         count += 1;
     }
 
-    (list, count)
+    (list, count, dropped)
+}
+
+/// End the boot, because a module is about to be handed out as free memory.
+///
+/// # Why this is fatal and not a warning line
+///
+/// A reservation that did not fit is memory corruption with a delay fuse: the
+/// allocator will offer a live module's frames to whoever asks next, and what
+/// the operator sees is the *reader* of that module failing, arbitrarily far
+/// from here and on a change that touched neither. The boot this was written
+/// against spent a day looking like a defect in the generation fold.
+///
+/// A machine that cannot say which memory is spoken for has nothing to offer a
+/// component, so there is no degraded mode to fall back to.
+fn refuse_dropped_reservations(dropped: usize) -> ! {
+    kprintln!(
+        "FAIL: the reserved list: {dropped} module(s) did not fit in {MAX_RESERVED} range(s)"
+    );
+    kprintln!(
+        "    raise         MAX_RESERVED in kernel/src/main.rs — it is \
+         FIXED_RESERVED + MAX_MODULES, and one of the two is now wrong"
+    );
+    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure)
 }
 
 /// Map the loader's framebuffer and start drawing the boot log on it.
@@ -4980,13 +5067,19 @@ fn open_screen(
 ///
 /// The regions must come from a validated handoff, and `info` must be the
 /// pointer the boot stub captured.
-unsafe fn populate(frames: &mut mem::FrameAllocator, map: &[Region], info: u32, boot: &BootInfo) {
-    let (reserved, count) = reserved_ranges(info, boot, None);
+unsafe fn populate(
+    frames: &mut mem::FrameAllocator,
+    map: &[Region],
+    info: u32,
+    boot: &BootInfo,
+) -> usize {
+    let (reserved, count, dropped) = reserved_ranges(info, boot, None);
     for region in map.iter().filter(|r| r.kind == RegionKind::Usable) {
         // SAFETY: the loader reported this region as usable, and everything
         // inside it that is already owned is in `reserved`.
         unsafe { frames.add_region(region.base, region.len, &reserved[..count]) };
     }
+    dropped
 }
 
 /// Add the frames the identity window could not reach.
@@ -4995,16 +5088,22 @@ unsafe fn populate(frames: &mut mem::FrameAllocator, map: &[Region], info: u32, 
 ///
 /// Must run only after the address space switch, and only once: everything
 /// below the old limit is excluded so that no frame is offered twice.
-unsafe fn reclaim(frames: &mut mem::FrameAllocator, map: &[Region], info: u32, boot: &BootInfo) {
+unsafe fn reclaim(
+    frames: &mut mem::FrameAllocator,
+    map: &[Region],
+    info: u32,
+    boot: &BootInfo,
+) -> usize {
     // Everything the first pass already added, as one range.
     let already = mem::Reserved { base: 0, end: mem::IDENTITY_LIMIT };
-    let (reserved, count) = reserved_ranges(info, boot, Some(already));
+    let (reserved, count, dropped) = reserved_ranges(info, boot, Some(already));
 
     for region in map.iter().filter(|r| r.kind == RegionKind::Usable) {
         // SAFETY: as the first pass, and the added range makes double-adding
         // impossible rather than unlikely.
         unsafe { frames.add_region(region.base, region.len, &reserved[..count]) };
     }
+    dropped
 }
 
 unsafe extern "C" {

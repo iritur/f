@@ -947,6 +947,7 @@ fn main() -> ExitCode {
         "lint-boundary" => lint_boundary(),
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
+        "lint-bounds" => lint_bounds(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
         "lint-units" => lint_units(),
@@ -955,6 +956,7 @@ fn main() -> ExitCode {
         "lint-testing-status" => lint_testing_status(),
         "lint-debt" => lint_debt(),
         "lint-claim-runs" => lint_claim_runs(),
+        "lint-schedules" => lint_schedules(),
         "lint-generations" => generation::fixpoint(),
         "lint-gate" => lint_gate(),
         "lint-manifests" => lint_manifests(),
@@ -1209,6 +1211,9 @@ cargo xtask <command>
                      prohibited surfaces. Needs a compile first. RFC 0092
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
+  lint-bounds        Every boot-path bound still dominates the count that
+                     decides it. RFC 0101's rule, read out of the source.
+                     RFC 0116
   lint-mutations     No deliberate defect is on by default
   lint-claims        No document cites a claim value the claim no longer has
   lint-units         R03: every public abi field states its unit
@@ -1217,6 +1222,9 @@ cargo xtask <command>
   lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
   lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
   lint-claim-runs    every gating claim is compared to its bounds by some workflow
+  lint-schedules     every scheduled workflow has one job that watches every
+                     other job in it and can open an issue about a red run.
+                     A-06, docs/postmortem/0002 and 0003
   lint-generations   every generation round-trips to a fixpoint
   lint-gate          the pull-request gate runs every check `verify` runs
   history --changes  where the recorded series stepped, rather than what crossed a bound
@@ -14758,6 +14766,11 @@ fn lint_all() -> Result<(), String> {
     lint_licensing()?;
     lint_unsafe()?;
     lint_percpu()?;
+    // The rule RFC 0101 named and did not write. Four bounds on the boot path
+    // are each larger than a count kept in another file, every relation was
+    // written in a comment, and the last time one of them decayed it was a
+    // six-boot nightly claim that noticed, a day later. Four file reads.
+    lint_bounds()?;
     lint_mutations()?;
     lint_claims()?;
     // The three rules from `docs/what-must-be-stated.html` section 15 that
@@ -14790,6 +14803,13 @@ fn lint_all() -> Result<(), String> {
     // And the same question about the checks themselves rather than the claims:
     // does the gate run what this function runs? Nine of them it did not.
     lint_gate()?;
+    // And the question neither of those asks: when a check that only a schedule
+    // runs goes red, does anybody hear it? Twice not — `docs/postmortem/0002`
+    // and `0003`, and the second time the repair was already on a branch. A-06
+    // called the mechanism earned and not built; this is the file read that
+    // keeps it built, because the way it rots is somebody adding a job to
+    // `nightly.yml` and not adding it to the alarm's `needs:`.
+    lint_schedules()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -15412,6 +15432,519 @@ fn lint_gate() -> Result<(), String> {
         absent.len(),
         absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
     ))
+}
+
+/// Every scheduled workflow has one job that watches every other job in it, and
+/// that job can reach a person.
+///
+/// # The incident this was written against, which is the second of its kind
+///
+/// `docs/postmortem/0003`: the nightly's `rollback` job went red at 03:11 UTC on
+/// 2026-09-23 and nobody read it for a day, and the repair had already been
+/// committed — on a branch, the day before — so the schedule reported a defect
+/// nobody could connect to its fix. `docs/postmortem/0002` is the first
+/// occurrence: five consecutive red nights, unread, in which the one job built
+/// to reach a person was itself the broken one. `TODO.md`'s **A-06** says
+/// *nightly sweeps and weekly checking stay green or stay loud*, and on
+/// 2026-09-24 it recorded in as many words that the loud half was earned and not
+/// built.
+///
+/// # Why this is a lint and not a test of the workflow
+///
+/// Because nothing in this repository can watch GitHub run anything, which is
+/// the same position `proof_schedule` is in and takes the same answer: check the
+/// half that is local. Whether a scheduled workflow's jobs are *watched* is a
+/// file read — a set of job names against one `needs:` list — and post-mortem
+/// 0003's own lesson is that a relation between two things in two files belongs
+/// in `verify` rather than in the expensive route that happened to notice it.
+///
+/// The way this mechanism rots is not exotic. Somebody adds a job to
+/// `nightly.yml` — this file has gained five in two epochs — and does not add it
+/// to the alarm's `needs:`, so the new job is the one job in the file nothing is
+/// listening to, and it is unwatched in exactly the way the old ones were.
+/// That is a red pull request now.
+///
+/// # What it checks
+///
+/// For every workflow with a `schedule:` trigger: that it has an `alarm` job;
+/// that the job names every other job in the file in `needs:`; that it runs
+/// `if: always()`, because a job conditioned on `failure()` cannot close a stale
+/// issue on a green run; that it declares no `container:`, because the image is
+/// a thing that can fail and a watcher that needs the image cannot report the
+/// image failing — which is the shape of `docs/postmortem/0002`; and that it
+/// holds `issues: write` and neither `contents: write` nor `packages: write`,
+/// because a machine that can open an issue should not also be able to push.
+///
+/// It also requires the two scripts the jobs run to exist, since a workflow
+/// calling a script that is not there fails at three in the morning in the one
+/// job whose failure nothing else reports — and requires the alarm to actually
+/// *run* both of them, and to post on `schedule`. Those last three are here
+/// because the check without them had a passing mutation and it was the obvious
+/// one: delete the posting step. The alarm then watched every job, held exactly
+/// the right permissions, wrote the whole issue body to the run summary and
+/// opened nothing, with every check green. A watcher that says nothing is the
+/// failure this exists to prevent, so a check that could not see it was checking
+/// the shape of the thing rather than the thing.
+///
+/// # What it does not check
+///
+/// That the alarm *works*. Opening an issue needs a token and a real failure,
+/// and only a real failure can exercise it; what is testable without one is the
+/// decision and the message, and those are in `ops/alarm.sh` with tests in this
+/// file. It also says nothing about the alarm job failing — no job in a workflow
+/// can watch itself, and that residue is named in `nightly.yml`'s own header
+/// rather than papered over.
+///
+/// # Errors
+///
+/// A scheduled workflow with no alarm, an alarm that does not watch every job, a
+/// watcher that cannot report, or a missing script.
+fn lint_schedules() -> Result<(), String> {
+    let dir = root().join(".github").join("workflows");
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| {
+        format!(
+            "reading .github/workflows/: {e}\n\n\
+             With no workflows there is no schedule to be loud, which is a larger finding\n\
+             than the one this check was written for."
+        )
+    })? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
+            files.push((name, text));
+        }
+    }
+    files.sort();
+
+    for script in [ALARM_SCRIPT, ALARM_POST_SCRIPT] {
+        if !root().join(script).is_file() {
+            return Err(format!(
+                "{script} is not there, and every alarm job runs it.\n\n\
+                 A workflow calling a script that does not exist fails at three in the\n\
+                 morning, in the one job whose failure nothing else reports. That is\n\
+                 `docs/postmortem/0002` with a different cause."
+            ));
+        }
+    }
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut watched = 0usize;
+    let mut scheduled = 0usize;
+    for (name, text) in &files {
+        if !text.lines().any(|line| line.trim_end() == "  schedule:") {
+            continue;
+        }
+        scheduled += 1;
+        let jobs = workflow_jobs(text);
+        let Some(alarm) = workflow_job_body(text, ALARM_JOB) else {
+            findings.push(format!(
+                "  {name}: has a schedule and no `{ALARM_JOB}` job, so {} job(s) in it fail \
+                 into a tab",
+                jobs.len()
+            ));
+            continue;
+        };
+
+        let needs = yaml_key_region(&alarm, "needs");
+        let unwatched: Vec<&String> = jobs
+            .iter()
+            .filter(|job| job.as_str() != ALARM_JOB)
+            .filter(|job| {
+                !needs
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                    .any(|tok| tok == job.as_str())
+            })
+            .collect();
+        if !unwatched.is_empty() {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` does not name {} of its sibling job(s) in `needs:`: {}",
+                unwatched.len(),
+                unwatched.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !alarm.contains("if: always()") {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` is not `if: always()`, so it cannot close a stale \
+                 issue on a green run"
+            ));
+        }
+        if alarm.lines().any(|line| line.trim_start().starts_with("container:")) {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` runs in a container, and the image is a thing that \
+                 can fail"
+            ));
+        }
+        if !alarm.contains("issues: write") {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` does not hold `issues: write`, so it can report \
+                 nothing"
+            ));
+        }
+        for wide in ["contents: write", "packages: write", "pull-requests: write"] {
+            if alarm.contains(wide) {
+                findings.push(format!(
+                    "  {name}: `{ALARM_JOB}` holds `{wide}`, which no call it makes needs"
+                ));
+            }
+        }
+        // The three rows below were added because the check without them had a
+        // passing mutation, and it is the mutation somebody would actually
+        // write: **delete the posting step**. The alarm then computed the
+        // decision, wrote the whole issue body to the run summary, watched every
+        // job, held exactly the right permissions — and opened nothing. Every
+        // check above it was green. A watcher that says nothing is the failure
+        // this whole mechanism exists to prevent, so a check that could not see
+        // it was checking the shape of the thing rather than the thing.
+        //
+        // The second row is the same defect one step smaller: leaving the step
+        // and narrowing its condition to the manual input turns off the only
+        // route that matters, because the route that matters is the one nobody
+        // chose. The third is the decision half going the same way.
+        for (needle, what) in [
+            ("bash ops/alarm.sh", "does not run the script that decides and writes the message"),
+            ("bash ops/alarm-post.sh", "does not run the script that opens, comments or closes"),
+            (
+                "github.event_name == 'schedule'",
+                "does not post on a schedule, which is the only route nobody has to choose",
+            ),
+        ] {
+            if !alarm.contains(needle) {
+                findings.push(format!("  {name}: `{ALARM_JOB}` {what} (`{needle}` is not in it)"));
+            }
+        }
+        watched += jobs.len().saturating_sub(1);
+    }
+
+    if scheduled == 0 {
+        return Err("no workflow in .github/workflows/ has a `schedule:` trigger.\n\n\
+             The nightly and the weekly are where the expensive evidence in this tree is\n\
+             produced — the sweep, both fuzzers, the proofs, five gating claims and the\n\
+             two-runner comparison. If they have really gone, `docs/TESTING-STATUS.md`\n\
+             and RFC 0053 describe schedules that do not exist."
+            .into());
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-schedules: ok  ({scheduled} scheduled workflow(s), {watched} job(s) watched \
+             by an alarm that can open an issue)"
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} finding(s) against the alarm on this tree's schedules:\n{}\n\n\
+         A-06 says a nightly stays green or stays loud, and *a muted job is a deleted job\n\
+         with extra steps*. A job no alarm watches is muted by arrangement rather than by\n\
+         a reviewable diff, which is that item's own sentence turned against it. Twice now\n\
+         a red schedule went unread — `docs/postmortem/0002` and `0003` — and the second\n\
+         time the repair was already committed on a branch, so the schedule reported a\n\
+         defect nobody could connect to its fix.\n\n\
+         The shape to copy is `nightly.yml`'s `{ALARM_JOB}` job, whose header carries the\n\
+         argument for every line of it.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// The one job name every scheduled workflow owes, written once so that the
+/// check and the five workflows cannot spell it two ways.
+const ALARM_JOB: &str = "alarm";
+
+/// The decision and the message, which reach no network and are tested here.
+const ALARM_SCRIPT: &str = "ops/alarm.sh";
+
+/// The three `gh` calls, which only a real failure can exercise.
+const ALARM_POST_SCRIPT: &str = "ops/alarm-post.sh";
+
+/// The job names a workflow declares, in file order.
+///
+/// Not a YAML parser, and it does not pretend to be one — `ops/detect.sh` says
+/// the same about its own reader and for the same reason. A job key is a line of
+/// exactly two spaces, a name and a colon, with nothing after it but a comment,
+/// inside the `jobs:` block. That is the shape every workflow in this repository
+/// is written in, and it was checked against all seven of them.
+///
+/// The failure mode is worth naming because it decides which way this is wrong
+/// when it is wrong: a line inside a `run: |` block that happened to look like a
+/// job key would add a phantom job, and a phantom job makes the check *red*. A
+/// real job would only be missed by a key this does not match, which is why a
+/// trailing comment is stripped rather than making the line fail to match.
+fn workflow_jobs(text: &str) -> Vec<String> {
+    let mut jobs = Vec::new();
+    let mut in_jobs = false;
+    for line in text.lines() {
+        if line.trim_end() == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("  ") else { continue };
+        if rest.starts_with(' ') || rest.starts_with('#') || rest.is_empty() {
+            continue;
+        }
+        let Some((name, after)) = rest.split_once(':') else { continue };
+        let after = after.split('#').next().unwrap_or("").trim();
+        if !after.is_empty() {
+            continue;
+        }
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        jobs.push(name.to_string());
+    }
+    jobs
+}
+
+/// One job's lines, from its key to the next job key or the end of the file.
+fn workflow_job_body(text: &str, job: &str) -> Option<String> {
+    let mut body: Option<Vec<&str>> = None;
+    let key = format!("  {job}:");
+    for line in text.lines() {
+        if line.trim_end() == key {
+            body = Some(Vec::new());
+            continue;
+        }
+        if let Some(collected) = body.as_mut() {
+            let is_next_job = line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && line.trim_end().ends_with(':');
+            if is_next_job {
+                break;
+            }
+            collected.push(line);
+        }
+    }
+    body.map(|lines| lines.join("\n"))
+}
+
+/// Everything a four-space key holds, including a flow sequence written over
+/// several lines.
+///
+/// It stops at the next four-space key *or comment*, and the comment matters:
+/// `nightly.yml` writes a fourteen-name `needs:` as a multi-line sequence and
+/// puts a comment under it, and a region that swallowed the comment would be
+/// matching job names against English.
+fn yaml_key_region(body: &str, key: &str) -> String {
+    let opener = format!("    {key}:");
+    let mut region: Option<Vec<&str>> = None;
+    for line in body.lines() {
+        if line.starts_with(&opener) {
+            region = Some(vec![line]);
+            continue;
+        }
+        if let Some(collected) = region.as_mut() {
+            if line.starts_with("    ") && !line.starts_with("     ") && four_space_key(line) {
+                break;
+            }
+            collected.push(line);
+        }
+    }
+    region.map(|lines| lines.join("\n")).unwrap_or_default()
+}
+
+/// Whether a line at four spaces opens a new key, or is a comment.
+///
+/// `if: always()` does not end in a colon and is still the end of the region
+/// above it, which is the whole reason this is a function and not a suffix test.
+fn four_space_key(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return true;
+    }
+    match trimmed.split_once(':') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// The half of the alarm that does not need a token, a network or a red night.
+///
+/// `ops/alarm.sh` decides whether a run should say anything and writes what it
+/// would say; `ops/alarm-post.sh` is the three `gh` calls that say it. The split
+/// exists so that this module can run the first half against fixtures, and the
+/// second half is honestly declared as the part only a real failure exercises.
+///
+/// `docs/postmortem/0002` is why that matters more here than in most places: the
+/// one job built to reach a person was itself broken for five nights, and it was
+/// invisible because nothing but a nightly ever ran it. A notification mechanism
+/// with no tests is a notification mechanism nobody has ever seen work.
+#[cfg(test)]
+mod schedule_alarm {
+    use std::process::Command;
+
+    /// One run of `ops/alarm.sh` over a fixture, returning what it wrote.
+    ///
+    /// The scratch directory is named after the test rather than drawn from a
+    /// clock or a random source, which is RFC 0004 applied to a temporary file:
+    /// two runs of one test use one path, so a failure leaves the fixture where
+    /// the next run can read it.
+    fn run(case: &str, jobs: &str, log: Option<&str>, head: &str) -> (String, String, String) {
+        let dir = std::env::temp_dir().join(format!("f-alarm-{case}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let table = dir.join("jobs.tsv");
+        std::fs::write(&table, jobs).expect("job table");
+        let log_path = dir.join("log.txt");
+        match log {
+            Some(text) => std::fs::write(&log_path, text).expect("log"),
+            None => {
+                let _ = std::fs::remove_file(&log_path);
+            }
+        }
+        let out = Command::new("bash")
+            .arg(super::root().join(super::ALARM_SCRIPT))
+            .current_dir(super::root())
+            .env("ALARM_JOBS", &table)
+            .env("ALARM_WORKFLOW", "nightly")
+            .env("ALARM_SHA", "b74807ca")
+            .env("ALARM_BRANCH", "main")
+            .env("ALARM_HEAD", head)
+            .env("ALARM_RUN_URL", "https://example.invalid/run/1")
+            .env("ALARM_LOG", &log_path)
+            .env("ALARM_OUT", &dir)
+            .output()
+            .expect(
+                "`bash` is what every alarm job runs, and this suite runs in the development \
+                 container where it is present. A machine without it cannot exercise the one \
+                 half of this mechanism that is exercisable at all.",
+            );
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).expect(name);
+        (read("decision").trim().to_string(), read("title").trim().to_string(), read("body.md"))
+    }
+
+    #[test]
+    fn a_failing_job_is_red_and_the_title_is_its_name() {
+        let (decision, title, body) = run(
+            "red",
+            "environment\tsuccess\nimage\tsuccess\nrollback\tfailure\nsweep\tsuccess\n",
+            Some(
+                "rollback\tstep\t2026-09-23T03:11:00.0000000Z FAIL: the generation: no module folds to the root it was asked for\n",
+            ),
+            "a03b9660",
+        );
+        assert_eq!(decision, "red");
+        assert_eq!(title, "nightly is red: rollback");
+        assert!(body.contains("FAIL: the generation"), "{body}");
+        assert!(body.contains("| `rollback` | failure |"), "{body}");
+    }
+
+    #[test]
+    fn a_moved_default_branch_is_the_first_thing_the_body_says_to_check() {
+        // `docs/postmortem/0003` in one assertion. The run tested `b74807ca`
+        // while the repair sat in `a03b966` on a branch, and the day that cost
+        // is the day nothing told a reader to look at the range.
+        let (_, _, body) =
+            run("moved", "rollback\tfailure\n", Some("x\ty\tFAIL: something\n"), "a03b9660");
+        assert!(body.contains("git log --oneline b74807ca..main"), "{body}");
+        assert!(body.contains("the repair may already exist"), "{body}");
+
+        // And the other direction, which has to be said rather than left out:
+        // when the branch has not moved, this is not that incident's shape and
+        // the body must not send a reader looking for a fix that cannot exist.
+        let (_, _, body) =
+            run("still", "rollback\tfailure\n", Some("x\ty\tFAIL: something\n"), "b74807ca");
+        assert!(!body.contains("git log --oneline"), "{body}");
+        assert!(body.contains("no later commit that could already be"), "{body}");
+    }
+
+    #[test]
+    fn the_title_is_a_signature_and_not_a_finishing_order() {
+        // The whole of the second-consecutive-failure question. The caller
+        // matches on the title to decide *comment* rather than *open a second
+        // issue*, so two nights that fail the same way must spell the title the
+        // same way even when the jobs finish in a different order.
+        let one = run("order-a", "miri\tfailure\ncut\tfailure\n", None, "").1;
+        let two = run("order-b", "cut\tfailure\nmiri\tfailure\n", None, "").1;
+        assert_eq!(one, two);
+        assert_eq!(one, "nightly is red: cut, miri");
+
+        // And a title stays a title: four names become three and a count.
+        let many = run("many", "d\tfailure\nc\tfailure\nb\tfailure\na\tfailure\n", None, "").1;
+        assert_eq!(many, "nightly is red: a, b, c, and 1 more");
+    }
+
+    #[test]
+    fn a_skipped_job_is_not_a_failure_and_a_green_run_closes() {
+        // `maintain.yml` skips `diagnose` on every day nothing moved. A
+        // mechanism that read a skip as red would be red most days, and a
+        // mechanism that is red most days is the muting A-06 names.
+        let (decision, title, body) =
+            run("skipped", "detect\tsuccess\ndiagnose\tskipped\n", None, "b74807ca");
+        assert_eq!(decision, "green");
+        assert_eq!(title, "nightly is red:", "the prefix a green run closes on");
+        assert!(body.contains("green again"), "{body}");
+    }
+
+    #[test]
+    fn a_cancelled_run_asserts_nothing_in_either_direction() {
+        // It must not open — nobody's defect — and it must not *close*, because
+        // closing on a run that proved nothing is how a real finding
+        // disappears.
+        let (decision, _, _) =
+            run("cancelled", "sweep\tcancelled\nimage\tsuccess\n", None, "b74807ca");
+        assert_eq!(decision, "nothing");
+
+        // A cancellation beside a failure is still a failure: a matrix
+        // cancelling its siblings after one of them failed has not stopped
+        // being a red run.
+        let (decision, _, _) =
+            run("both", "sweep\tcancelled\nrollback\tfailure\n", None, "b74807ca");
+        assert_eq!(decision, "red");
+    }
+
+    #[test]
+    fn a_log_with_nothing_this_tree_recognises_says_so() {
+        // The fallback is deliberately last and deliberately visible: a run
+        // whose failure has no vocabulary here is a run worth looking at.
+        let (_, _, body) = run(
+            "unknown",
+            "sweep\tfailure\n",
+            Some("sweep\tstep\t2026-09-23T03:11:00.0000000Z Process completed with exit code 2.\n"),
+            "b74807ca",
+        );
+        assert!(body.contains("Process completed with exit code 2"), "{body}");
+
+        let (_, _, body) = run("nolog", "sweep\tfailure\n", None, "b74807ca");
+        assert!(body.contains("the log could not be read"), "{body}");
+    }
+
+    #[test]
+    fn this_tree_s_schedules_are_watched() {
+        // The same shape `proof_schedule`'s test takes: nothing here can watch
+        // GitHub run anything, so what is asserted is the half that is local,
+        // and it is asserted by the suite as well as by `lint` so that renaming
+        // a job goes red in two places.
+        super::lint_schedules().expect("a scheduled workflow has a job nothing is listening to");
+    }
+
+    const FIXTURE: &str = "name: example\n\non:\n  schedule:\n    - cron: \"11 3 * * *\"\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n  test:\n    runs-on: ubuntu-latest\n  alarm:\n    needs:\n      [\n        build,\n      ]\n    # test is not in that list, and this comment must not be read as if it were\n    if: always()\n";
+
+    #[test]
+    fn a_job_missing_from_the_needs_list_is_the_failure_this_exists_for() {
+        let jobs = super::workflow_jobs(FIXTURE);
+        assert_eq!(jobs, vec!["build", "test", "alarm"]);
+        let body = super::workflow_job_body(FIXTURE, "alarm").expect("the alarm job");
+        let needs = super::yaml_key_region(&body, "needs");
+        assert!(needs.contains("build"), "{needs}");
+        // The assertion the comment in the fixture is there for: a region that
+        // ran past the flow sequence would find `test` in English and report a
+        // watched job that is not watched — a false green, which is the one
+        // direction this check must not fail in.
+        assert!(!needs.contains("test"), "{needs}");
+    }
 }
 
 /// Every claim that gates is compared to its own `[threshold]` table by some
@@ -16702,10 +17235,27 @@ const INPUT_PATH: &[(&str, &str)] = &[
     ),
     (
         "interface/",
-        "the frame loop and the late-latch. This is where a second reading is most \
-         tempting and most damaging: at latch time the correct measurement and the \
-         wrong one differ by which of two numbers is called the event's time, and \
-         the wrong one is the shorter expression",
+        "the vocabulary a scene is declared in, and the solver over it. This row \
+         said *the frame loop and the late-latch* until RFC 0120, and neither was \
+         ever here: a late latch needs an arena, a chain and a frame, and this \
+         crate holds none of the three. The row stays because a declaration is \
+         where a stamp would first be wanted the day an animation is declared \
+         against one, and it is held open rather than checked — this crate \
+         depends on neither `f-env` nor `f-input`, which `stage_reach` computes \
+         and prints",
+    ),
+    (
+        "user/compositor/",
+        "the frame loop and the late-latch, which is where `interface/`'s row said \
+         they were and where RFC 0120 found them. This is the stage a second \
+         reading is most tempting and most damaging in: at latch time the correct \
+         measurement and the wrong one differ by which of two numbers is called \
+         the event's time, and the wrong one is the shorter expression. The \
+         component holds no clock at all — RFC 0004 gives one at ring 3 neither a \
+         timer nor a port — so what is checked here is the mint: \
+         `f_compositor::latch` turns the scanout it aimed at into a `StampNanos`, \
+         [`WIRE_MINT`] is the rule that keeps its argument a field read, and the \
+         reversal is a display that reports its own scanout instant",
     ),
     (
         "scene/",
@@ -17509,6 +18059,22 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
 }
 ";
 
+    /// The stage that mints a target rather than a reading, held.
+    ///
+    /// The late latch, `E3-B01i` and RFC 0120. It is a separate fixture from
+    /// [`STAGE_HELD`] because it is a separate clause: this stage is the only one
+    /// on the path that calls [`WIRE_MINT`](super::WIRE_MINT) on a number that
+    /// came out of its *own* arithmetic — the scanout it aimed the frame at — and
+    /// what keeps that legal is the argument being a field read. A version of
+    /// this file that spelled it `from_wire_nanos(scanout_nanos)` is a finding,
+    /// which is `a_bare_local_handed_to_the_wire_mint_is_refused_because_that_is
+    /// _where_a_helper_lands`'s subject at a different stage.
+    const LATCH_HELD: &str = "pub fn latch(&mut self, aim: Aim) -> Option<Predicted> {
+    let scanout = StampNanos::from_wire_nanos(aim.scanout_nanos);
+    self.predictor.predict_at(scanout)
+}
+";
+
     /// The whole path, held. One file per stage, because a stage with no file
     /// is itself a finding.
     ///
@@ -17526,6 +18092,7 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
             ("scene/src/commit.rs", STAGE_HELD),
             ("abi/src/input.rs", STAGE_HELD),
             ("user/virtio-input/src/clock.rs", CALLER_HELD),
+            ("user/compositor/src/latch.rs", LATCH_HELD),
         ]
     }
 
@@ -20866,6 +21433,210 @@ fn lint_percpu() -> Result<(), String> {
     ))
 }
 
+/// One bound on the boot path, and the count that decides how large it must be.
+///
+/// `at_least` is the whole of the rule: a bound is wrong the moment it stops
+/// dominating what it counts, and every one of these dominates by an arithmetic
+/// nobody was evaluating.
+struct BootBound {
+    /// The constant that must be large enough, as `(file, name)`.
+    /// Unit: none — a source location and an identifier.
+    bound: (&'static str, &'static str),
+    /// What it is a bound over, as a human sentence for the failure text.
+    /// Unit: none — prose.
+    over: &'static str,
+    /// The smallest value the bound may hold, given the counts read.
+    /// Unit: the bound's own unit.
+    at_least: fn(&BTreeMap<String, u64>) -> Option<u64>,
+    /// Why, in one sentence, and what breaks when it is one short.
+    /// Unit: none — prose.
+    because: &'static str,
+}
+
+/// Where each constant this check reads lives.
+///
+/// Read from source rather than linked against, because three of the four are
+/// in crates `xtask` cannot depend on — `kernel` is `no_std`, `test = false`
+/// and built for a bare-metal target — and the fourth being readable the other
+/// way would make this two mechanisms for one rule. `lint_gate` reads source
+/// for the same reason and says so at greater length.
+const BOUND_SOURCES: &[(&str, &str)] = &[
+    ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
+    ("kernel/src/main.rs", "FIXED_RESERVED"),
+    ("kernel/src/main.rs", "MAX_RESERVED"),
+    ("kernel/src/component.rs", "PLACES_MAX"),
+    ("abi/src/reserve.rs", "RESERVATIONS_MAX"),
+];
+
+/// Every boot-path bound still dominates the count that decides it.
+///
+/// # The rule, and the incident that named it
+///
+/// RFC 0101: *a constant derived from a count is only as good as the claim that
+/// the count is what is being counted, and that claim decays silently.* It
+/// decays by addition — one more component — and the failure surfaces nowhere
+/// near the addition. Two bounds of that shape were repaired in one hour on
+/// 2026-09-22, and the RFC ends by naming the check that would have caught
+/// either, adding that *a rule deserves its own task rather than a paragraph in
+/// the RFC that motivates it*. This is that task.
+///
+/// # What it costs, and why that matters here
+///
+/// Four file reads and no build. That is the entire argument for this being in
+/// `cargo xtask verify` rather than beside the claim it protects: the route
+/// that *did* catch `MAX_RESERVED` at thirteen is `cargo xtask rollback`, which
+/// is three generation builds and six boots, runs only in the nightly, and went
+/// red at 03:11 on a day nobody was reading it — on a merge whose author had
+/// already repaired the cause on a branch and could not know. Five green local
+/// gates said nothing, because none of them evaluates an arithmetic that is
+/// written in a comment. RFC 0116.
+///
+/// # What it cannot see
+///
+/// A bound whose relation is not one of the four below, and a constant written
+/// as anything more than a sum of integers and other constants this reads —
+/// the resolver is deliberately small, and a value it cannot evaluate is a
+/// finding rather than a pass. What it also cannot see is whether
+/// [`FIXED_RESERVED`] still equals the number of fixed reservations
+/// `reserved_ranges` adds: that is a count of assignments in a function body,
+/// and the frame refuses the boot on it instead.
+///
+/// # Errors
+///
+/// A bound that no longer dominates its count, a constant that is not where
+/// this expects it, or a value that does not resolve.
+fn lint_bounds() -> Result<(), String> {
+    let mut read: BTreeMap<String, u64> = BTreeMap::new();
+    let mut findings: Vec<String> = Vec::new();
+
+    for (file, name) in BOUND_SOURCES {
+        let path = root().join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {file} for `{name}`: {e}"))?;
+        match constant_value(&text, name, &read) {
+            Some(value) => {
+                read.insert((*name).to_string(), value);
+            }
+            None => findings.push(format!(
+                "  {file}  `{name}` is not a `const {name}: usize = <sum of integers and \
+                 constants this check already read>;` — so its value cannot be compared \
+                 with anything"
+            )),
+        }
+    }
+
+    // The four relations. Each is written here and nowhere else, so that a
+    // reader who disagrees with one has one place to argue with it.
+    let bounds: &[BootBound] = &[
+        BootBound {
+            bound: ("kernel/src/main.rs", "MAX_RESERVED"),
+            over: "the ranges the frame allocator must be told not to hand out",
+            at_least: |read| Some(read.get("FIXED_RESERVED")? + read.get("MAX_MODULES")?),
+            because: "a module whose reservation did not fit is a module the allocator \
+                      offers as free memory, and the symptom is the reader of that module \
+                      failing, arbitrarily far away. This was the literal 13 against a \
+                      MAX_MODULES of 16 for a day",
+        },
+        BootBound {
+            bound: ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
+            over: "the modules a boot menu offering two generations places",
+            // init, one module per place, one successor for a swap, two
+            // generations. `cargo xtask rollback` is the boot that needs every
+            // one of them at once and the only one that does.
+            at_least: |read| Some(1 + read.get("PLACES_MAX")? + 1 + 2),
+            because: "`cargo xtask rollback` offers both generations beside every \
+                      component file; a module past this bound is dropped by the loader \
+                      reader, and the boot then cannot fold to the root it was asked for. \
+                      This was 8 against a menu needing 9",
+        },
+        BootBound {
+            bound: ("abi/src/reserve.rs", "RESERVATIONS_MAX"),
+            over: "the grants outstanding while places are refilled",
+            // RFC 0101's own sentence: places plus refills in flight, and a
+            // refill holds two entries for one place until the first is
+            // released. Twice the places is the bound that follows.
+            at_least: |read| Some(2 * read.get("PLACES_MAX")?),
+            because: "`kernel::component::fill` grants after the spawn, so a refilled \
+                      place holds two entries until the first is released. RFC 0101 names \
+                      exactly this check as the repair that closes its residue rather than \
+                      padding it",
+        },
+        BootBound {
+            bound: ("kernel/src/component.rs", "PLACES_MAX"),
+            over: "the component files this tree builds",
+            at_least: |_| u64::try_from(COMPONENTS.len()).ok(),
+            because: "a component file with no place is a component no downstream count \
+                      ever looks for — the ninth walked past a silent `continue` and was \
+                      reported as a stale or partial build",
+        },
+    ];
+
+    for bound in bounds {
+        let (file, name) = bound.bound;
+        let Some(have) = read.get(name).copied() else { continue };
+        let Some(want) = (bound.at_least)(&read) else { continue };
+        if have >= want {
+            continue;
+        }
+        findings.push(format!(
+            "  {file}  `{name}` is {have} and must be at least {want} — it bounds {}.\n\
+             \x20     {}",
+            bound.over, bound.because
+        ));
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-bounds: ok  ({} boot-path bound(s) still dominate their counts)",
+            bounds.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} boot-path bound(s) no longer dominate what they count:\n{}\n\n\
+         RFC 0101: a constant derived from a count is only as good as the claim\n\
+         that the count is what is being counted, and that claim decays silently —\n\
+         by addition, with the failure surfacing nowhere near the addition.\n\n\
+         Raise the bound in the same diff as the count. Lowering the count to fit,\n\
+         or widening this check, is the repair that hides the next one: the route\n\
+         that caught the last of these was a six-boot nightly claim, a day late.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// The value of `const NAME: usize = ...;` in `text`, resolved against `known`.
+///
+/// A sum of decimal integers and names already read, and deliberately nothing
+/// more. Underscored digit separators are accepted; a path is taken by its last
+/// segment, so `arch::x86_64::multiboot::MAX_MODULES` resolves as `MAX_MODULES`
+/// — which is exactly the spelling `MAX_RESERVED` uses and the one a reader
+/// would have to follow anyway.
+///
+/// `None` for anything else, which is a finding rather than a pass: a bound
+/// this cannot evaluate is a bound nothing is comparing, and that is the state
+/// this check exists to end.
+fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Option<u64> {
+    let needle = format!("const {name}: usize = ");
+    let (_, rest) = text.split_once(&needle)?;
+    let (expression, _) = rest.split_once(';')?;
+    let mut total: u64 = 0;
+    for term in expression.split('+') {
+        let term = term.trim();
+        let term = term.rsplit("::").next()?;
+        if term.is_empty() {
+            return None;
+        }
+        let value = if term.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
+            term.replace('_', "").parse::<u64>().ok()?
+        } else {
+            *known.get(term)?
+        };
+        total = total.checked_add(value)?;
+    }
+    Some(total)
+}
+
 /// One entry from `TODO.md`.
 struct Task {
     id: String,
@@ -24096,6 +24867,39 @@ enum Route {
     /// to whoever is that somebody.
     /// E3-B06l, E3-D01, RFC 0077.
     Canvas,
+    /// `claims/0035`'s two numbers over the corpus in `claims/theme-corpus/`:
+    /// how many themes in a thousand survive `interface/src/token.rs` untouched,
+    /// and how much this layer decided per theme when they did not.
+    ///
+    /// The second route here that runs no subprocess, and for [`Route::Canvas`]'s
+    /// reason: the corpus-level refusal must be the *same* refusal
+    /// `f_interface::token`'s `census` gives an empty slice, so that the emptiness
+    /// of a directory and the emptiness of a corpus cannot become two conditions
+    /// that disagree. It differs from that route in one thing, and the thing is
+    /// RFC 0110: this corpus can be made of the resolver's own demonstration
+    /// themes, which would score beautifully, so the route compares every entry
+    /// against `f_interface::token::SHIPPED` by value and refuses the corpus when
+    /// one matches. That comparison is why those themes are published at all.
+    /// E3-D03, E3-B06m, RFC 0079, RFC 0110.
+    Theme,
+    /// `claims/0038`'s crossing count — `cargo xtask compositor serve` — against
+    /// the claim's own table.
+    ///
+    /// One boot rather than five, and that is the route's only decision. The
+    /// serving half is the half whose workload the claim publishes: a client that
+    /// submits one delta at a time, which `kernel/src/compositor.rs`'s `drive`
+    /// does deliberately and says why. The other four halves print no row — the
+    /// wake half closes a third frame and batches it, and one row name carrying
+    /// two values reaches [`measured_rows`] as a row printed twice, which it
+    /// refuses rather than averages. That is `claims/0037`'s arrangement and the
+    /// reason both of these claims read one half each.
+    ///
+    /// The whole of `cargo xtask compositor` would also work and is deliberately
+    /// not what the claim publishes: four of the five halves build a kernel each
+    /// and none of them prints a row this table reads, so a reader reproducing the
+    /// number would spend four boots to learn nothing about it.
+    /// E3-B01j, E3-B01.
+    Crossings,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -24252,11 +25056,24 @@ const ROUTES: &[(&str, Route)] = &[
     // half of this claim no commit in this repository can honestly supply.
     // E3-D01, RFC 0077.
     ("canvas-escape-rate", Route::Canvas),
-    // Still absent rather than late: `theme-refusals` needs a compositor and a
-    // corpus of themes nobody working on the module wrote, and `E3-B01` is what
-    // lands both. The refusal names its task, so the next question after the
-    // failure is answered by the failure. E3-D03, RFC 0079.
-    ("theme-refusals", Route::Unbuilt("E3-B01")),
+    // `theme-refusals` was the third `Route::Unbuilt` row and is no longer one,
+    // on `canvas-escape-rate`'s distinction: it has a workload, and the workload
+    // refuses. `E3-B06d` landed the compositor half — a component holding a
+    // `Resolved`, which is what made a theme reach anything that runs — and
+    // `E3-B06m` landed this route, `claims/theme-corpus/`, the entry format, the
+    // content hash and three refusals. What it could not land is the corpus, for
+    // the reason `claims/0034` records about its own: a theme written here was
+    // written by the tree that wrote the resolver, and a share over those is a
+    // share over the answers. E3-D03, RFC 0079, RFC 0110.
+    ("theme-refusals", Route::Theme),
+    // `E3-B01j`'s count, and the first row in this table whose number is a
+    // **count of crossings** rather than of copies, entries or refusals. It gates
+    // for `claims/0005`'s reason — a ring entry is an event the two sides of a
+    // boundary observe, not a time — and it deliberately does not gate on
+    // `E3-B01`'s *under ten*: that threshold belongs to the parent line, and the
+    // instrument here is a client that does not batch, so what it measures is a
+    // floor and not the design's figure. The claim file says so at length.
+    ("ring-crossings-per-ui-frame", Route::Crossings),
 ];
 
 /// The registry file one claim name resolves to.
@@ -24383,6 +25200,8 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Compare => claim_compare_run(&text, &relative(&file))?,
         Route::Attest => claim_attest(&text, &relative(&file))?,
         Route::Canvas => claim_canvas(&text, &relative(&file))?,
+        Route::Theme => claim_theme(&text, &relative(&file))?,
+        Route::Crossings => claim_crossings(&text, &relative(&file))?,
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -25406,6 +26225,864 @@ mod canvas_corpus {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `claims/0035`: the two theme numbers, and the corpus they are taken over.
+// ---------------------------------------------------------------------------
+
+/// Where the corpus lives. `claims/theme-corpus/README.md` is addressed to a
+/// theme's author and says what an entry is.
+const THEME_CORPUS: &str = "claims/theme-corpus";
+
+/// One theme somebody wrote, as a corpus entry declares it.
+///
+/// Every field but the last is the *record* the two numbers are read beside, and
+/// `claims/0035`'s `[baseline]` is why there is a record at all: there is nothing
+/// to compare a share of clean themes against, so the corpus does the work a
+/// baseline usually does and a number whose corpus cannot be described is not
+/// this claim whatever it says.
+struct Written {
+    /// The entry this came out of.
+    file: String,
+    /// What the theme is, in its author's words.
+    named: String,
+    /// Where it can be read in its own system.
+    source: String,
+    /// Who wrote it.
+    written_by: String,
+    /// Whether its author is somebody not working on the resolver.
+    independent: bool,
+    /// What it was written against, and what it looked like here.
+    notes: String,
+    /// The theme itself, which is what gets resolved.
+    theme: f_interface::token::Theme,
+}
+
+/// Every `.toml` file in the corpus directory, sorted, as `(relative path,
+/// text)`.
+///
+/// A copy of [`canvas_corpus_files`] with one constant changed, and that is
+/// worth a sentence rather than a refactor: the two corpora are read the same
+/// way because reading a directory of entries is not the interesting part of
+/// either claim, and a shared helper taking a path would save six lines and put
+/// the two claims' readers behind one signature that neither of them owns. If a
+/// third corpus arrives, the three of them are the argument for the helper.
+///
+/// # Errors
+///
+/// The directory cannot be read, or one of its files cannot be.
+fn theme_corpus_files() -> Result<Vec<(String, String)>, String> {
+    let dir = root().join(THEME_CORPUS);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {THEME_CORPUS}/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        out.push((relative(&path), text));
+    }
+    Ok(out)
+}
+
+/// `#RRGGBB` as a colour, or the sentence saying why it is not one.
+///
+/// Uppercase or lowercase, and nothing else: no three-digit form, no named
+/// colours, no `rgb()`. A corpus entry is a transcription rather than a
+/// stylesheet, and every shorthand this accepted would be a second spelling of
+/// one value for a transcriber to get wrong in a new way.
+fn corpus_colour(spelled: &str) -> Result<f_interface::token::Rgb, String> {
+    let hex = spelled.trim();
+    let Some(digits) = hex.strip_prefix('#') else {
+        return Err(format!("`{hex}` is not a colour: it does not start with `#`"));
+    };
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("`{hex}` is not a colour: six hexadecimal digits after the `#`"));
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).unwrap_or(0);
+    Ok(f_interface::token::Rgb::new(byte(0), byte(2), byte(4)))
+}
+
+/// One corpus entry, or every sentence saying why it is not one.
+///
+/// The manifest reader parses it, for [`corpus_entry`]'s reason: a second TOML
+/// subset in this file would be a second reader of one grammar. What is checked
+/// here is this schema, and every key is *consumed* rather than looked up — a
+/// leftover key is a misspelt field, and an entry whose `independent = true` was
+/// silently read as absent is the mistake this whole route exists to make
+/// impossible.
+///
+/// # Why the font names are leaked
+///
+/// `f_interface::token::Theme::fonts` is `[&'static str; 3]`, which is the right
+/// shape in a `no_std` crate with no allocator in it and the wrong one for three
+/// names read out of a file at run time. This command reads a directory once and
+/// exits, so the names are leaked deliberately rather than worked around: the
+/// alternatives are a second `Theme`-shaped type in this file — a second
+/// definition of the thing being measured — or a corpus format with no fonts in
+/// it, which would make `Note::FontDropped` unreachable and quietly remove one of
+/// the three kinds of decision `claims/0035` counts.
+///
+/// # Errors
+///
+/// A syntax error, a missing or mistyped field, an unknown key, a colour that is
+/// not one, or a metric that is not a decimal integer.
+fn theme_entry(file: &str, text: &str) -> Result<Written, Vec<String>> {
+    let doc = manifest::parse(file, text)?;
+    let mut top = doc.top;
+    let mut tables = doc.tables;
+    let mut findings = Vec::new();
+
+    let string =
+        |top: &mut manifest::Table, key: &str, findings: &mut Vec<String>| match top.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Str(text), .. })
+                if !text.trim().is_empty() =>
+            {
+                text
+            }
+            Some(manifest::Entry { line, value: manifest::Value::Str(_) }) => {
+                findings.push(format!(
+                    "  {file}:{line}  `{key}` is empty. Every field here is the record the two \
+                     numbers are read beside, and an empty one is a row that says nothing while \
+                     looking answered"
+                ));
+                String::new()
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `{key}` is a string"));
+                String::new()
+            }
+            None => {
+                findings.push(format!("  {file}  `{key}` is required and missing"));
+                String::new()
+            }
+        };
+
+    let named = string(&mut top, "theme", &mut findings);
+    let source = string(&mut top, "source", &mut findings);
+    let written_by = string(&mut top, "written_by", &mut findings);
+    let notes = string(&mut top, "notes", &mut findings);
+
+    let independent = match top.remove("independent") {
+        Some(manifest::Entry { value: manifest::Value::Bool(flag), .. }) => flag,
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `independent` is `true` or `false`"));
+            false
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `independent` is required and missing. It has no default, and the \
+                 default it would have had is the one that admits a theme by the resolver's own \
+                 authors into a corpus whose whole purpose is to exclude one"
+            ));
+            false
+        }
+    };
+
+    for key in top.keys() {
+        findings.push(format!("  {file}  `{key}` is not a field of a theme entry"));
+    }
+    for name in doc.arrays.keys() {
+        findings.push(format!("  {file}  `[[{name}]]`: a theme entry has no arrays of tables"));
+    }
+
+    // The three tables, each emptied as it is read, so that a misspelt key in one
+    // of them is a finding rather than a default.
+    let mut section = |name: &str, findings: &mut Vec<String>| match tables.remove(name) {
+        Some((_, table)) => table,
+        None => {
+            findings.push(format!("  {file}  `[{name}]` is required and missing"));
+            manifest::Table::new()
+        }
+    };
+    let mut colours = section("colour", &mut findings);
+    let mut metrics = section("metric", &mut findings);
+    let mut fonts = section("font", &mut findings);
+    for name in tables.keys() {
+        findings.push(format!(
+            "  {file}  `[{name}]`: a theme entry has `[colour]`, `[metric]` and `[font]`"
+        ));
+    }
+
+    let mut colour = |key: &str, findings: &mut Vec<String>| match colours.remove(key) {
+        Some(manifest::Entry { line, value: manifest::Value::Str(spelled) }) => {
+            match corpus_colour(&spelled) {
+                Ok(rgb) => rgb,
+                Err(why) => {
+                    findings.push(format!("  {file}:{line}  `{key}`: {why}"));
+                    f_interface::token::Rgb::BLACK
+                }
+            }
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `{key}` is a `#RRGGBB` string"));
+            f_interface::token::Rgb::BLACK
+        }
+        None => {
+            findings.push(format!("  {file}  `[colour] {key}` is required and missing"));
+            f_interface::token::Rgb::BLACK
+        }
+    };
+    let surface_1 = colour("surface_one", &mut findings);
+    let surface_2 = colour("surface_two", &mut findings);
+    let field = colour("field", &mut findings);
+    let text_colour = colour("text", &mut findings);
+    let text_muted = colour("text_muted", &mut findings);
+    let emphasis = colour("emphasis", &mut findings);
+    let edge = colour("edge", &mut findings);
+    let field_text = colour("field_text", &mut findings);
+    let field_danger = colour("field_danger", &mut findings);
+    for key in colours.keys() {
+        findings.push(format!(
+            "  {file}  `[colour] {key}` is not one of the nine tokens a theme \
+             sets"
+        ));
+    }
+
+    // Quoted, and `claims/theme-corpus/README.md` says why at length: the grammar
+    // this tree reads has unsigned integers only, and a format that could not
+    // spell a negative metric would leave out exactly the themes this layer
+    // exists to correct — which moves the share towards the ceiling that means
+    // the apparatus is ceremony.
+    //
+    // The *keys* are spelled in words for a second and unrelated reason, and it
+    // is worth a comment because a reader will expect `text_size_pt_x10` to match
+    // the field it fills. `manifest::is_bare` admits lower-case letters and
+    // underscores and no digits, so `_x10` is not a key this subset can hold, and
+    // the choice was between widening a grammar four readers share for one
+    // corpus's convenience — a change to `docs/manifest.md` and every manifest in
+    // the tree — and spelling the scale as a word here. RFC 0004 asks for the
+    // scale in the name and not for a particular suffix, so the word carries it:
+    // `text_size_pt_tenths` says exactly what `text_size_pt_x10` says.
+    //
+    // *What would reverse it:* a second corpus that needs digits in a key, at
+    // which point widening `is_bare` is a change two callers want rather than a
+    // grammar bent for one.
+    let mut metric = |key: &str, findings: &mut Vec<String>| match metrics.remove(key) {
+        Some(manifest::Entry { line, value: manifest::Value::Str(spelled) }) => {
+            match spelled.trim().parse::<i32>() {
+                Ok(value) => value,
+                Err(_) => {
+                    findings.push(format!(
+                        "  {file}:{line}  `{key}`: `{spelled}` is not a decimal integer. It is \
+                         quoted because this tree's TOML subset reads no sign, not so that it \
+                         can hold something that is not a number"
+                    ));
+                    0
+                }
+            }
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!(
+                "  {file}:{line}  `{key}` is a quoted decimal integer, sign and all"
+            ));
+            0
+        }
+        None => {
+            findings.push(format!("  {file}  `[metric] {key}` is required and missing"));
+            0
+        }
+    };
+    let text_size_pt_x10 = metric("text_size_pt_tenths", &mut findings);
+    let density_x1000 = metric("density_per_thousand", &mut findings);
+    let space_em_x100 = metric("space_em_per_hundred", &mut findings);
+    let stroke_em_x100 = metric("stroke_em_per_hundred", &mut findings);
+    for key in metrics.keys() {
+        findings.push(format!(
+            "  {file}  `[metric] {key}` is not one of the four metrics a theme sets"
+        ));
+    }
+
+    let mut family = |key: &str, findings: &mut Vec<String>| match fonts.remove(key) {
+        Some(manifest::Entry { value: manifest::Value::Str(name), .. }) => {
+            // See this function's third heading. One `String` per named slot, for
+            // the life of a process that reads a directory and exits.
+            let leaked: &'static str = Box::leak(name.into_boxed_str());
+            leaked
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!(
+                "  {file}:{line}  `{key}` is a string, and an empty one is an unused slot"
+            ));
+            ""
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `[font] {key}` is required and missing. An unused slot is the empty \
+                 string, which is absence and is skipped without a note; a missing key is a \
+                 transcription that stopped early"
+            ));
+            ""
+        }
+    };
+    let first = family("first", &mut findings);
+    let second = family("second", &mut findings);
+    let third = family("third", &mut findings);
+    for key in fonts.keys() {
+        findings
+            .push(format!("  {file}  `[font] {key}`: the slots are `first`, `second`, `third`"));
+    }
+
+    if !findings.is_empty() {
+        return Err(findings);
+    }
+    Ok(Written {
+        file: file.to_string(),
+        named,
+        source,
+        written_by,
+        independent,
+        notes,
+        theme: f_interface::token::Theme {
+            surface_1,
+            surface_2,
+            field,
+            text: text_colour,
+            text_muted,
+            emphasis,
+            edge,
+            field_text,
+            field_danger,
+            text_size_pt_x10,
+            density_x1000,
+            space_em_x100,
+            stroke_em_x100,
+            fonts: [first, second, third],
+        },
+    })
+}
+
+/// What the corpus was, its content hash, the distribution of decisions, and the
+/// two numbers — or the refusal.
+///
+/// # The one thing this function must not grow
+///
+/// A second emptiness check. `claims/0035`'s `[workload]` asks for a share that
+/// cannot be reported over a corpus nobody assembled, and the way that is held is
+/// `f_interface::token`'s `census` answering `None`: the admitted themes are
+/// handed to it and there is no `if admitted.is_empty()` anywhere below. Two
+/// conditions meaning *empty* are two conditions that will one day disagree, and
+/// the direction they disagree in here is a flattering share retiring RFC 0079's
+/// first reversal condition on a day nobody has written a theme against it.
+/// `claims/canvas-corpus`' route has the same paragraph for the same reason.
+///
+/// # Why a demonstration theme refuses the corpus rather than being dropped
+///
+/// A non-independent entry is *excluded* — its author is known and the arithmetic
+/// can account for them. A demonstration theme is different in kind: it is this
+/// module's own output, so an entry carrying one was not transcribed from a theme
+/// somebody found, and the rest of the corpus is owed the same suspicion. Dropping
+/// it would leave a share over whatever else that afternoon produced.
+///
+/// # Errors
+///
+/// An entry that does not parse, an entry that is one of the resolver's own
+/// demonstration themes, or a corpus with no admitted theme in it.
+fn theme_report(files: &[(String, String)]) -> Result<String, String> {
+    use f_interface::token::{Note, census};
+
+    let mut written = Vec::new();
+    let mut findings = Vec::new();
+    for (file, text) in files {
+        match theme_entry(file, text) {
+            Ok(entry) => written.push(entry),
+            Err(why) => findings.extend(why),
+        }
+    }
+    if !findings.is_empty() {
+        return Err(format!(
+            "{} finding(s) against {THEME_CORPUS}/:\n{}\n\n\
+             A corpus entry that does not parse is neither counted as clean nor skipped. \
+             Either would move the share — one by answering for a theme nobody transcribed, \
+             the other by leaving an author out of the number in silence — and the share is \
+             the one thing in this claim nobody can check by reading it.\n\n\
+             {THEME_CORPUS}/README.md is what an entry is.",
+            findings.len(),
+            findings.join("\n")
+        ));
+    }
+
+    // By value, and the comparison is the whole of RFC 0110's reason for
+    // publishing that table: a name is something an entry writes and a value is
+    // not, so an entry that transcribed `hostile-flat` under another name is
+    // caught and an entry that merely *calls itself* something is not accused.
+    let mut borrowed = Vec::new();
+    for entry in &written {
+        for (name, shipped) in f_interface::token::SHIPPED {
+            if entry.theme == shipped {
+                borrowed
+                    .push(format!("  {}  is `{name}` from the resolver's own table", entry.file));
+            }
+        }
+    }
+    if !borrowed.is_empty() {
+        return Err(format!(
+            "{} entr(y/ies) in {THEME_CORPUS}/ are themes {} ships:\n{}\n\n\
+             Those seven are a demonstration and not a sample. Two of them are legal and five \
+             are hostile, every one was written to make an assertion about the resolver pass or \
+             fail, and a share of clean themes computed over them is a share computed over the \
+             answers — which is what `claims/0035`'s `[workload]` refuses in advance and in \
+             those words.\n\n\
+             One entry refuses the whole corpus rather than being dropped from it. An entry \
+             carrying one of these was not transcribed from a theme somebody found, so what \
+             else is in the directory is owed the same suspicion.\n\n\
+             RFC 0110 is why the comparison is possible at all: the table is published so that \
+             this refusal can be arithmetic rather than a sentence in a claim file.",
+            borrowed.len(),
+            THE_RESOLVER,
+            borrowed.join("\n")
+        ));
+    }
+
+    let mut record = format!("=== {THEME_CORPUS}/: what was counted ===\n\n");
+    if written.is_empty() {
+        record.push_str("  nothing: the corpus directory holds no entries\n\n");
+    }
+    // Four kinds, in the order `f_interface::token::Note` declares them, because
+    // `claims/0035`'s `[diagnosis]` cannot be followed without the breakdown: a
+    // red share is debugged by which kind of decision is piling up, and the claim
+    // says in so many words that the command has to print it.
+    let mut raised = 0u64;
+    let mut unreachable = 0u64;
+    let mut clamped = 0u64;
+    let mut dropped_font = 0u64;
+    let mut truncated = 0u64;
+    for entry in &written {
+        let (_, report) = f_interface::token::resolve(&entry.theme);
+        // The breakdown is over the **admitted** themes and the record is over
+        // all of them, which is not an inconsistency: the record answers *what
+        // was in the directory* and the breakdown is what a red share is debugged
+        // with, so a theme that reaches neither number may not reach the
+        // explanation of them either.
+        if entry.independent {
+            for note in report.iter() {
+                match note {
+                    Note::ContrastRaised { .. } => raised += 1,
+                    Note::ContrastUnreachable { .. } => unreachable += 1,
+                    Note::MetricClamped { .. } => clamped += 1,
+                    Note::FontDropped { .. } => dropped_font += 1,
+                }
+            }
+            truncated += u64::from(report.dropped());
+        }
+        record.push_str(&format!(
+            "  {}\n    theme        {}\n    source       {}\n    written by   {}\n    \
+             independent  {}\n    resolved     {}\n    notes        {}\n\n",
+            entry.file,
+            entry.named,
+            entry.source,
+            entry.written_by,
+            entry.independent,
+            if report.is_clean() {
+                "clean".to_string()
+            } else {
+                format!("{} decision(s), {} of which did not fit", report.len(), report.dropped())
+            },
+            entry.notes,
+        ));
+    }
+
+    let excluded = written.iter().filter(|entry| !entry.independent).count();
+    if excluded > 0 {
+        record.push_str(&format!(
+            "  {excluded} of the entries above declare `independent = false` and are not in\n  \
+             the corpus: a theme written by somebody working on the resolver is the resolver\n  \
+             grading its own homework, and it reaches neither number below.\n\n"
+        ));
+    }
+
+    // The content hash, which `claims/0035`'s `[workload]` asks for by name. Every
+    // entry the directory held, independent or not, and each one's *path* before
+    // its bytes: a theme excluded from the numbers still has to be accounted for,
+    // and a file renamed is a different corpus even when the bytes are the same.
+    let mut bytes = Vec::new();
+    for (file, text) in files {
+        bytes.extend_from_slice(file.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+    }
+    let hash = pack::hex(&f_hash::sha256(&bytes));
+
+    let admitted: Vec<f_interface::token::Theme> =
+        written.iter().filter(|entry| entry.independent).map(|entry| entry.theme).collect();
+    let Some((share, mean)) = census(&admitted) else {
+        return Err(format!(
+            "{record}the corpus holds no theme this run may count, so there is no share.\n\n\
+             This is `f_interface::token`'s `census` answering `None` for a corpus with no \
+             themes in it — the same answer it gives an empty slice, from the same function, \
+             which is what stops the emptiness of a directory and the emptiness of a corpus \
+             from ever being two conditions that disagree. A share reported here would say \
+             *this many themes in a thousand survive this layer untouched* about a corpus \
+             nobody assembled, in the one direction this metric can do damage quietly and \
+             reassuringly.\n\n\
+             What is owed is not code. It is themes written by somebody who is not working on \
+             {THE_RESOLVER}. `E3-B06m` built this route, the entry format, the refusal above \
+             and this one, and could not build that: everything in this repository was written \
+             by the tree that wrote the resolver. {THEME_CORPUS}/README.md is addressed to a \
+             theme's author.\n\n\
+             content hash of what was read: {hash}"
+        ));
+    };
+
+    record.push_str(&format!(
+        "=== the corpus ===\n\n\
+         content_hash {hash}\n\
+         themes {}\n\
+         themes_excluded {excluded}\n\n\
+         === what this layer decided ===\n\n\
+         contrast_raised {raised}\n\
+         contrast_unreachable {unreachable}\n\
+         metric_clamped {clamped}\n\
+         font_dropped {dropped_font}\n\
+         notes_truncated {truncated}\n\n\
+         === the two numbers ===\n\n\
+         themes_resolving_clean_per_thousand {share}\n\
+         decisions_per_theme_x100 {mean}\n\n",
+        admitted.len(),
+    ));
+    Ok(record)
+}
+
+/// `claims/0035`'s two numbers over the corpus, against the claim's own table.
+///
+/// The second route in [`ROUTES`] whose workload is not a subprocess, and for
+/// [`claim_canvas`]'s reason: the counting is one call to
+/// `f_interface::token`'s `census`, and a command spawned to make that call would
+/// be a second corpus reader that could come to disagree with this one about what
+/// the corpus was.
+///
+/// # Errors
+///
+/// [`theme_report`]'s refusals, or [`claim_verdict`]'s.
+fn claim_theme(claim: &str, file: &str) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+    let report = theme_report(&theme_corpus_files()?)?;
+    print!("{report}");
+    claim_verdict(
+        claim,
+        file,
+        &thresholds,
+        &report,
+        Vec::new(),
+        "A share under the floor means almost every theme is being corrected. Do not\n\
+         touch the contrast floors first: they are cited from WCAG 2.1 and nothing in\n\
+         this project has measured legibility. Read the four decision counts above —\n\
+         `metric_clamped` carrying the share is one of the four metric bounds or the\n\
+         operable minimum, every one of which RFC 0079 registers as a target with no\n\
+         measurement behind it, and `contrast_raised` piled on one ground is that\n\
+         RFC's first reversal condition arriving.\n\n\
+         A share over the ceiling is the other failure and the likelier one. The first\n\
+         question is about the corpus rather than the code: themes written against\n\
+         these floors are a measurement of this module against itself, and the record\n\
+         above is where a reader checks whose themes they were. If the corpus is\n\
+         genuinely independent and still nothing clamps, the honest finding is that\n\
+         the apparatus is ceremony — which is a finding, and is why the ceiling is\n\
+         written down.\n\n\
+         `notes_truncated` above zero is read before either: a report that dropped a\n\
+         note is the silence this module exists to remove, arriving by the back door.",
+    )
+}
+
+/// `claims/0035`'s halves: the format, the two refusals, and the arithmetic.
+///
+/// Unit tests and not a boot, because both numbers are `count`s under RFC 0069 —
+/// integers over declarations, identical on every machine — so a boot would add
+/// minutes and nothing else. What they are for is the half a green
+/// `cargo xtask claim theme-refusals` cannot show: the command refuses today, so
+/// every line that computes a share would otherwise be code nothing has run.
+#[cfg(test)]
+mod theme_corpus {
+    use super::*;
+
+    /// One corpus entry, as a `(file, text)` pair the way the directory reader
+    /// hands it over. `independent` and the theme are the arguments, because they
+    /// are what every test below varies.
+    fn entry(name: &str, independent: bool, body: &str) -> (String, String) {
+        (
+            format!("claims/theme-corpus/{name}.toml"),
+            format!(
+                "theme = \"{name}\"\n\
+                 source = \"https://example.invalid/{name}\"\n\
+                 written_by = \"somebody\"\n\
+                 independent = {independent}\n\
+                 notes = \"a theme\"\n\
+                 {body}",
+            ),
+        )
+    }
+
+    /// A theme this layer has nothing to do to, and **not** one of the seven the
+    /// resolver ships.
+    ///
+    /// It is `Theme::DEFAULT` with `text` one shade darker, and that shade is the
+    /// whole of what makes this fixture usable. The first draft of it was the
+    /// default's own values, and every test below refused it — correctly, and as
+    /// `a_corpus_of_the_resolvers_own_themes_is_refused` asks for, which is the
+    /// refusal working on its author before it works on anybody else. A darker ink
+    /// on the same grounds has strictly more contrast, so nothing about *clean*
+    /// rests on the difference; the difference is only what stops these tests
+    /// from being about the refusal instead of about the share.
+    const CLEAN: &str = "[colour]\n\
+                         surface_one = \"#FFFFFF\"\n\
+                         surface_two = \"#F2F2F2\"\n\
+                         field = \"#FFFFFF\"\n\
+                         text = \"#191919\"\n\
+                         text_muted = \"#595959\"\n\
+                         emphasis = \"#0B3D91\"\n\
+                         edge = \"#767676\"\n\
+                         field_text = \"#1A1A1A\"\n\
+                         field_danger = \"#A4000F\"\n\
+                         [metric]\n\
+                         text_size_pt_tenths = \"105\"\n\
+                         density_per_thousand = \"1000\"\n\
+                         space_em_per_hundred = \"50\"\n\
+                         stroke_em_per_hundred = \"6\"\n\
+                         [font]\n\
+                         first = \"Inter\"\n\
+                         second = \"Noto Sans\"\n\
+                         third = \"\"\n";
+
+    /// A theme this layer has three different things to do to, and none of them
+    /// is a colour this file had to compute: an ink on its own ground, a metric an
+    /// order of magnitude past its bound, and a font preference that is
+    /// punctuation.
+    const MOVED: &str = "[colour]\n\
+                         surface_one = \"#767676\"\n\
+                         surface_two = \"#F2F2F2\"\n\
+                         field = \"#FFFFFF\"\n\
+                         text = \"#767676\"\n\
+                         text_muted = \"#787878\"\n\
+                         emphasis = \"#0B3D91\"\n\
+                         edge = \"#767676\"\n\
+                         field_text = \"#1A1A1A\"\n\
+                         field_danger = \"#A4000F\"\n\
+                         [metric]\n\
+                         text_size_pt_tenths = \"50000\"\n\
+                         density_per_thousand = \"1000\"\n\
+                         space_em_per_hundred = \"-30\"\n\
+                         stroke_em_per_hundred = \"6\"\n\
+                         [font]\n\
+                         first = \"Inter\"\n\
+                         second = \"\"\n\
+                         third = \"--\"\n";
+
+    #[test]
+    fn an_empty_corpus_is_refused_rather_than_reported_as_a_clean_share() {
+        let why = theme_report(&[]).expect_err("an empty corpus has no share");
+        assert!(why.contains("no theme this run may count"), "{why}");
+        // The refusal must not be a number. A share printed here would be read as
+        // *this layer touches nothing*, which is the ceiling in `claims/0035`
+        // firing about a corpus nobody assembled.
+        assert!(!why.contains("themes_resolving_clean_per_thousand"), "{why}");
+        // And it says what is owed, because the next question after this failure
+        // is *what do I do*, and the answer is not code.
+        assert!(why.contains("addressed to a theme's author"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_nothing_but_self_written_themes_refuses_as_an_empty_one_does() {
+        let files = [entry("ours", false, CLEAN), entry("ours-too", false, MOVED)];
+        let why = theme_report(&files).expect_err("a corpus of self-written themes has no share");
+        assert!(why.contains("no theme this run may count"), "{why}");
+        // Read and recorded rather than silently ignored: the record is what
+        // `claims/0035`'s `[baseline]` asks for, and *what was counted* has to be
+        // answerable even when the answer is nothing.
+        assert!(why.contains("claims/theme-corpus/ours.toml"), "{why}");
+        assert!(why.contains("declare `independent = false`"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_the_resolvers_own_themes_is_refused() {
+        // `hostile-flat`, transcribed under a name of its own, which is why the
+        // comparison is by value: an entry that renamed it would otherwise be a
+        // corpus of the answers wearing a corpus's name.
+        let flat = "[colour]\n\
+                    surface_one = \"#008909\"\n\
+                    surface_two = \"#008909\"\n\
+                    field = \"#008909\"\n\
+                    text = \"#008909\"\n\
+                    text_muted = \"#0A8F12\"\n\
+                    emphasis = \"#008909\"\n\
+                    edge = \"#008909\"\n\
+                    field_text = \"#008909\"\n\
+                    field_danger = \"#B00020\"\n\
+                    [metric]\n\
+                    text_size_pt_tenths = \"105\"\n\
+                    density_per_thousand = \"1000\"\n\
+                    space_em_per_hundred = \"50\"\n\
+                    stroke_em_per_hundred = \"6\"\n\
+                    [font]\n\
+                    first = \"Inter\"\n\
+                    second = \"\"\n\
+                    third = \"\"\n";
+        let files = [entry("a-real-theme-honestly", true, flat), entry("another", true, MOVED)];
+        let why = theme_report(&files).expect_err("the resolver's own themes are not a corpus");
+        assert!(why.contains("is `hostile-flat` from the resolver's own table"), "{why}");
+        // The whole corpus and not the one entry: the second theme is a perfectly
+        // ordinary one and is refused with it, which is the decision this
+        // assertion exists to pin.
+        assert!(!why.contains("themes_resolving_clean_per_thousand"), "{why}");
+    }
+
+    #[test]
+    fn a_share_is_a_share_of_the_admitted_themes_and_the_mean_rounds_up() {
+        let files = [
+            entry("one", true, CLEAN),
+            entry("two", true, MOVED),
+            entry("three", true, CLEAN),
+            entry("not-ours", false, MOVED),
+        ];
+        let report = theme_report(&files).expect("three admitted themes are a corpus");
+        // Two clean of three admitted: 666 and not 750, which is what the fourth
+        // entry would make it if `independent = false` were a footnote rather than
+        // arithmetic. It is also 666 and not 667 — the share truncates, and
+        // `f_interface::token`'s `census` argues the direction.
+        assert!(report.contains("themes_resolving_clean_per_thousand 666"), "{report}");
+        assert!(report.contains("themes 3"), "{report}");
+        assert!(report.contains("themes_excluded 1"), "{report}");
+        // The breakdown `claims/0035`'s `[diagnosis]` cannot be followed without,
+        // and every kind of decision the moved theme makes is in it.
+        assert!(report.contains("metric_clamped 2"), "{report}");
+        assert!(report.contains("font_dropped 1"), "{report}");
+        assert!(report.contains("notes_truncated 0"), "{report}");
+        assert!(!report.contains("contrast_raised 0"), "{report}");
+        // Twelve decisions over the three admitted themes, and **not** over the
+        // four in the directory: the fourth is hostile too, so a mean that
+        // counted it would be 600 rather than 400 and `independent` would be a
+        // footnote rather than arithmetic. The rounding is not visible here —
+        // twelve over three divides — which is why it has a test of its own.
+        assert!(report.contains("decisions_per_theme_x100 400"), "{report}");
+        // The corpus says which corpus it was.
+        assert!(report.contains("content_hash "), "{report}");
+    }
+
+    #[test]
+    fn the_mean_rounds_up_rather_than_towards_the_bound_it_is_measured_against() {
+        // One decision across three themes: a third of a note each. The mean is
+        // 33.33 per theme times a hundred, and the two roundings differ by one.
+        //
+        // `decisions_per_theme_x100` is bounded **above** by `claims/0035`, so
+        // truncation moves every borderline corpus to the side that flatters this
+        // layer: a mean of 4.009 notes reported as 400 is a ceiling of 400 failing
+        // to fire on a corpus that met it. That is why the direction is a rule
+        // rather than whatever the division happened to do, and why a fixture
+        // where the division is exact — the one above — cannot hold it.
+        let one_dropped_font = CLEAN.replace("third = \"\"", "third = \"--\"");
+        let files = [
+            entry("one", true, CLEAN),
+            entry("two", true, CLEAN),
+            entry("three", true, &one_dropped_font),
+        ];
+        let report = theme_report(&files).expect("three admitted themes are a corpus");
+        assert!(report.contains("font_dropped 1"), "{report}");
+        assert!(
+            report.contains("decisions_per_theme_x100 34"),
+            "a third of a note a theme truncated to 33, which is the rounding this claim's              ceiling cannot afford: {report}"
+        );
+    }
+
+    #[test]
+    fn the_content_hash_moves_when_the_corpus_does() {
+        let one = theme_report(&[entry("one", true, CLEAN), entry("two", true, MOVED)])
+            .expect("two admitted themes");
+        let two = theme_report(&[entry("one", true, CLEAN), entry("three", true, MOVED)])
+            .expect("two admitted themes");
+        let hash = |report: &str| {
+            report
+                .lines()
+                .find_map(|line| line.strip_prefix("content_hash "))
+                .expect("the run records what it read")
+                .to_string()
+        };
+        // Same two themes, one renamed: the share is identical and the hash is
+        // not. That is what `claims/0035`'s `[workload]` asks the hash for — *no
+        // theme was added or removed after a run* decays quietly, and a hash over
+        // the values alone would not notice a file being swapped for another with
+        // the same palette.
+        assert_eq!(
+            hash(&one).len(),
+            64,
+            "a SHA-256 in hexadecimal, which is what the claim asks to be recorded"
+        );
+        assert_ne!(hash(&one), hash(&two), "two different corpora hashed the same");
+    }
+
+    #[test]
+    fn an_entry_that_does_not_parse_refuses_rather_than_counting_as_clean() {
+        let missing = entry("no-fonts", true, "[colour]\nsurface_one = \"#FFFFFF\"\n[metric]\n");
+        let why = theme_report(&[missing]).expect_err("half a theme is not a theme");
+        assert!(why.contains("`[colour] text` is required and missing"), "{why}");
+        assert!(why.contains("`[font]` is required and missing"), "{why}");
+        assert!(why.contains("neither counted as clean nor skipped"), "{why}");
+
+        let named = entry(
+            "not-a-colour",
+            true,
+            &CLEAN.replace("surface_one = \"#FFFFFF\"", "surface_one = \"white\""),
+        );
+        let why = theme_report(&[named]).expect_err("`white` is not a colour");
+        assert!(why.contains("it does not start with `#`"), "{why}");
+
+        // The three-digit form, which every stylesheet in the world accepts and
+        // this format does not: a shorthand is a second spelling of one value, and
+        // a transcription that may be written two ways can be got wrong in a new
+        // one. `corpus_colour` argues it where it refuses.
+        let short = entry(
+            "shorthand",
+            true,
+            &CLEAN.replace("surface_one = \"#FFFFFF\"", "surface_one = \"#FFF\""),
+        );
+        let why = theme_report(&[short]).expect_err("`#FFF` is a shorthand and not a colour");
+        assert!(why.contains("six hexadecimal digits"), "{why}");
+
+        let bad_metric = entry(
+            "not-a-number",
+            true,
+            &CLEAN.replace("density_per_thousand = \"1000\"", "density_per_thousand = \"1000%\""),
+        );
+        let why = theme_report(&[bad_metric]).expect_err("`1000%` is not an integer");
+        assert!(why.contains("is not a decimal integer"), "{why}");
+
+        let misspelt = entry("misspelt", true, &CLEAN.replace("text_muted =", "text_mutd ="));
+        let why = theme_report(&[misspelt]).expect_err("a misspelt key is not a default");
+        assert!(why.contains("`[colour] text_mutd` is not one of the nine"), "{why}");
+        assert!(why.contains("`[colour] text_muted` is required and missing"), "{why}");
+    }
+
+    #[test]
+    fn a_metric_may_be_negative_because_a_real_theme_may_ask_for_one() {
+        // The clause `claims/theme-corpus/README.md` argues at length: a format
+        // that could not spell this would leave out exactly the themes this layer
+        // exists to correct, and the share would drift towards the ceiling that
+        // means the apparatus is ceremony.
+        let written = entry(
+            "negative",
+            true,
+            &CLEAN.replace("space_em_per_hundred = \"50\"", "space_em_per_hundred = \"-30\""),
+        );
+        let report = theme_report(&[written]).expect("a negative metric is spellable");
+        assert!(report.contains("metric_clamped 1"), "{report}");
+        assert!(report.contains("themes_resolving_clean_per_thousand 0"), "{report}");
+    }
+
+    #[test]
+    fn the_corpus_directory_holds_no_entries_and_this_is_the_expected_ending() {
+        let files = theme_corpus_files().expect("the corpus directory is readable");
+        assert!(
+            files.is_empty(),
+            "there are themes in {THEME_CORPUS}/. If somebody outside this tree put them there, \
+             this assertion is the good news and should be replaced by a run: `cargo xtask claim \
+             theme-refusals`, and claims/0035's `status` moves off `pending` in the same diff. If \
+             this tree put them there, they are not a corpus. {files:?}",
+        );
+    }
+}
+
 /// `claims/0017`'s two workloads, and its `[threshold]` table applied to what
 /// they printed.
 ///
@@ -25582,6 +27259,51 @@ fn claim_runtime_entries(claim: &str, file: &str) -> Result<(), String> {
          here was counted over an unknown interval; and a zero `kernel_entries_provoked`\n\
          means the counter cannot move at all, which leaves the load half looking perfect\n\
          while measuring nothing.",
+    )
+}
+
+/// `claims/0038`'s crossing count, against the claim's own table.
+///
+/// # Why one boot and why the serving half
+///
+/// Because the number is *per UI frame* and the halves close different frames.
+/// The serving half commits two, one entry at a time, which is the workload the
+/// claim publishes and the one `kernel/src/compositor.rs`'s `drive` argues for at
+/// length: a client that batched there would be building `E3-B01j`'s evidence
+/// without its counter. The wake half closes a third frame as one batch, so its
+/// conversion between entries and publishes is a different pair of numbers — it
+/// is printed in that boot's log and is deliberately not a row here, because one
+/// row name carrying two values is a row [`measured_rows`] refuses rather than
+/// averages.
+///
+/// The boot still checks the agreement on **both** halves. That is where the
+/// teeth are: the frame counts what it submitted and reaped, the component counts
+/// what it drained and answered, and the verdict requires the two equal before any
+/// row is printed. So a red row here is a real change in what a frame costs, and
+/// not an accounting change — an accounting change turns the boot red first, with
+/// no rows at all.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_crossings(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask compositor serve: two UI frames of deltas across one ring, one entry              at a time, counted on both sides of the boundary",
+            "cargo",
+            &["xtask", "compositor", "serve"][..],
+        )],
+        "The two counts are taken on opposite sides of the boundary and neither derives from
+         the other, so read them together: if `ring_crossings_counted_by_the_frame` and
+         `ring_crossings_counted_by_the_component` disagree the boot has already gone red and
+         printed no rows, so seeing them here and unequal means that check was weakened. A
+         moved `ring_crossings_per_ui_frame_x1000` is the number itself changing and the two
+         direction rows say which way: more out is a client sending more deltas per frame,
+         more back is a component answering entries it used to leave alone. Read
+         `ui_frames_closed` before any of them — a rate over one frame is a rate over one
+         frame, and the script closes two.",
     )
 }
 

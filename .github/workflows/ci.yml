@@ -174,6 +174,7 @@ jobs:
       - run: cargo xtask lint-licensing
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
+      - run: cargo xtask lint-bounds
       - run: cargo xtask lint-mutations
       # The three rules from docs/what-must-be-stated.html section 15 that
       # could be made executable. CONTRIBUTING.md carries all twelve and says
@@ -208,6 +209,12 @@ jobs:
       - run: cargo xtask lint-testing-status
       - run: cargo xtask lint-debt
       - run: cargo xtask lint-claim-runs
+      # The half of A-06 that is a file read. `docs/postmortem/0003` is a red
+      # nightly nobody read for a day, and the way its successor gets missed is
+      # a job added to `nightly.yml` and not added to the alarm's `needs:` —
+      # which is a set of names against a list, and belongs here rather than at
+      # three in the morning.
+      - run: cargo xtask lint-schedules
       - run: cargo xtask lint-boundary
       - run: cargo xtask lint-gate
       # Formatting and clippy, by calling the definition rather than restating
@@ -654,6 +661,18 @@ jobs:
       # and no second machine, because the client is the frame and the graph is
       # a data structure. RFC 0013, RFC 0065.
       - run: cargo xtask compositor
+      # `claims/0038`'s six rows, against the table rather than against the boot's
+      # own refusals — `claims/0037`'s split one job up, for the same reason. The
+      # boot requires the frame's crossing count and the component's to be equal
+      # before it prints a row; the claim requires the number they agreed on to be
+      # the number the registry publishes. A boot grading its own homework is the
+      # arrangement RFC 0064 decided against.
+      #
+      # It runs one half rather than all five, and the route says why: the serving
+      # half is the workload the claim publishes — a client that submits one delta
+      # at a time — and the other four would build four more kernels to print
+      # nothing this table reads. E3-B01j.
+      - run: cargo xtask claim ring-crossings-per-ui-frame
       # E3-B06c. Section 11's inversion, as two boots. `declare` stands
       # `user/panel` up at ring 3 holding the *client's* end of a ring — the only
       # component in this tree that submits rather than answers — has it declare

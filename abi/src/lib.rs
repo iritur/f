@@ -30,6 +30,7 @@ pub mod state;
 pub mod store;
 pub mod swap;
 pub mod sync;
+pub mod trace;
 pub mod transfer;
 
 /// The frame's opcode space.

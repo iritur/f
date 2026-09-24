@@ -877,6 +877,37 @@ impl Report {
             return Err("the numbers in the compositor's published tree are not the numbers on \
                  its board, though both come out of one set of counters");
         }
+        // --- the late latch, `E3-B01i`, as the negative it is here -----------
+        //
+        // The component holds the latch and was told which node carries the
+        // pointer. It was never told **where** the pointer is, and that is a
+        // property of this arrangement rather than an omission: the three words
+        // that would say so carry the driver's stamp, `kernel/` is deliberately
+        // not on `lint-stamp`'s input path, and a frame that carried one would
+        // need a row that the single `rdtsc` in this tree — the counter
+        // `crate::smp` reads to bound a spin — immediately turns red.
+        // `INPUT_PATH` has no exemption to write, by design.
+        //
+        // So this is a clause rather than a comment, and **it is meant to go
+        // red**: the diff that gives the compositor a route to a stamped
+        // position — a second worker core, so the driver and the compositor run
+        // at once and the component decodes the entry itself, or the input
+        // router `E3-B04`'s parent owes — is the diff that closes `E3-B01i`'s
+        // boot half, and it arrives at this line first.
+        if seen.board.pointer_reports != 0 {
+            return Err("the compositor was told where the pointer is, which this frame has no \
+                 stamped route to say — `E3-B01i`'s boot half is open and this is the clause \
+                 that says so");
+        }
+        if seen.board.pointer_unstamped == 0 {
+            return Err("the compositor refused no unstamped reading, so either it never looked \
+                 at the pointer words or it took a page of zeroes for a position at the origin");
+        }
+        if seen.board.latches != 0 || seen.board.latch_declines != seen.board.frames {
+            return Err("the compositor latched a frame, or declined a number of frames that is \
+                 not the number it closed: with no position reported every closed frame \
+                 declines exactly once");
+        }
         Ok(())
     }
 }
@@ -967,6 +998,27 @@ pub fn report_lines(report: &Report) {
         report.consumed.tree[1],
         report.consumed.tree[2],
         report.consumed.board.outcome,
+    );
+    // The late latch, `E3-B01i`, and this line is a **negative** on both halves.
+    // The component holds the mechanism and is told which node the pointer
+    // rides; what it is never told is where the pointer is, because the three
+    // words that would say so carry the driver's stamp and this frame may not
+    // hold one. `Report::compositor_verdict` is where that is a clause rather
+    // than a sentence, and the comment there says what route closes it.
+    crate::kprintln!(
+        "  input latch   the compositor was told node {} carries the pointer and was told no \
+         position: {} report(s) taken, {} frame(s) latched, {} declined — the relay carries \
+         no stamp, so there is nothing to predict from",
+        POINTER_NODE,
+        report.consumed.board.pointer_reports,
+        report.consumed.board.latches,
+        report.consumed.board.latch_declines,
+    );
+    crate::kprintln!(
+        "  input unstamp {} reading(s) refused for carrying no stamp, which is what the page \
+         this frame never wrote reads as — f_abi::input::NOT_STAMPED, at the one place a \
+         position reaches a component without crossing a ring",
+        report.consumed.board.pointer_unstamped,
     );
 }
 
@@ -1564,6 +1616,13 @@ unsafe fn consume(
         (scene_routing::at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
         (scene_routing::at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
         (scene_routing::at::BACKEND_CAPABILITIES, BACKEND_CAPABILITIES),
+        // Which node the pointer rides, `E3-B01i`. Told on **both** halves, so
+        // that the difference between them stays the one line in `commit` that
+        // hands the events on: a control whose compositor had been told to latch
+        // nothing would be a control for two things at once, and the withholding
+        // half's zero latches is then a fact about the events rather than about
+        // this word.
+        (scene_routing::at::POINTER_NODE, u64::from(POINTER_NODE)),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }

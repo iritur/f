@@ -63,6 +63,14 @@
 //! can act on. *What would reverse this:* `E3-B06f`, where content is projected
 //! into part II's retained graph and therefore has somewhere to go.
 //!
+//! **`E3-B06f` has landed and this reversal has not fallen due**, which is
+//! worth saying plainly rather than leaving a reader to check. [`emit`] projects
+//! a node's *kind*, its *placement* and its *paint*; a content body reaches a
+//! scene as geometry — a `SetPath` into a channel's inline arena — and nothing
+//! in this tree flattens a string or a picture into one yet. So content still
+//! has nowhere to go, the refusal stands, and the condition moves to the first
+//! geometry encoder rather than to this diff.
+//!
 //! It also holds no theme, no constraints and no layout. `E3-B06d` resolves and
 //! `E3-B06e` solves; a tree that carried either before there was anything to
 //! resolve against would be storing a value nobody could falsify.
@@ -77,10 +85,33 @@
 //! keeps the same rule one layer down — nothing turns the intent a projection
 //! can *read* into the handle that would invoke it. `E3-B06j`.
 
+//! # The third, and it is the one that decides whether the layer can be left
+//!
+//! [`emit`] — a declared tree as scene deltas. `f_interface` holds the meaning
+//! and declines the wire; `f_scene` holds the graph and may not hold the
+//! meaning, because a graph that depended on this layer is a graph this layer
+//! could take down with it. So the projection lands here for the third time for
+//! the same reason, and what it is answerable to is part III's one request of
+//! part II: **the compositor cannot tell an authored delta from a projected
+//! one**, so that this layer can be measured and abandoned without the renderer
+//! going with it. `E3-B06f`, RFC 0117.
+
+//! # The fourth, and it is the same join across a machine boundary
+//!
+//! [`remote`] — the declaration on a link, and the far side presenting it at its
+//! own density and its own refresh rate. It is the third crate-shaped argument
+//! made a fourth time: the wire is `abi`'s, the meaning is `interface`'s, the
+//! graph is `scene`'s, and a remote needs all three at once. What it adds is the
+//! answer to *what does a receiver do with what the format does not carry* —
+//! there is no layout entry, so the far side's arrangement is the far side's,
+//! and RFC 0121 is where that is argued rather than assumed. `E3-B06h`.
+
 #![no_std]
 
 pub mod agent;
+pub mod emit;
 pub mod registry;
+pub mod remote;
 pub mod tree;
 pub mod vocabulary;
 

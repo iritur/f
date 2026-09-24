@@ -95,6 +95,32 @@
 //! is complete on its own terms: `E3-B03e`, `E3-B03f`, `E3-B03g` and `E3-B03j`
 //! each iterate [`Script::ALL`] and bring their own expectations.
 //!
+//! **The first of those reasons is narrower than it reads, and RFC 0115 corrects
+//! it here rather than leaving it to be reasoned from.** *An expected output
+//! needs a shaper* is exactly right about a glyph and an advance and **false
+//! about an embedding level**: a level is a function of the scalars and their
+//! bidi class — paragraph direction, explicit formatting, bracket pairs — and
+//! nothing behind the licence boundary is consulted to know one. So a reader
+//! arriving from `E3-B03e` finds the stated reason does not apply to levels,
+//! and the danger is that they conclude the *refusal* does not either. It does,
+//! and the rule did not bend. What holds it is the second reason above, which is
+//! untouched, plus two this section did not state. **The shape:** this is a
+//! `const` table of eight entries each argued one at a time and checked at
+//! compile time, and UAX #9's conformance files are hundreds of thousands of
+//! cases chosen by exhaustiveness, with no sentence, no hazard and no distinct
+//! signature — [`entries_exercise_different_things`] is not a statement anybody
+//! can make about them. **And the decisive one: two passes have different
+//! expectations about one sample.** `E3-B03e` expects levels for
+//! [`Script::Mixed`], `E3-B03f` expects break positions, `E3-B03g` an atlas
+//! residency, `E3-B03j` an image — so a field here would make *adding a script
+//! is a diff to one list and to nothing else* false, and it would be the one
+//! field in this file with no compile-time guard behind it, because
+//! [`is_a_sentence`] can refuse an empty sentence and nothing here can refuse a
+//! wrong level. Where they went instead: the specification's own conformance
+//! files, under `third_party/unicode/` and read by a host harness (RFC 0114),
+//! and the pass's own tests for these eight, each with the numbered rules it was
+//! derived from written beside it.
+//!
 //! No language, either. [`Script::Han`] is not Chinese; the entry is about
 //! boundaries and advances, and which language the sample is in changes nothing
 //! that this crate will ever measure. An entry that needed a language to be

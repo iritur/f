@@ -551,7 +551,7 @@ These are four different sorts of number and it is worth not confusing them.
 |---|---|---|
 | `-m 128M`, `-smp 2` | | **Fixture pins.** Not kernel limits at all — QEMU launch parameters chosen so the boot log is reproducible. Irrelevant on hardware. |
 | `MAX_REGIONS` | 256 | **A bound on untrusted input.** The memory map is length-prefixed and a corrupt length is a loop that never ends. "QEMU reports a handful of regions; a real machine reports tens." |
-| `MAX_MODULES` | 8 | **A bound on untrusted input**, and a ninth module is *reported* as dropped rather than ignored — because a module nobody reserved is one the frame allocator hands out from under its owner. |
+| `MAX_MODULES` | 16 | **A bound on untrusted input**, and a seventeenth module is *reported* as dropped rather than ignored — because a module nobody reserved is one the frame allocator hands out from under its owner. It was 8, and 8 was one short of a boot menu offering two generations beside every component file; it is now read against `PLACES_MAX` by `cargo xtask lint-bounds` rather than raised when a boot fails. The sentence about reporting was true of *this* table and false of the reservation list beside it until 2026-09-24, which is the whole of RFC 0116. |
 | `CMDLINE_MAX` | 320 | Same kind. A longer command line is truncated rather than rejected, on the grounds that a parameter that does not take effect is visible and a refusal to boot is not. It was 128 until `f.root=` and `f.frame=` — 71 and 72 bytes — made 128 the wrong number; the arithmetic is in `kernel/src/arch/x86_64/multiboot.rs` beside the constant. |
 | `MAX_CPUS` | 8 | **A real capacity choice with a real cost**, and the one to watch. |
 
