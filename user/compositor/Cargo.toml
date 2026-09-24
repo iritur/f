@@ -34,6 +34,18 @@ f-scene.workspace = true
 # promoting is `E3-B02b`, and this component reports the choice rather than
 # acting on it.
 f-interface.workspace = true
+# The stamp and the prediction forward to the next scanout. **This row is
+# `E3-B01i`**: a late latch re-reads the pointer between a commit closing and a
+# submission crossing, and what it re-reads is a `f_input::predict::Predictor`
+# over reports the driver stamped at interrupt time. The crate brings no clock
+# with it — `f-env` is `f-input`'s dependency and not this component's, and a
+# component at ring 3 has nothing to read one through — so what arrives here is
+# arithmetic over numbers somebody else took.
+#
+# The row puts this crate on `xtask`'s `INPUT_PATH`, which is RFC 0120: until it
+# landed that list said the late latch was `interface/`'s, and `interface/` holds
+# no arena, no chain and no frame.
+f-input.workspace = true
 
 # No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
 # and here that inheritance costs something a reader should see stated: the

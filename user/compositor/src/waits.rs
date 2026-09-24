@@ -94,6 +94,41 @@
 use f_abi::sync::{Chain, Refusal, Timeline};
 use f_abi::trace::Trace;
 
+/// What happens in the one gap a frame has between its commit closing and its
+/// first submission crossing.
+///
+/// # Why this is a parameter and not a call in [`Waits::frame`]
+///
+/// Because the window is the whole of `E3-B01i` and a comment saying *here* is
+/// not a window. [`Waits::drive`] is the only place in this component that knows
+/// the order of section 08's chain, so it is the only place that can hand out a
+/// moment defined by that order — and handing it out as an argument means a
+/// build that latched too early or too late has moved a line in a function whose
+/// every statement is one of the chain's, in front of a reviewer, rather than
+/// having drifted somewhere else in the component.
+///
+/// It also keeps [`Waits`] the only holder of the chain and the trace, which is
+/// the one sentence `crate::waits` exists to be able to say. The implementor
+/// gets a number — how many wait entries the trace holds at that instant — and
+/// not the trace, so a door that records cannot be opened from here.
+///
+/// `()` implements it as nothing at all, which is what a test of the chain
+/// alone passes.
+pub trait Between {
+    /// Called after the application's signal is admitted and before the
+    /// compositor's own submission enters its wait.
+    ///
+    /// `entered` is how many entries the frame's trace holds at that instant. It
+    /// is zero in this build, and it is passed rather than assumed because the
+    /// day a stage submits before the compositor does, the record keyed with it
+    /// says so and a test asserting zero goes red. Unit: wait entries.
+    fn between_commit_and_submit(&mut self, entered: usize);
+}
+
+impl Between for () {
+    fn between_commit_and_submit(&mut self, _entered: usize) {}
+}
+
 /// The application's timeline, as this component names it.
 ///
 /// One rather than zero, because `f_abi::sync::NO_TIMELINE` is zero and a
@@ -315,11 +350,11 @@ impl Waits {
     /// that stopped serving over one would have turned a wrong number into a
     /// stopped screen. The frame requires [`Published::refusals`] to be zero,
     /// which is where a defect is supposed to be found.
-    pub fn frame(&mut self, ordinal: u64, fitted: bool) {
+    pub fn frame(&mut self, ordinal: u64, fitted: bool, between: &mut dyn Between) {
         // First, and with nothing before it. The module header argues the
         // placement against the alternative that looks more natural.
         self.trace = Trace::EMPTY;
-        if let Err(_refusal) = self.drive(ordinal, fitted) {
+        if let Err(_refusal) = self.drive(ordinal, fitted, between) {
             self.published.refusals += 1;
         }
         self.published.outstanding = self.trace.unreleased() as u64;
@@ -349,13 +384,26 @@ impl Waits {
     ///
     /// Whatever `f_abi::sync` refuses. Every one of them is this component
     /// contradicting itself — see [`Published::refusals`].
-    fn drive(&mut self, ordinal: u64, fitted: bool) -> Result<(), Refusal> {
+    fn drive(
+        &mut self,
+        ordinal: u64,
+        fitted: bool,
+        between: &mut dyn Between,
+    ) -> Result<(), Refusal> {
         // The application reached `ordinal`, which is the client's commit having
         // arrived. The submission is built and dropped: this component is not the
         // application and has nothing to submit on its behalf, and what the call
         // is here for is the promise it raises — without which the wait below is
         // refused as unreachable, which is `f_abi::sync`'s whole point.
         let _signalled = self.chain.application_signals(ordinal)?;
+        // The window, and it is here rather than a statement earlier or later for
+        // a reason each neighbour states. Earlier is before the commit has been
+        // admitted at all — a frame whose own signal the chain refuses has no
+        // frame to patch, and `a_frame_ordinal_that_does_not_move_is_refused_and
+        // _counted` is the case that would then latch onto a frame that never
+        // happened. Later is after a submission has crossed, which is what *late
+        // latch* means the opposite of. `Between`'s own doc is the rest.
+        between.between_commit_and_submit(self.trace.len());
         let _composited =
             self.chain.compositor_waits_and_signals(ordinal, ordinal, &mut self.trace)?;
         let _presented = self.chain.present_waits(ordinal, &mut self.trace)?;
@@ -400,7 +448,7 @@ mod tests {
     #[test]
     fn a_frame_that_fitted_leaves_no_wait_open() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
+        waits.frame(1, true, &mut ());
         assert_eq!(waits.trace().len(), 2, "the compositor's wait and the present engine's");
         assert_eq!(waits.published().traced, 2);
         assert_eq!(waits.published().outstanding, 0);
@@ -415,7 +463,7 @@ mod tests {
     #[test]
     fn the_waits_are_the_two_stages_that_wait() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
+        waits.frame(1, true, &mut ());
         let first = waits.trace().entry(0).expect("the compositor's wait");
         let second = waits.trace().entry(1).expect("the present engine's wait");
         assert_eq!(first.waiter(), Stage::Compositor);
@@ -431,7 +479,7 @@ mod tests {
     #[test]
     fn a_frame_that_did_not_fit_leaves_the_present_engine_waiting() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, false);
+        waits.frame(1, false, &mut ());
         assert_eq!(waits.published().outstanding, 1);
         assert_eq!(waits.published().timeouts, 1);
         assert_eq!(waits.published().signalled, 0, "the value promised for it was never reached");
@@ -451,8 +499,8 @@ mod tests {
     #[test]
     fn the_second_frame_abandoned_leaves_the_first_frames_value_reached() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
-        waits.frame(2, false);
+        waits.frame(1, true, &mut ());
+        waits.frame(2, false, &mut ());
         assert_eq!(waits.published().traced, 4, "two waits per frame, over two frames");
         assert_eq!(waits.published().outstanding, 1);
         assert_eq!(waits.published().timeouts, 1);
@@ -466,9 +514,9 @@ mod tests {
     #[test]
     fn a_frame_after_an_abandoned_one_reaches_its_own_value() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
-        waits.frame(2, false);
-        waits.frame(3, true);
+        waits.frame(1, true, &mut ());
+        waits.frame(2, false, &mut ());
+        waits.frame(3, true, &mut ());
         assert_eq!(waits.published().outstanding, 0, "this frame's record, not the run's");
         assert_eq!(waits.published().timeouts, 1, "the run's total, which does not go back");
         assert_eq!(waits.published().signalled, 3, "and the skipped value is skipped");
@@ -486,11 +534,11 @@ mod tests {
     #[test]
     fn each_frame_traces_its_own_waits_and_not_the_run() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
+        waits.frame(1, true, &mut ());
         assert_eq!(waits.trace().len(), 2);
-        waits.frame(2, true);
+        waits.frame(2, true, &mut ());
         assert_eq!(waits.trace().len(), 2, "the second frame's two, and not four");
-        waits.frame(3, true);
+        waits.frame(3, true, &mut ());
         assert_eq!(waits.trace().len(), 2);
         assert_eq!(waits.published().traced, 6, "the run's total is the sum the frames reported");
     }
@@ -505,8 +553,8 @@ mod tests {
     #[test]
     fn a_frame_ordinal_that_does_not_move_is_refused_and_counted() {
         let mut waits = Waits::ZERO;
-        waits.frame(1, true);
-        waits.frame(1, true);
+        waits.frame(1, true, &mut ());
+        waits.frame(1, true, &mut ());
         assert_eq!(waits.published().refusals, 1);
         // And the refusal recorded nothing, which is `f_abi::sync`'s own rule: a
         // wait that was refused was never entered. The application's signal is

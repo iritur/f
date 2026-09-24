@@ -70,6 +70,7 @@ use f_ring::heap::Heap;
 use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
+use crate::latch::Reading;
 use crate::pacing::Tick;
 use crate::routing::{self, at, bell, life, node, reported, stopped};
 use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
@@ -317,6 +318,38 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
+        // And the pointer, on exactly the ordering argument above and with the
+        // same `Release`/`Acquire` pair underneath it: the frame writes the three
+        // words and then publishes the entry, so a read taken after the pop sees
+        // what was written before the submission this turn is answering.
+        //
+        // Read every turn rather than only when a commit closes, because a
+        // velocity needs a window and a window needs every report — the latch
+        // re-reads the *predictor* between the commit and the submission, and
+        // what the predictor holds is everything this loop has been handed. A
+        // report that is not newer than the newest held is refused by the
+        // predictor and counted, which is what makes a page that stopped
+        // changing cost nothing: the same three words read twice are one report.
+        //
+        // A page that stops answering is a turn with no report rather than an
+        // ended run, for the tick's reason exactly.
+        if let (Ok(at_nanos), Ok(x), Ok(y)) = (
+            board.read64(at::POINTER_AT_NANOS),
+            board.read64(at::POINTER_X_X65536),
+            board.read64(at::POINTER_Y_X65536),
+        ) {
+            held.reported(Reading {
+                at_nanos,
+                // Back to signed, in the fixed point both the sample and the
+                // transform record are written in. The word is a two's-complement
+                // `u64` because a routing page holds words and not integers with
+                // opinions, and a pointer left of the origin is an ordinary place
+                // rather than an enormous one.
+                x_x65536: x as i32,
+                y_x65536: y as i32,
+            });
+        }
+
         if let Some(answer) = held.offer(&entry, &payload, now) {
             if parts.data.post(answer).is_err() {
                 break stopped::NO_RING;
@@ -421,6 +454,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         backend_bits: board.read64(at::BACKEND_CAPABILITIES).ok()?,
         scanout_period_nanos: board.read64(at::SCANOUT_PERIOD_NANOS).ok()?,
         margin_nanos: board.read64(at::PACING_MARGIN_NANOS).ok()?,
+        // Narrowed here rather than in `crate::latch`, because a node identifier
+        // is a `u32` on the wire and this is the one place the page's word
+        // becomes one. A word naming a node outside that range is a frame this
+        // component cannot honour, and `f_abi::scene::NO_NODE` — zero — is what
+        // it becomes: no latch, published as a decline on every frame, rather
+        // than a truncation that would name a different node.
+        pointer_node: u32::try_from(board.read64(at::POINTER_NODE).ok()?).unwrap_or(0),
     };
 
     // Not refused at any value, and the reason is the same shape as the pacing
@@ -516,6 +556,31 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::TRACE_DROPPED, waits.dropped);
         let _ = board.write64(reported::TRACE_COMPLETE, waits.complete);
         let _ = board.write64(reported::CHAIN_REFUSALS, waits.refusals);
+        // The latch, `E3-B01i`. Carried out rather than consulted and dropped,
+        // for the traces' reason above: the one thing this component does that no
+        // client asked for is the one thing a reader has no other way to see.
+        //
+        // Both ends of the transform and neither difference: `crate::latch::
+        // Latched` says why, and the short version is that a component
+        // publishing its own subtraction cannot be checked against itself.
+        let latch = held.latch();
+        let _ = board.write64(reported::POINTER_REPORTS, latch.reports());
+        let _ = board.write64(reported::POINTER_STALE, latch.stale());
+        let _ = board.write64(reported::POINTER_UNSTAMPED, latch.unstamped());
+        let _ = board.write64(reported::LATCHES, latch.latches());
+        let _ = board.write64(reported::LATCH_DECLINES, latch.declines());
+        let _ = board.write64(reported::LATCH_AIM_NANOS, latch.aimed_at_nanos());
+        if let Ok(latched) = latch.last() {
+            let _ = board.write64(reported::LATCH_ENTRY, u64::from(latched.before_entry()));
+            let _ =
+                board.write64(reported::LATCH_COMMITTED_X, latched.committed_tx_x65536() as u64);
+            let _ =
+                board.write64(reported::LATCH_COMMITTED_Y, latched.committed_ty_x65536() as u64);
+            let _ = board.write64(reported::LATCH_X, latched.latched_tx_x65536() as u64);
+            let _ = board.write64(reported::LATCH_Y, latched.latched_ty_x65536() as u64);
+            let _ = board.write64(reported::LATCH_LEAD_NANOS, latched.lead_nanos());
+            let _ = board.write64(reported::LATCH_EXTRAPOLATED, u64::from(latched.extrapolated()));
+        }
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
         // tree is the machine's answer to *what is it running*, and RFC 0013

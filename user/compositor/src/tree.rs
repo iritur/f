@@ -100,8 +100,9 @@ use f_interface::token::{Report, Resolved, Theme, Token, resolve};
 use f_scene::arena::{Arena, Refusal as GraphRefusal};
 use f_scene::commit::{Batch, DELTAS_MAX, Offered, Refusal, Refused};
 
+use crate::latch::{Aim, LateLatch, Reading};
 use crate::pacing::{Decision, Pacing, Record, Tick, chose, degraded};
-use crate::waits::Waits;
+use crate::waits::{Between, Waits};
 
 /// How many deltas one frame may carry before this component refuses it.
 ///
@@ -253,6 +254,16 @@ pub struct Plan {
     /// What the wake time holds back against the estimate being wrong.
     /// Unit: nanoseconds.
     pub margin_nanos: u64,
+    /// Which node of the client's scene the pointer rides, or
+    /// `f_abi::scene::NO_NODE` when nothing on this machine does.
+    ///
+    /// Told, like every other field here, and for a sharper version of the same
+    /// reason: the cursor is a node in a *client's* graph, so a compositor that
+    /// picked one would be picking inside somebody else's scene. Zero is the
+    /// honest answer for a routing page nobody wrote, and it produces
+    /// `crate::latch::Declined::NoNode` on every frame rather than a refusal.
+    /// Unit: none — a node identifier.
+    pub pointer_node: u32,
 }
 
 /// The bitmask the frame wrote, read back through the vocabulary.
@@ -607,6 +618,13 @@ pub struct Held<'a> {
     /// crate that would otherwise have cost this image the copy — so a field here
     /// is a `memset` over a stack frame and nothing in the component's `.rodata`.
     waits: Waits,
+    /// The pointer, and the one node this component edits that no client sent.
+    ///
+    /// Owned, for [`Held::pacing`]'s reason: it is a window of four reports and
+    /// eight words, so a field here is a `memset` over a stack frame rather than
+    /// anything in the component's `.rodata`. `crate::latch` is the whole of the
+    /// argument for it existing at all.
+    latch: LateLatch,
     /// When the first delta of the frame under construction was staged.
     ///
     /// `None` between frames, which is what makes a frame's cost the span of
@@ -664,6 +682,11 @@ impl<'a> Held<'a> {
             // Two timelines that have promised nothing, which admits no wait at
             // all. `crate::waits::Waits::ZERO` says why that is the right start.
             waits: Waits::ZERO,
+            // The node the pointer rides is decided **once**, here, for the rung
+            // above's reason at a smaller stake: a second assignment would be a
+            // cursor that changed which node it was halfway through a run, and
+            // the frame that noticed would be the one after.
+            latch: LateLatch::riding(plan.pointer_node),
             opened: None,
         }
     }
@@ -678,6 +701,32 @@ impl<'a> Held<'a> {
     #[must_use]
     pub const fn waits(&self) -> &Waits {
         &self.waits
+    }
+
+    /// The pointer this component has been told about, and the last frame's
+    /// latch.
+    ///
+    /// Shared and never exclusive, for [`Held::waits`]'s reason and with the
+    /// same thing at stake: a `&mut LateLatch` handed out here would be a second
+    /// place the graph could be patched, and *the latch happens in the window
+    /// and nowhere else* is the sentence `crate::latch` exists to be able to
+    /// say.
+    #[must_use]
+    pub const fn latch(&self) -> &LateLatch {
+        &self.latch
+    }
+
+    /// One position the pointer reported, as the frame wrote it into this
+    /// component's routing page.
+    ///
+    /// `false` when the predictor refused it as not newer than the newest it
+    /// holds. It is taken here rather than at latch time because a velocity
+    /// needs a window and a window needs every report, not the one that happened
+    /// to be on the page when a frame closed — the latch re-reads the *predictor*
+    /// immediately before submit, and what it predicts from is everything this
+    /// has been handed.
+    pub fn reported(&mut self, reading: Reading) -> bool {
+        self.latch.observed(reading)
     }
 
     /// One completion reached the client's ring.
@@ -909,7 +958,55 @@ impl<'a> Held<'a> {
         // `UNSIGNALLED` — so the mistake is a refusal counted in
         // `crate::routing::reported::CHAIN_REFUSALS` rather than a wrong number,
         // which is the arrangement that type was given for exactly this.
-        self.waits.frame(self.counters.frames, fitted);
+        //
+        // The chain driver is handed the window as well as the two numbers, and
+        // `crate::waits::Between` is why that is an argument rather than a call
+        // this function makes either side of it: the moment `E3-B01i` asks for is
+        // defined by the chain's own order, and only the function that knows that
+        // order can hand it out.
+        let ordinal = self.counters.frames;
+        let mut window = Window {
+            graph: self.graph,
+            latch: &mut self.latch,
+            // The scanout this frame was just paced against, and the same number
+            // `crate::routing::reported::SCANOUT` publishes. Taken from the
+            // decision above rather than recomputed, so the instant the cursor is
+            // aimed at and the instant the frame is aimed at cannot drift apart —
+            // two calls to `scanout_after` with a `now` between two boundaries
+            // would answer differently, and the disagreement would be invisible.
+            aim: Aim { scanout_nanos: self.story.decision.scanout_nanos },
+        };
+        self.waits.frame(ordinal, fitted, &mut window);
+    }
+}
+
+/// The window between the commit closing and the first submission crossing, as
+/// the thing that happens in it.
+///
+/// It exists because [`crate::waits::Between`] hands out a moment and this is
+/// what this component does with one. Three borrows and no state: the graph to
+/// patch, the pointer to patch it from, and the instant to aim at.
+struct Window<'g, 'l> {
+    /// The retained scene, which the latch is the one editor of outside a
+    /// commit.
+    graph: &'g mut Arena,
+    /// The pointer, and the record of what it did.
+    latch: &'l mut LateLatch,
+    /// What this frame is aimed at.
+    aim: Aim,
+}
+
+impl Between for Window<'_, '_> {
+    /// The latch, and the outcome is deliberately dropped here.
+    ///
+    /// Not ignored: `crate::latch::LateLatch::latch` has already counted it and
+    /// kept it, and `crate::latch::LateLatch::last` is where a reader asks. What
+    /// is declined here is *deciding* anything about it — a frame that could not
+    /// latch is a frame that goes out with the client's own transform, which is
+    /// the correct frame, and a compositor that stopped for one would have turned
+    /// a pointer nobody had moved into a stopped screen.
+    fn between_commit_and_submit(&mut self, entered: usize) {
+        let _latched = self.latch.latch(self.graph, entered, self.aim);
     }
 }
 
@@ -1000,7 +1097,12 @@ mod tests {
         for capability in Capability::ALL {
             bits |= 1 << capability.index();
         }
-        Plan { backend_bits: bits, scanout_period_nanos: PERIOD_NANOS, margin_nanos: MARGIN_NANOS }
+        Plan {
+            backend_bits: bits,
+            scanout_period_nanos: PERIOD_NANOS,
+            margin_nanos: MARGIN_NANOS,
+            pointer_node: NO_NODE,
+        }
     }
 
     /// A sixty-hertz frame. Unit: nanoseconds.
@@ -1235,7 +1337,12 @@ mod tests {
         ] {
             bits |= 1 << capability.index();
         }
-        Plan { backend_bits: bits, scanout_period_nanos: PERIOD_NANOS, margin_nanos: MARGIN_NANOS }
+        Plan {
+            backend_bits: bits,
+            scanout_period_nanos: PERIOD_NANOS,
+            margin_nanos: MARGIN_NANOS,
+            pointer_node: NO_NODE,
+        }
     }
 
     #[test]

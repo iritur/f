@@ -876,6 +876,48 @@ pub struct Board {
     /// Refusals the component's own chain produced, which is the component
     /// contradicting itself. Unit: refusals.
     pub chain_refusals: u64,
+
+    // --- the late latch, `E3-B01i` ------------------------------------------
+    //
+    // Both ends of the transform and neither difference, which is
+    // `f_compositor::latch::Latched`'s own rule: a component that published its
+    // own subtraction could not be checked against itself, and the frame that
+    // does the subtracting here is the one that injected the motion. The entry
+    // ordinal is the word that says *where in the frame* — zero is after the
+    // commit closed and before the compositor's own submission entered its wait.
+    /// Positions the device reported that the component took. Unit: reports.
+    pub pointer_reports: u64,
+    /// Positions its predictor refused as not newer than the newest it held.
+    /// Unit: reports.
+    pub pointer_stale: u64,
+    /// Readings it refused because they carried no stamp, which is what a page
+    /// the frame has not written reads as. Unit: readings.
+    pub pointer_unstamped: u64,
+    /// Frames that carried a latch. Unit: frames.
+    pub latches: u64,
+    /// Frames that did not, whatever the reason. Unit: frames.
+    pub latch_declines: u64,
+    /// How many wait entries the last latched frame's trace held at the latch.
+    /// Unit: wait entries.
+    pub latch_entry: u64,
+    /// The translation the client committed on that frame, along x.
+    /// Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub latch_committed_x: u64,
+    /// And along y. Unit: as [`Board::latch_committed_x`].
+    pub latch_committed_y: u64,
+    /// The translation that was submitted on that frame, along x.
+    /// Unit: as [`Board::latch_committed_x`].
+    pub latch_x: u64,
+    /// And along y. Unit: as [`Board::latch_committed_x`].
+    pub latch_y: u64,
+    /// How far forward the prediction was extrapolated. Unit: nanoseconds.
+    pub latch_lead_nanos: u64,
+    /// The instant the last latch was aimed at, published so that a second
+    /// predictor can be asked the same question. Unit: nanoseconds.
+    pub latch_aim_nanos: u64,
+    /// One where that position was an extrapolation rather than the last
+    /// position the device reported. Unit: none — a flag.
+    pub latch_extrapolated: u64,
 }
 
 impl Board {
@@ -929,6 +971,19 @@ impl Board {
             trace_dropped: board.read64(reported::TRACE_DROPPED).ok()?,
             trace_complete: board.read64(reported::TRACE_COMPLETE).ok()?,
             chain_refusals: board.read64(reported::CHAIN_REFUSALS).ok()?,
+            pointer_reports: board.read64(reported::POINTER_REPORTS).ok()?,
+            pointer_stale: board.read64(reported::POINTER_STALE).ok()?,
+            pointer_unstamped: board.read64(reported::POINTER_UNSTAMPED).ok()?,
+            latches: board.read64(reported::LATCHES).ok()?,
+            latch_declines: board.read64(reported::LATCH_DECLINES).ok()?,
+            latch_entry: board.read64(reported::LATCH_ENTRY).ok()?,
+            latch_committed_x: board.read64(reported::LATCH_COMMITTED_X).ok()?,
+            latch_committed_y: board.read64(reported::LATCH_COMMITTED_Y).ok()?,
+            latch_x: board.read64(reported::LATCH_X).ok()?,
+            latch_y: board.read64(reported::LATCH_Y).ok()?,
+            latch_lead_nanos: board.read64(reported::LATCH_LEAD_NANOS).ok()?,
+            latch_aim_nanos: board.read64(reported::LATCH_AIM_NANOS).ok()?,
+            latch_extrapolated: board.read64(reported::LATCH_EXTRAPOLATED).ok()?,
         })
     }
 }

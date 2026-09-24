@@ -264,6 +264,54 @@ pub mod at {
     /// will ring never comes back.
     /// Unit: none — a [`bell`](super::bell) ordinal.
     pub const DOORBELL: u32 = 120;
+
+    /// Which node of the client's scene the pointer rides.
+    ///
+    /// The late latch patches one node's transform between a commit closing and
+    /// a submission crossing, and *which node* is a fact about a client's scene
+    /// rather than about this component. So it is told, like the pacing inputs
+    /// above and for a sharper version of their reason: a compositor that picked
+    /// one would be picking inside somebody else's graph.
+    ///
+    /// Zero is `f_abi::scene::NO_NODE`, so a frame that never wrote this word
+    /// gets a component that latches nothing — which is every boot before
+    /// `E3-B01i`, unchanged. `crate::latch::Declined::NoNode` is what it
+    /// publishes on every frame, rather than a refusal.
+    /// Unit: none — a node identifier.
+    pub const POINTER_NODE: u32 = 128;
+
+    /// When the device last reported a position.
+    ///
+    /// The stamp `f_input::stamp::at_interrupt` took in the driver, carried
+    /// across two rings unchanged. **This component never reads a clock and this
+    /// word is the reason it does not have to**: RFC 0004 gives a component
+    /// neither a timer nor a port to read one through, and a latch that decided
+    /// for itself when a report arrived would have replaced the driver's
+    /// measurement with the sum of that measurement and its own scheduling
+    /// delay — silently, in the direction that flatters the compositor.
+    ///
+    /// The three pointer words below are written **together and in this order**,
+    /// with the stamp last: a reader that saw a new position against an old
+    /// stamp would compute a velocity out of two reports, and the predictor
+    /// refuses a report that is not strictly newer than the newest it holds, so
+    /// a stamp that has not moved is a report that is dropped rather than a
+    /// velocity that is wrong. That is the conservative direction and it is why
+    /// this word is the last of the three.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub const POINTER_AT_NANOS: u32 = 136;
+
+    /// Where the device last reported the pointer, along x.
+    ///
+    /// Signed, in the 16.16 fixed point `f_abi::scene::SetTransform` and
+    /// `f_input::predict::Sample` are both written in, carried through a `u64`
+    /// word because that is what a routing page holds. There is no floating
+    /// point anywhere on this path and RFC 0004 is why.
+    /// Unit: device pixels from the surface origin, scaled by 65 536.
+    pub const POINTER_X_X65536: u32 = 144;
+
+    /// And along y. See [`POINTER_X_X65536`].
+    /// Unit: device pixels from the surface origin, scaled by 65 536.
+    pub const POINTER_Y_X65536: u32 = 152;
 }
 
 /// What the frame says it will do when this component has nothing to do.
@@ -857,6 +905,90 @@ pub mod reported {
     /// would have turned an accounting defect into a black screen.
     /// Unit: refusals.
     pub const CHAIN_REFUSALS: u32 = super::REPORT + 296;
+
+    /// Positions the device reported that this component took.
+    ///
+    /// `crate::latch::LateLatch::reports`. Unit: reports.
+    pub const POINTER_REPORTS: u32 = super::REPORT + 304;
+
+    /// Positions the predictor refused as not newer than the newest it held.
+    ///
+    /// Published beside the count above rather than dropped, because a relay
+    /// that duplicated or reordered a report is invisible in every other number
+    /// here: the prediction is still made, from a window one report shorter than
+    /// the run implies. Unit: reports.
+    pub const POINTER_STALE: u32 = super::REPORT + 312;
+
+    /// Frames that carried a latch. Unit: frames.
+    pub const LATCHES: u32 = super::REPORT + 320;
+
+    /// Frames that did not, whatever the reason. Unit: frames.
+    pub const LATCH_DECLINES: u32 = super::REPORT + 328;
+
+    /// How many wait entries the last latched frame's trace held when the latch
+    /// happened.
+    ///
+    /// **The word that says the latch was in the window.** Zero is after the
+    /// commit closed and before the compositor's own submission entered its
+    /// wait; a one or a two is a latch that has drifted past a submission, which
+    /// is what `E3-B01i`'s *between commit and submit* forbids and is a number
+    /// rather than a sequence a reader has to reconstruct.
+    /// Unit: wait entries.
+    pub const LATCH_ENTRY: u32 = super::REPORT + 336;
+
+    /// The translation along x the client committed on the last latched frame.
+    /// Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub const LATCH_COMMITTED_X: u32 = super::REPORT + 344;
+
+    /// And along y. Unit: as [`LATCH_COMMITTED_X`].
+    pub const LATCH_COMMITTED_Y: u32 = super::REPORT + 352;
+
+    /// The translation along x that was submitted on the last latched frame.
+    ///
+    /// Both ends are published and the difference is left to the reader, for
+    /// `crate::latch::Latched`'s reason: a component that published the motion
+    /// would be publishing its own subtraction, and the frame checking it would
+    /// be checking this component's arithmetic against itself.
+    /// Unit: as [`LATCH_COMMITTED_X`].
+    pub const LATCH_X: u32 = super::REPORT + 360;
+
+    /// And along y. Unit: as [`LATCH_COMMITTED_X`].
+    pub const LATCH_Y: u32 = super::REPORT + 368;
+
+    /// How far forward the prediction on the last latched frame was actually
+    /// extrapolated, after the predictor's own damping. Zero when the position
+    /// was held. Unit: nanoseconds.
+    pub const LATCH_LEAD_NANOS: u32 = super::REPORT + 376;
+
+    /// The instant the last latch was aimed at.
+    ///
+    /// **Published so that the seam has a question both sides can be asked.**
+    /// `E3-B04e` compares two records neither of which derives from the other,
+    /// and two predictors asked about two different instants would disagree for
+    /// a reason that is not a defect. This is the instant this component chose;
+    /// the frame asks its own predictor the same one.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub const LATCH_AIM_NANOS: u32 = super::REPORT + 384;
+
+    /// One when the last latched frame's position was an extrapolation, zero
+    /// when it was the last position the device actually reported.
+    ///
+    /// The word that tells `E3-B01i`'s case from `E3-B04e`'s: a held position
+    /// differs from the committed one by exactly the motion that arrived, and an
+    /// extrapolated one differs by that motion plus the lead the predictor
+    /// claimed. Unit: none — a flag.
+    pub const LATCH_EXTRAPOLATED: u32 = super::REPORT + 392;
+
+    /// Readings this component refused because they carried no stamp.
+    ///
+    /// A page the frame has not written is zeroes, and zero is
+    /// `f_abi::input::NOT_STAMPED` — *the absence of a stamp, not a stamp of
+    /// zero*. This word is how many times that was read and refused, and it is
+    /// published rather than swallowed because it is the difference between a
+    /// machine whose pointer route is not connected and one whose pointer has
+    /// not moved: the two have the same zero everywhere else.
+    /// Unit: readings.
+    pub const POINTER_UNSTAMPED: u32 = super::REPORT + 400;
 }
 
 /// Why the component's loop ended.
