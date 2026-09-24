@@ -1764,6 +1764,35 @@ source = \"virtio-net\"
         assert_eq!(read(SOURCE, &decompile_tree(&tree)).expect("it re-reads"), source);
     }
 
+    /// The direction `component_hash` does not check. It refuses a name the
+    /// generation carries and `COMPONENTS` does not build, and it says nothing
+    /// about a component `COMPONENTS` builds and the generation leaves out — so
+    /// from 2026-09-23 until wave 15 every boot placed nine component files and
+    /// the root it attested to covered eight. `virtio-input` was the one missing,
+    /// and `claims/0028`'s leaf floor sat four below the real count throughout,
+    /// which is how nothing noticed. A file read with no build, so it runs inside
+    /// `verify`.
+    ///
+    /// *What would reverse this:* a component this tree builds and deliberately
+    /// keeps out of the attested set — at which point the exception is a named
+    /// row here with its reason, not a deletion of this test.
+    #[test]
+    fn the_repositorys_own_generation_names_every_component_this_tree_builds() {
+        let text = std::fs::read_to_string(crate::root().join(SOURCE))
+            .expect("user/generation.toml is committed");
+        let source = read(SOURCE, &text).expect("it fits the grammar");
+        let missing: Vec<&str> = crate::COMPONENTS
+            .iter()
+            .copied()
+            .filter(|name| !source.components.iter().any(|have| have == name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "`COMPONENTS` builds {missing:?} and {SOURCE} does not name it, so every boot places a \
+             component file the generation root does not cover"
+        );
+    }
+
     /// Two roots, so that the ordering and the offer list are both visible, and
     /// two *different* frame hashes, so that an entry pairing a root with the
     /// wrong generation's frame is a thing the tests below can see.

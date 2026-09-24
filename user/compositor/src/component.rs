@@ -319,9 +319,13 @@ fn serve() -> ! {
         last = now;
 
         // And the pointer, on exactly the ordering argument above and with the
-        // same `Release`/`Acquire` pair underneath it: the frame writes the three
-        // words and then publishes the entry, so a read taken after the pop sees
-        // what was written before the submission this turn is answering.
+        // same `Release`/`Acquire` pair underneath it: a frame that writes the
+        // three words writes them and then publishes the entry, so a read taken
+        // after the pop sees what was written before the submission this turn is
+        // answering. That pair, and a writer that does not write again until the
+        // answer below is reaped, is the whole of why the three reads agree; the
+        // order of the three is not, and `at::POINTER_AT_NANOS` says why neither
+        // order would be. No frame writes them yet, so today they read as zeroes.
         //
         // Read every turn rather than only when a commit closes, because a
         // velocity needs a window and a window needs every report — the latch

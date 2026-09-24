@@ -39,12 +39,22 @@ schema = 1
 # the moment the code changes and the moment somebody remembers.
 frame = "kernel"
 
-# The eight components, in canonical order. This is exactly `COMPONENTS` in
+# The nine components, in canonical order. This is exactly `COMPONENTS` in
 # `xtask/src/main.rs` as a set, and the compiler refuses a name that list does not
 # build rather than emitting a leaf for a component file nothing produces. The two
 # orders differ on purpose and neither is the other's: that list is the order the
 # loader carries the modules in, and this one is bytewise on the name, which is
-# why `compositor` is first here and last there.
+# why `compositor` is first here and next to last there.
+#
+# **Only that direction is checked, and the other one has already failed once.**
+# `virtio-input` joined `COMPONENTS` on 2026-09-23 and not this list, so for a
+# day every boot placed nine component files and the root — the answer to *what
+# is this machine running* — covered eight. Nothing went red: a list that is
+# missing a name compiles, folds and reproduces exactly as well as a whole one.
+# It was found by an audit reading the sentence above against the table, which
+# is the check that stands until the compiler also refuses a `COMPONENTS` entry
+# this list omits. `virtio-input` holds no route, for `virtio-gpu`'s reason:
+# everything its manifest declares comes `from = "supervisor"`.
 #
 # `objects` and `compositor` hold no route yet. `objects` declares an optional
 # `block` need, so the assembler has nothing to refuse and nothing to check, and
@@ -63,7 +73,7 @@ frame = "kernel"
 # The day something above the frame owns semantic trees is the day this line
 # gains a route, and RFC 0072's *a runtime is a component so it publishes a tree*
 # is the shape that would ask for it.
-component = ["compositor", "objects", "panel", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
+component = ["compositor", "objects", "panel", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-input", "virtio-net"]
 
 # The routes. Two of them, and they are the two the datapath already boots:
 # `cargo xtask blk` moves a sector from a client through `virtio-blk`, and

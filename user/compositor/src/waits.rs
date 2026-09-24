@@ -261,7 +261,8 @@ pub struct Published {
 /// remember to reset one and not the other — and the failure is silent, because a
 /// stale trace decodes and reads as a complete record of the wrong frame.
 /// [`Waits::frame`] is the only thing that touches either, so there is one place
-/// the pairing can be got wrong and it is nine lines long.
+/// the pairing can be got wrong: that function's body, eight statements, and the
+/// first of them is the reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Waits {
     /// Section 08's chain: the application's timeline and the compositor's.
@@ -339,10 +340,17 @@ impl Waits {
     /// that comparison would be two opinions about one frame, and
     /// `crate::routing::reported::LATE` is where the frame checks the other one.
     ///
-    /// The three chain calls are in section 08's order and every one of them goes
-    /// through a door that takes the trace. There is no fourth call and no
-    /// `Submission::EMPTY` in this file, which is what the module header means by
-    /// the sentence being a property of the module.
+    /// [`Waits::drive`] makes five calls on the chain: the three submissions in
+    /// section 08's order, then the landing of each timeline. The two that enter
+    /// a wait — [`Chain::compositor_waits_and_signals`] and
+    /// [`Chain::present_waits`] — take the trace, and so do the two landings,
+    /// which release what those waits entered. The fifth,
+    /// [`Chain::application_signals`], takes no trace, and it does not need one:
+    /// it enters no wait, so there is nothing for a trace to name. What the module
+    /// header claims is that every *wait* goes through a door that records it, not
+    /// that every call does. There is no `Submission::EMPTY` in this file, so no
+    /// submission is built here outside those doors, which is what the header
+    /// means by the sentence being a property of the module.
     ///
     /// A refusal is counted and the frame goes on. The whole run is this
     /// component's own arithmetic over its own frame ordinals, so a refusal here

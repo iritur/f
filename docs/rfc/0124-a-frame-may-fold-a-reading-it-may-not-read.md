@@ -99,8 +99,9 @@ than a design question, because the consumer half is written down and has a
 running example. See *What the consumer has to do*, below.
 
 **What it makes hard.** A stage that is *entitled* to rewrite what the device
-said cannot carry this word through. A coalescer, or the input router
-`E3-B04`'s parent owes, may legitimately hand on one motion where two arrived,
+said cannot carry this word through. A coalescer, or an input router —
+which no line in `TODO.md` owes yet; this sentence said `E3-B04` did until
+2026-09-24, and it does not — may legitimately hand on one motion where two arrived,
 and the honest repair is a second attestation with the arithmetic relating the
 two written down — not a fold that stops watching the body. `Crossing`'s own
 doc comment says so at the point somebody would otherwise widen it.
@@ -178,7 +179,7 @@ and looks right, which is why there is a lint and not a convention.
 ## What would reverse this
 
 - **A stage between the driver and the consumer that is entitled to rewrite what
-  the device said.** A coalescer or `E3-B04`'s router. Its arrival does not make
+  the device said.** A coalescer or an input router, which no line in `TODO.md` owes yet. Its arrival does not make
   this wrong; it makes one attestation insufficient, and the repair is a second
   word with a stated relation to the first. Watch for it arriving as a quiet
   widening of the fold to ignore the body, which is the same defect wearing this

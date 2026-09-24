@@ -290,13 +290,31 @@ pub mod at {
     /// measurement with the sum of that measurement and its own scheduling
     /// delay — silently, in the direction that flatters the compositor.
     ///
-    /// The three pointer words below are written **together and in this order**,
-    /// with the stamp last: a reader that saw a new position against an old
-    /// stamp would compute a velocity out of two reports, and the predictor
-    /// refuses a report that is not strictly newer than the newest it holds, so
-    /// a stamp that has not moved is a report that is dropped rather than a
-    /// velocity that is wrong. That is the conservative direction and it is why
-    /// this word is the last of the three.
+    /// This word and the two below are one report, and a reader that paired a
+    /// position with another report's stamp would compute a velocity out of two
+    /// reports. **What keeps them one report is the ring, not the order they sit
+    /// in or are written in.** A frame that writes them does so before it
+    /// publishes an entry with the ring's `Release`, and does not write them
+    /// again until it has reaped that entry's answer; the component reads them
+    /// after its `Acquire` pop and before it posts the answer, which
+    /// `crate::component` states at the read. Inside that window nothing writes,
+    /// so the three loads cannot tear whatever order they are made in.
+    ///
+    /// Outside that window no read order would repair it, which is why the
+    /// reader's order is not argued from a writer's. These are plain words —
+    /// `f_ring::device::Window::read64` is two volatile halves, not an atomic —
+    /// so on AArch64 the program order of the loads is not an order the core
+    /// keeps. And even under total store order, a writer that wrote x, y and the
+    /// stamp last tears either way round: a reader taking the stamp first can
+    /// pair a stamp new to the predictor with the next report's position, and one
+    /// taking it last can do the same whenever it missed a whole report. The
+    /// predictor accepts both, because the stamp is newer than what it holds. A
+    /// writer that must write while an entry is outstanding owes a sequence word
+    /// read on either side of the report, not a write order.
+    ///
+    /// Nothing in this tree writes these three words yet: the page is zeroes, and
+    /// a zero stamp is what `crate::latch` counts as unstamped. So the paragraph
+    /// above is the contract a writer is owed rather than a property of one.
     /// Unit: nanoseconds, in the channel's epoch.
     pub const POINTER_AT_NANOS: u32 = 136;
 

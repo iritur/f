@@ -1063,11 +1063,21 @@ mod tests {
     /// client committed, not a number this component remembered.
     ///
     /// Neither is computed from the other. They share an implementation and not
-    /// an instance, and what that buys is stated rather than overclaimed: the
-    /// comparison catches a relay that dropped a report, reordered two, handed
-    /// on a position the device never reported, or committed a transform that is
-    /// not the newest report — and it does not catch a defect inside the
-    /// predictor, which is `input/src/predict.rs`'s own bounded corpus.
+    /// an instance, and what that buys is stated rather than overclaimed: two
+    /// predictor instances, one reached through the late latch inside
+    /// [`Waits::frame`]'s window and one called directly, agree on the value, on
+    /// how far it moved, on the lead and on the instant aimed at. That catches a
+    /// latch that hands the graph something other than what its predictor
+    /// answered, or asks it about another instant. It does not catch a defect
+    /// inside the predictor, which is `input/src/predict.rs`'s own bounded
+    /// corpus.
+    ///
+    /// **It has no relay in it.** Both predictors are fed by loops over one local
+    /// array, and the client commits that array's newest report, so a dropped,
+    /// reordered or invented report — or a committed transform that is not the
+    /// newest — cannot appear between the two sides here. A seam that catches
+    /// those needs the reports to reach the compositor by a route the test does
+    /// not write, which is `E3-B04g`.
     ///
     /// The basis is asserted to be an **extrapolation**, because a held
     /// prediction would make both sides agree by copying the same sample and the
