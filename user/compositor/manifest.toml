@@ -19,11 +19,13 @@
 # retained graph, serving one client on one ring whose deltas travel inline;
 # restarted on a fault and not on an exit, at the price of every client's
 # retained scene; in the soft class, because nothing here yet has a deadline it
-# can miss; and publishing nine numbers about itself that a reader can check
-# against what a client asked for — four about what it applied, and five that are
-# one frame's story: the rung it would draw with, the frame it last closed, the
+# can miss; and publishing twelve numbers about itself that a reader can check
+# against what a client asked for — four about what it applied, five that are one
+# frame's story (the rung it would draw with, the frame it last closed, the
 # deadline that frame carried, what a frame costs here, and what was given up to
-# fit.
+# fit), and three about the theme it resolved: that it resolved one, how many
+# decisions the resolver made on its author's behalf, and how many rules it owes
+# between grounds that do not part on their own.
 
 schema = 4
 name   = "compositor"
@@ -258,9 +260,12 @@ mode = "restart_only"
 # declaration honest rather than decorative: there is no collect step, no
 # sampling interval and no second copy that can disagree with the first. And each
 # of them is checkable from outside: a client that sent two frames of known shape
-# at known deadlines, over a clock it wrote itself, knows what all nine should
+# at known deadlines, over a clock it wrote itself, knows what all twelve should
 # say — which is what `kernel/src/compositor.rs` compares them against rather
-# than taking the component's word.
+# than taking the component's word. The last three are checkable from further
+# outside than that: the frame resolves the same theme itself and compares, so the
+# three are two independent answers to one question rather than one answer read
+# twice.
 #
 # Ids are permanent and are never reused, for the reason `TODO.md` never reuses a
 # task id: the id is the only thing that makes two readings of this component
@@ -335,7 +340,8 @@ unit   = "entries"
 # rather than restates: a node with no counter behind it would be a serialisation
 # with extra steps wearing RFC 0013's name. There is no collect step here, no
 # sampling interval and no second copy that can disagree with the first — the
-# component writes these nine words out of one `Counters` and one `Story`, and
+# component writes these twelve words out of one `Counters`, one `Story` and one
+# `Readability`, and
 # `f_compositor::routing::reported` carries the same numbers onto the board so
 # that the frame can require the two to agree.
 #
@@ -440,5 +446,102 @@ unit   = "nanoseconds"
 id     = 10
 parent = "compositor"
 name   = "degraded"
+kind   = "gauge"
+unit   = "none"
+
+# --- The resolved theme, E3-B06d ----------------------------------------------
+#
+# Three nodes that are one declaration, and the thing they are evidence for is a
+# negative: that this component does **not** decide readability. RFC 0079 puts
+# every contrast floor, every metric bound and every clamp inside
+# `interface/src/token.rs`, hands a compositor exactly one obligation — draw the
+# rule between two grounds that do not part on their own — and names the way that
+# arrangement fails silently: a projection that stops asking `Resolved::on` for a
+# pair and starts remembering an ink's colour. `cargo xtask lint-token-pair` reads
+# this component's source for that, which is the negative half. These three nodes
+# are the positive half, and they are here because a negative read out of a source
+# file says nothing about what ran.
+#
+# Every one of them is a value `f_compositor::tree::Readability` already holds —
+# the rule this file obeys everywhere else: a node with no counter behind it is a
+# serialisation with extra steps wearing RFC 0013's name. There is no collect step
+# and no second copy, and `f_compositor::routing::reported` carries the same three
+# onto the board so the frame can require them to agree.
+#
+# Ids 11 to 13, ascending, and 1 to 10 keep what they had.
+
+# That the theme was resolved once and has not been resolved since.
+#
+# One, for the life of an instance. The node exists because *one* is checkable
+# and *did not recompute* is not: a compositor that re-resolved every frame would
+# answer every colour question with the same colours and differ only in what it
+# spent, so a reader with no count here has no reading that separates the two
+# builds. A boot that closes two frames and finds a one has seen the difference.
+#
+# A counter and not a gauge, because it only ever goes up, and `none` because a
+# resolution is an event rather than a quantity of anything. The day a theme
+# legitimately changes while this component runs — a caller switching to a dark
+# theme is the obvious one — this node stops reading one and starts reading *once
+# per theme*, and the id stays what it is so that a reader can compare across
+# that change.
+[[state]]
+id     = 11
+parent = "compositor"
+name   = "resolves"
+kind   = "counter"
+unit   = "events"
+
+# How many decisions the resolver made that the theme's author did not.
+#
+# `f_interface::token::Report::len`, which counts every clamp: an ink moved to
+# clear a floor, a metric that took its bound, a font preference dropped. Zero
+# under a theme this layer agrees with — `Theme::DEFAULT` resolves clean, and a
+# token layer whose own default needed correcting would have a floor or a bound
+# that is wrong rather than a default that is unlucky.
+#
+# **This is the node that makes RFC 0079 auditable.** That decision chose to clamp
+# a hostile theme rather than refuse it, and the whole argument for clamping rests
+# on every clamp being reported to somebody: a compositor that resolved a theme,
+# moved somebody's colours and published nothing would have made the clamp silent,
+# which is the outcome that RFC spends four alternatives avoiding. A report
+# computed and dropped is the failure mode, and this node is what dropping it
+# would look like from outside.
+#
+# `entries` rather than `events`, because a note is a record in a report rather
+# than a thing that happened at a time: `f_interface::token::NOTES_MAX` bounds how
+# many fit, and the count of those that did not is on the board beside it where
+# the frame checks it.
+[[state]]
+id     = 12
+parent = "compositor"
+name   = "notes"
+kind   = "gauge"
+unit   = "entries"
+
+# How many ordered pairs of distinct grounds owe a rule between them.
+#
+# RFC 0079 places exactly one obligation on a compositor and states it there
+# rather than leaving it implied: `Resolved::boundary` says, for any two grounds,
+# whether they part on their own, and carries the colour of the rule that must be
+# drawn when they do not. The signal that the obligation has gone unimplemented is
+# this component existing with no caller of `boundary` in it, and this node is
+# what that caller produced.
+#
+# Six is the maximum — three grounds, ordered pairs, and a ground over itself is
+# one region rather than a boundary — and six is what `Theme::DEFAULT` produces,
+# because white, near-white and white part from nothing. That is RFC 0079's own
+# example rather than a corner case: `#F2F2F2` on `#FFFFFF` is the ordinary idiom
+# for a raised surface and it carries no contrast at all, which is why the answer
+# is a rule rather than a clamp.
+#
+# **Rules owed and never rules drawn.** Nothing in this build draws anything;
+# `E3-B02` owes the pixels. A node that counted rules drawn would be reporting
+# work nobody did, and RFC 0079 names that as the one outcome that would not be
+# acceptable. A gauge, because it is a property of the theme in force rather than
+# a tally, and `none` because an ordered pair of grounds is not a quantity.
+[[state]]
+id     = 13
+parent = "compositor"
+name   = "rules"
 kind   = "gauge"
 unit   = "none"

@@ -361,15 +361,81 @@ pub mod node {
     /// Unit: none — a `crate::pacing::degraded` ordinal.
     pub const DEGRADED: u32 = 10;
 
+    // --- the resolved theme, `E3-B06d` --------------------------------------
+    //
+    // Three ids, and what makes them one group is that no one of them can be
+    // read alone. *One resolution* with no note count beside it says the work
+    // was done once and not what it decided; a note count with no resolution
+    // count beside it cannot tell a theme this layer agreed with from a theme
+    // resolved so often that nobody could have read the notes; and neither says
+    // anything about the one obligation RFC 0079 hands a compositor, which is
+    // the third.
+    //
+    // **They are in the tree and not only on the board**, which is the opposite
+    // of where the first draft of this task put them. The board is this
+    // component's answer to *what did you do*, read once when its core comes
+    // back; the tree is the machine's answer to *what is it running*, and
+    // whether the interface on this machine is readable — and whether anybody
+    // was told what it cost to make it so — is a question about a running
+    // machine rather than about a run that ended. `E3-B01k` settled the same
+    // question the same way for the frame's story, and the sentence its exit
+    // used is the one this group is written to satisfy: *a boot reads them back
+    // out of the component's subtree rather than out of the serial log.*
+    //
+    // Two more words are on the board and have no node here, and the division
+    // is deliberate rather than economy. `reported::DROPPED` and
+    // `reported::CLEAN` are about the **report's own integrity** — whether it
+    // truncated, and whether the resolver's own judgement agrees with the count
+    // — which is evidence about this component's honesty and belongs where the
+    // frame checks it, not in the answer a reader of the machine gets.
+
+    /// How many times this component resolved a theme.
+    ///
+    /// One, for the life of an instance, and the whole reason this is a node is
+    /// that *one* is checkable where *not recomputing* is not. RFC 0079
+    /// resolves an ink once per ground; a compositor that re-resolved every
+    /// frame would answer every colour question with the same colours and
+    /// differ only in what it spent, so a reader with no count has no reading
+    /// that separates the two builds.
+    /// Unit: none — resolutions.
+    pub const RESOLVES: u32 = 11;
+    /// How many decisions the resolver made that the theme's author did not.
+    ///
+    /// `f_interface::token::Report::len`. Zero under a theme this layer agrees
+    /// with, and one per clamp otherwise. It is the node that makes RFC 0079's
+    /// *clamped, not refused* an arrangement somebody can audit rather than a
+    /// promise: a compositor that resolved a theme, moved somebody's colours to
+    /// clear a floor and published nothing would have made the clamp silent,
+    /// which is the outcome that RFC spends four alternatives avoiding.
+    /// Unit: none — notes.
+    pub const NOTES: u32 = 12;
+    /// How many ordered pairs of distinct grounds owe a rule between them.
+    ///
+    /// RFC 0079 places exactly one obligation on a compositor — *`boundary`
+    /// says, for any two grounds, whether they part on their own, and carries
+    /// the colour of the rule that must be drawn when they do not* — and this
+    /// is the node that says the obligation was read. Six is the maximum: three
+    /// grounds, ordered pairs, and a ground over itself is one region rather
+    /// than a boundary.
+    ///
+    /// **Rules owed and never rules drawn.** Nothing in this build draws
+    /// anything and `E3-B02` owes the pixels; a component that published a
+    /// count of rules it had drawn would be reporting work nobody did, which is
+    /// the one outcome RFC 0079 says would not be acceptable.
+    /// Unit: none — ordered pairs of grounds.
+    pub const RULES: u32 = 13;
+
     /// Every node this component writes a word into, in ascending id order.
     ///
     /// The component publishes exactly these and the frame requires exactly
     /// this many to carry a word, so a node added to the manifest and forgotten
-    /// here is a boot that says eight where the schema says nine rather than a
-    /// silence.
+    /// here is a boot that says eleven where the schema says twelve rather than
+    /// a silence.
     /// Unit: none — node ids.
-    pub const WRITTEN: [u32; 9] =
-        [FRAMES, EDITS, NODES, REFUSED, RUNG, FRAME, DEADLINE, PACING, DEGRADED];
+    pub const WRITTEN: [u32; 12] = [
+        FRAMES, EDITS, NODES, REFUSED, RUNG, FRAME, DEADLINE, PACING, DEGRADED, RESOLVES, NOTES,
+        RULES,
+    ];
 }
 
 /// Where the component's own half of the page starts.
@@ -513,6 +579,81 @@ pub mod reported {
     /// which is the race the frame latches, and a count of it is the only
     /// evidence that the latch is doing anything. Unit: waits.
     pub const HALTED: u32 = super::REPORT + 176;
+
+    // --- the resolved theme, `E3-B06d` --------------------------------------
+    //
+    // Five words about one call, and three of them have a node in
+    // [`super::node`] as well. The division is the one this module's own header
+    // draws rather than a saving: three of these five say what a reader of a
+    // *running machine* wants — it resolved its theme once, it made this many
+    // decisions on its author's behalf, and it owes this many rules — and those
+    // three are in the tree, where the frame requires them to equal what is
+    // here. The other two are about the **report's own integrity**: whether it
+    // truncated, and whether the resolver's own verdict agrees with the count.
+    // Those are evidence about this component rather than about the machine, and
+    // the board is where the frame checks this component.
+    //
+    // The first draft of this group put all five here and none in the tree, on
+    // the argument that widening `node::WRITTEN` costs a manifest, a schema and
+    // the frame's census. That argument is about what a diff costs and not about
+    // what a reader needs, which is the wrong question: `E3-B01k` had it and
+    // answered it the other way, and its exit sentence — *a boot reads them back
+    // out of the component's subtree rather than out of the serial log* — is
+    // what this group is written to satisfy.
+    //
+    // RFC 0013's *read, never delivered* applies to them exactly as it does to
+    // every other word above: the frame takes them out of memory it granted and
+    // this component is never asked.
+
+    /// How many times this component resolved a theme.
+    ///
+    /// **One, and the whole of why this word exists is that one is checkable
+    /// and *not recomputing* is not.** E3-B06d says a theme becomes values
+    /// *once per ground*; a compositor that re-resolved every frame answers
+    /// every colour question with the same colours and differs only in what it
+    /// spent, so a reader with no count has no reading that separates the two.
+    /// A boot that closes two frames and reads a one here has seen the
+    /// difference.
+    /// Unit: resolutions.
+    pub const RESOLVES: u32 = super::REPORT + 184;
+    /// How many decisions the resolver made that the theme's author did not.
+    ///
+    /// `f_interface::token::Report::len`. Zero under a theme this layer agrees
+    /// with, and every clamp RFC 0079 performs adds one — which is what makes
+    /// *clamped rather than refused* an arrangement somebody can audit instead
+    /// of a promise. Unit: notes.
+    pub const NOTES: u32 = super::REPORT + 192;
+    /// How many notes did not fit in the report and were counted instead.
+    ///
+    /// `f_interface::token::Report::dropped`, published beside [`NOTES`] rather
+    /// than folded into it: a report that truncated silently would be the one
+    /// place in that module where something happens and nothing says so, and a
+    /// component that published only the length would put the silence back.
+    /// Unit: notes.
+    pub const DROPPED: u32 = super::REPORT + 200;
+    /// One when the theme survived resolution untouched, zero otherwise.
+    ///
+    /// `f_interface::token::Report::is_clean`, which is *no notes and none
+    /// dropped*. It is published as well as the two counts above rather than
+    /// derived from them by the reader, because it is the resolver's own
+    /// judgement and a frame that recomputed it would be a second opinion about
+    /// somebody else's type. Unit: none — a flag.
+    pub const CLEAN: u32 = super::REPORT + 208;
+    /// How many ordered pairs of distinct grounds owe a rule between them.
+    ///
+    /// RFC 0079 places exactly one obligation on a compositor — *for any two
+    /// grounds, whether they part on their own, and the colour of the rule owed
+    /// when they do not* — and names the signal that it has gone unimplemented:
+    /// a compositor existing with no caller of `Resolved::boundary` in it. This
+    /// word is what that caller produced. Six is the maximum, because there are
+    /// three grounds and a ground over itself is not a boundary.
+    ///
+    /// **A count of rules owed and never of rules drawn.** Nothing in this build
+    /// draws anything; `E3-B02` owes the pixels, and RFC 0079 says the one
+    /// unacceptable outcome is a compositor that quietly reported having drawn a
+    /// rule it did not.
+    /// Unit: ordered pairs of grounds.
+    pub const RULES: u32 = super::REPORT + 216;
 }
 
 /// Why the component's loop ended.

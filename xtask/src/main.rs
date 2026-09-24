@@ -24096,6 +24096,21 @@ enum Route {
     /// to whoever is that somebody.
     /// E3-B06l, E3-D01, RFC 0077.
     Canvas,
+    /// `claims/0035`'s two numbers over the corpus in `claims/theme-corpus/`:
+    /// how many themes in a thousand survive `interface/src/token.rs` untouched,
+    /// and how much this layer decided per theme when they did not.
+    ///
+    /// The second route here that runs no subprocess, and for [`Route::Canvas`]'s
+    /// reason: the corpus-level refusal must be the *same* refusal
+    /// `f_interface::token`'s `census` gives an empty slice, so that the emptiness
+    /// of a directory and the emptiness of a corpus cannot become two conditions
+    /// that disagree. It differs from that route in one thing, and the thing is
+    /// RFC 0110: this corpus can be made of the resolver's own demonstration
+    /// themes, which would score beautifully, so the route compares every entry
+    /// against `f_interface::token::SHIPPED` by value and refuses the corpus when
+    /// one matches. That comparison is why those themes are published at all.
+    /// E3-D03, E3-B06m, RFC 0079, RFC 0110.
+    Theme,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -24252,11 +24267,16 @@ const ROUTES: &[(&str, Route)] = &[
     // half of this claim no commit in this repository can honestly supply.
     // E3-D01, RFC 0077.
     ("canvas-escape-rate", Route::Canvas),
-    // Still absent rather than late: `theme-refusals` needs a compositor and a
-    // corpus of themes nobody working on the module wrote, and `E3-B01` is what
-    // lands both. The refusal names its task, so the next question after the
-    // failure is answered by the failure. E3-D03, RFC 0079.
-    ("theme-refusals", Route::Unbuilt("E3-B01")),
+    // `theme-refusals` was the third `Route::Unbuilt` row and is no longer one,
+    // on `canvas-escape-rate`'s distinction: it has a workload, and the workload
+    // refuses. `E3-B06d` landed the compositor half — a component holding a
+    // `Resolved`, which is what made a theme reach anything that runs — and
+    // `E3-B06m` landed this route, `claims/theme-corpus/`, the entry format, the
+    // content hash and three refusals. What it could not land is the corpus, for
+    // the reason `claims/0034` records about its own: a theme written here was
+    // written by the tree that wrote the resolver, and a share over those is a
+    // share over the answers. E3-D03, RFC 0079, RFC 0110.
+    ("theme-refusals", Route::Theme),
 ];
 
 /// The registry file one claim name resolves to.
@@ -24383,6 +24403,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Compare => claim_compare_run(&text, &relative(&file))?,
         Route::Attest => claim_attest(&text, &relative(&file))?,
         Route::Canvas => claim_canvas(&text, &relative(&file))?,
+        Route::Theme => claim_theme(&text, &relative(&file))?,
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -25402,6 +25423,864 @@ mod canvas_corpus {
              off `pending` in the same diff. If this tree put them there, they are not a \
              corpus. {files:?}",
             files.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `claims/0035`: the two theme numbers, and the corpus they are taken over.
+// ---------------------------------------------------------------------------
+
+/// Where the corpus lives. `claims/theme-corpus/README.md` is addressed to a
+/// theme's author and says what an entry is.
+const THEME_CORPUS: &str = "claims/theme-corpus";
+
+/// One theme somebody wrote, as a corpus entry declares it.
+///
+/// Every field but the last is the *record* the two numbers are read beside, and
+/// `claims/0035`'s `[baseline]` is why there is a record at all: there is nothing
+/// to compare a share of clean themes against, so the corpus does the work a
+/// baseline usually does and a number whose corpus cannot be described is not
+/// this claim whatever it says.
+struct Written {
+    /// The entry this came out of.
+    file: String,
+    /// What the theme is, in its author's words.
+    named: String,
+    /// Where it can be read in its own system.
+    source: String,
+    /// Who wrote it.
+    written_by: String,
+    /// Whether its author is somebody not working on the resolver.
+    independent: bool,
+    /// What it was written against, and what it looked like here.
+    notes: String,
+    /// The theme itself, which is what gets resolved.
+    theme: f_interface::token::Theme,
+}
+
+/// Every `.toml` file in the corpus directory, sorted, as `(relative path,
+/// text)`.
+///
+/// A copy of [`canvas_corpus_files`] with one constant changed, and that is
+/// worth a sentence rather than a refactor: the two corpora are read the same
+/// way because reading a directory of entries is not the interesting part of
+/// either claim, and a shared helper taking a path would save six lines and put
+/// the two claims' readers behind one signature that neither of them owns. If a
+/// third corpus arrives, the three of them are the argument for the helper.
+///
+/// # Errors
+///
+/// The directory cannot be read, or one of its files cannot be.
+fn theme_corpus_files() -> Result<Vec<(String, String)>, String> {
+    let dir = root().join(THEME_CORPUS);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {THEME_CORPUS}/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        out.push((relative(&path), text));
+    }
+    Ok(out)
+}
+
+/// `#RRGGBB` as a colour, or the sentence saying why it is not one.
+///
+/// Uppercase or lowercase, and nothing else: no three-digit form, no named
+/// colours, no `rgb()`. A corpus entry is a transcription rather than a
+/// stylesheet, and every shorthand this accepted would be a second spelling of
+/// one value for a transcriber to get wrong in a new way.
+fn corpus_colour(spelled: &str) -> Result<f_interface::token::Rgb, String> {
+    let hex = spelled.trim();
+    let Some(digits) = hex.strip_prefix('#') else {
+        return Err(format!("`{hex}` is not a colour: it does not start with `#`"));
+    };
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("`{hex}` is not a colour: six hexadecimal digits after the `#`"));
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).unwrap_or(0);
+    Ok(f_interface::token::Rgb::new(byte(0), byte(2), byte(4)))
+}
+
+/// One corpus entry, or every sentence saying why it is not one.
+///
+/// The manifest reader parses it, for [`corpus_entry`]'s reason: a second TOML
+/// subset in this file would be a second reader of one grammar. What is checked
+/// here is this schema, and every key is *consumed* rather than looked up — a
+/// leftover key is a misspelt field, and an entry whose `independent = true` was
+/// silently read as absent is the mistake this whole route exists to make
+/// impossible.
+///
+/// # Why the font names are leaked
+///
+/// `f_interface::token::Theme::fonts` is `[&'static str; 3]`, which is the right
+/// shape in a `no_std` crate with no allocator in it and the wrong one for three
+/// names read out of a file at run time. This command reads a directory once and
+/// exits, so the names are leaked deliberately rather than worked around: the
+/// alternatives are a second `Theme`-shaped type in this file — a second
+/// definition of the thing being measured — or a corpus format with no fonts in
+/// it, which would make `Note::FontDropped` unreachable and quietly remove one of
+/// the three kinds of decision `claims/0035` counts.
+///
+/// # Errors
+///
+/// A syntax error, a missing or mistyped field, an unknown key, a colour that is
+/// not one, or a metric that is not a decimal integer.
+fn theme_entry(file: &str, text: &str) -> Result<Written, Vec<String>> {
+    let doc = manifest::parse(file, text)?;
+    let mut top = doc.top;
+    let mut tables = doc.tables;
+    let mut findings = Vec::new();
+
+    let string =
+        |top: &mut manifest::Table, key: &str, findings: &mut Vec<String>| match top.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Str(text), .. })
+                if !text.trim().is_empty() =>
+            {
+                text
+            }
+            Some(manifest::Entry { line, value: manifest::Value::Str(_) }) => {
+                findings.push(format!(
+                    "  {file}:{line}  `{key}` is empty. Every field here is the record the two \
+                     numbers are read beside, and an empty one is a row that says nothing while \
+                     looking answered"
+                ));
+                String::new()
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `{key}` is a string"));
+                String::new()
+            }
+            None => {
+                findings.push(format!("  {file}  `{key}` is required and missing"));
+                String::new()
+            }
+        };
+
+    let named = string(&mut top, "theme", &mut findings);
+    let source = string(&mut top, "source", &mut findings);
+    let written_by = string(&mut top, "written_by", &mut findings);
+    let notes = string(&mut top, "notes", &mut findings);
+
+    let independent = match top.remove("independent") {
+        Some(manifest::Entry { value: manifest::Value::Bool(flag), .. }) => flag,
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `independent` is `true` or `false`"));
+            false
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `independent` is required and missing. It has no default, and the \
+                 default it would have had is the one that admits a theme by the resolver's own \
+                 authors into a corpus whose whole purpose is to exclude one"
+            ));
+            false
+        }
+    };
+
+    for key in top.keys() {
+        findings.push(format!("  {file}  `{key}` is not a field of a theme entry"));
+    }
+    for name in doc.arrays.keys() {
+        findings.push(format!("  {file}  `[[{name}]]`: a theme entry has no arrays of tables"));
+    }
+
+    // The three tables, each emptied as it is read, so that a misspelt key in one
+    // of them is a finding rather than a default.
+    let mut section = |name: &str, findings: &mut Vec<String>| match tables.remove(name) {
+        Some((_, table)) => table,
+        None => {
+            findings.push(format!("  {file}  `[{name}]` is required and missing"));
+            manifest::Table::new()
+        }
+    };
+    let mut colours = section("colour", &mut findings);
+    let mut metrics = section("metric", &mut findings);
+    let mut fonts = section("font", &mut findings);
+    for name in tables.keys() {
+        findings.push(format!(
+            "  {file}  `[{name}]`: a theme entry has `[colour]`, `[metric]` and `[font]`"
+        ));
+    }
+
+    let mut colour = |key: &str, findings: &mut Vec<String>| match colours.remove(key) {
+        Some(manifest::Entry { line, value: manifest::Value::Str(spelled) }) => {
+            match corpus_colour(&spelled) {
+                Ok(rgb) => rgb,
+                Err(why) => {
+                    findings.push(format!("  {file}:{line}  `{key}`: {why}"));
+                    f_interface::token::Rgb::BLACK
+                }
+            }
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `{key}` is a `#RRGGBB` string"));
+            f_interface::token::Rgb::BLACK
+        }
+        None => {
+            findings.push(format!("  {file}  `[colour] {key}` is required and missing"));
+            f_interface::token::Rgb::BLACK
+        }
+    };
+    let surface_1 = colour("surface_one", &mut findings);
+    let surface_2 = colour("surface_two", &mut findings);
+    let field = colour("field", &mut findings);
+    let text_colour = colour("text", &mut findings);
+    let text_muted = colour("text_muted", &mut findings);
+    let emphasis = colour("emphasis", &mut findings);
+    let edge = colour("edge", &mut findings);
+    let field_text = colour("field_text", &mut findings);
+    let field_danger = colour("field_danger", &mut findings);
+    for key in colours.keys() {
+        findings.push(format!(
+            "  {file}  `[colour] {key}` is not one of the nine tokens a theme \
+             sets"
+        ));
+    }
+
+    // Quoted, and `claims/theme-corpus/README.md` says why at length: the grammar
+    // this tree reads has unsigned integers only, and a format that could not
+    // spell a negative metric would leave out exactly the themes this layer
+    // exists to correct — which moves the share towards the ceiling that means
+    // the apparatus is ceremony.
+    //
+    // The *keys* are spelled in words for a second and unrelated reason, and it
+    // is worth a comment because a reader will expect `text_size_pt_x10` to match
+    // the field it fills. `manifest::is_bare` admits lower-case letters and
+    // underscores and no digits, so `_x10` is not a key this subset can hold, and
+    // the choice was between widening a grammar four readers share for one
+    // corpus's convenience — a change to `docs/manifest.md` and every manifest in
+    // the tree — and spelling the scale as a word here. RFC 0004 asks for the
+    // scale in the name and not for a particular suffix, so the word carries it:
+    // `text_size_pt_tenths` says exactly what `text_size_pt_x10` says.
+    //
+    // *What would reverse it:* a second corpus that needs digits in a key, at
+    // which point widening `is_bare` is a change two callers want rather than a
+    // grammar bent for one.
+    let mut metric = |key: &str, findings: &mut Vec<String>| match metrics.remove(key) {
+        Some(manifest::Entry { line, value: manifest::Value::Str(spelled) }) => {
+            match spelled.trim().parse::<i32>() {
+                Ok(value) => value,
+                Err(_) => {
+                    findings.push(format!(
+                        "  {file}:{line}  `{key}`: `{spelled}` is not a decimal integer. It is \
+                         quoted because this tree's TOML subset reads no sign, not so that it \
+                         can hold something that is not a number"
+                    ));
+                    0
+                }
+            }
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!(
+                "  {file}:{line}  `{key}` is a quoted decimal integer, sign and all"
+            ));
+            0
+        }
+        None => {
+            findings.push(format!("  {file}  `[metric] {key}` is required and missing"));
+            0
+        }
+    };
+    let text_size_pt_x10 = metric("text_size_pt_tenths", &mut findings);
+    let density_x1000 = metric("density_per_thousand", &mut findings);
+    let space_em_x100 = metric("space_em_per_hundred", &mut findings);
+    let stroke_em_x100 = metric("stroke_em_per_hundred", &mut findings);
+    for key in metrics.keys() {
+        findings.push(format!(
+            "  {file}  `[metric] {key}` is not one of the four metrics a theme sets"
+        ));
+    }
+
+    let mut family = |key: &str, findings: &mut Vec<String>| match fonts.remove(key) {
+        Some(manifest::Entry { value: manifest::Value::Str(name), .. }) => {
+            // See this function's third heading. One `String` per named slot, for
+            // the life of a process that reads a directory and exits.
+            let leaked: &'static str = Box::leak(name.into_boxed_str());
+            leaked
+        }
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!(
+                "  {file}:{line}  `{key}` is a string, and an empty one is an unused slot"
+            ));
+            ""
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `[font] {key}` is required and missing. An unused slot is the empty \
+                 string, which is absence and is skipped without a note; a missing key is a \
+                 transcription that stopped early"
+            ));
+            ""
+        }
+    };
+    let first = family("first", &mut findings);
+    let second = family("second", &mut findings);
+    let third = family("third", &mut findings);
+    for key in fonts.keys() {
+        findings
+            .push(format!("  {file}  `[font] {key}`: the slots are `first`, `second`, `third`"));
+    }
+
+    if !findings.is_empty() {
+        return Err(findings);
+    }
+    Ok(Written {
+        file: file.to_string(),
+        named,
+        source,
+        written_by,
+        independent,
+        notes,
+        theme: f_interface::token::Theme {
+            surface_1,
+            surface_2,
+            field,
+            text: text_colour,
+            text_muted,
+            emphasis,
+            edge,
+            field_text,
+            field_danger,
+            text_size_pt_x10,
+            density_x1000,
+            space_em_x100,
+            stroke_em_x100,
+            fonts: [first, second, third],
+        },
+    })
+}
+
+/// What the corpus was, its content hash, the distribution of decisions, and the
+/// two numbers — or the refusal.
+///
+/// # The one thing this function must not grow
+///
+/// A second emptiness check. `claims/0035`'s `[workload]` asks for a share that
+/// cannot be reported over a corpus nobody assembled, and the way that is held is
+/// `f_interface::token`'s `census` answering `None`: the admitted themes are
+/// handed to it and there is no `if admitted.is_empty()` anywhere below. Two
+/// conditions meaning *empty* are two conditions that will one day disagree, and
+/// the direction they disagree in here is a flattering share retiring RFC 0079's
+/// first reversal condition on a day nobody has written a theme against it.
+/// `claims/canvas-corpus`' route has the same paragraph for the same reason.
+///
+/// # Why a demonstration theme refuses the corpus rather than being dropped
+///
+/// A non-independent entry is *excluded* — its author is known and the arithmetic
+/// can account for them. A demonstration theme is different in kind: it is this
+/// module's own output, so an entry carrying one was not transcribed from a theme
+/// somebody found, and the rest of the corpus is owed the same suspicion. Dropping
+/// it would leave a share over whatever else that afternoon produced.
+///
+/// # Errors
+///
+/// An entry that does not parse, an entry that is one of the resolver's own
+/// demonstration themes, or a corpus with no admitted theme in it.
+fn theme_report(files: &[(String, String)]) -> Result<String, String> {
+    use f_interface::token::{Note, census};
+
+    let mut written = Vec::new();
+    let mut findings = Vec::new();
+    for (file, text) in files {
+        match theme_entry(file, text) {
+            Ok(entry) => written.push(entry),
+            Err(why) => findings.extend(why),
+        }
+    }
+    if !findings.is_empty() {
+        return Err(format!(
+            "{} finding(s) against {THEME_CORPUS}/:\n{}\n\n\
+             A corpus entry that does not parse is neither counted as clean nor skipped. \
+             Either would move the share — one by answering for a theme nobody transcribed, \
+             the other by leaving an author out of the number in silence — and the share is \
+             the one thing in this claim nobody can check by reading it.\n\n\
+             {THEME_CORPUS}/README.md is what an entry is.",
+            findings.len(),
+            findings.join("\n")
+        ));
+    }
+
+    // By value, and the comparison is the whole of RFC 0110's reason for
+    // publishing that table: a name is something an entry writes and a value is
+    // not, so an entry that transcribed `hostile-flat` under another name is
+    // caught and an entry that merely *calls itself* something is not accused.
+    let mut borrowed = Vec::new();
+    for entry in &written {
+        for (name, shipped) in f_interface::token::SHIPPED {
+            if entry.theme == shipped {
+                borrowed
+                    .push(format!("  {}  is `{name}` from the resolver's own table", entry.file));
+            }
+        }
+    }
+    if !borrowed.is_empty() {
+        return Err(format!(
+            "{} entr(y/ies) in {THEME_CORPUS}/ are themes {} ships:\n{}\n\n\
+             Those seven are a demonstration and not a sample. Two of them are legal and five \
+             are hostile, every one was written to make an assertion about the resolver pass or \
+             fail, and a share of clean themes computed over them is a share computed over the \
+             answers — which is what `claims/0035`'s `[workload]` refuses in advance and in \
+             those words.\n\n\
+             One entry refuses the whole corpus rather than being dropped from it. An entry \
+             carrying one of these was not transcribed from a theme somebody found, so what \
+             else is in the directory is owed the same suspicion.\n\n\
+             RFC 0110 is why the comparison is possible at all: the table is published so that \
+             this refusal can be arithmetic rather than a sentence in a claim file.",
+            borrowed.len(),
+            THE_RESOLVER,
+            borrowed.join("\n")
+        ));
+    }
+
+    let mut record = format!("=== {THEME_CORPUS}/: what was counted ===\n\n");
+    if written.is_empty() {
+        record.push_str("  nothing: the corpus directory holds no entries\n\n");
+    }
+    // Four kinds, in the order `f_interface::token::Note` declares them, because
+    // `claims/0035`'s `[diagnosis]` cannot be followed without the breakdown: a
+    // red share is debugged by which kind of decision is piling up, and the claim
+    // says in so many words that the command has to print it.
+    let mut raised = 0u64;
+    let mut unreachable = 0u64;
+    let mut clamped = 0u64;
+    let mut dropped_font = 0u64;
+    let mut truncated = 0u64;
+    for entry in &written {
+        let (_, report) = f_interface::token::resolve(&entry.theme);
+        // The breakdown is over the **admitted** themes and the record is over
+        // all of them, which is not an inconsistency: the record answers *what
+        // was in the directory* and the breakdown is what a red share is debugged
+        // with, so a theme that reaches neither number may not reach the
+        // explanation of them either.
+        if entry.independent {
+            for note in report.iter() {
+                match note {
+                    Note::ContrastRaised { .. } => raised += 1,
+                    Note::ContrastUnreachable { .. } => unreachable += 1,
+                    Note::MetricClamped { .. } => clamped += 1,
+                    Note::FontDropped { .. } => dropped_font += 1,
+                }
+            }
+            truncated += u64::from(report.dropped());
+        }
+        record.push_str(&format!(
+            "  {}\n    theme        {}\n    source       {}\n    written by   {}\n    \
+             independent  {}\n    resolved     {}\n    notes        {}\n\n",
+            entry.file,
+            entry.named,
+            entry.source,
+            entry.written_by,
+            entry.independent,
+            if report.is_clean() {
+                "clean".to_string()
+            } else {
+                format!("{} decision(s), {} of which did not fit", report.len(), report.dropped())
+            },
+            entry.notes,
+        ));
+    }
+
+    let excluded = written.iter().filter(|entry| !entry.independent).count();
+    if excluded > 0 {
+        record.push_str(&format!(
+            "  {excluded} of the entries above declare `independent = false` and are not in\n  \
+             the corpus: a theme written by somebody working on the resolver is the resolver\n  \
+             grading its own homework, and it reaches neither number below.\n\n"
+        ));
+    }
+
+    // The content hash, which `claims/0035`'s `[workload]` asks for by name. Every
+    // entry the directory held, independent or not, and each one's *path* before
+    // its bytes: a theme excluded from the numbers still has to be accounted for,
+    // and a file renamed is a different corpus even when the bytes are the same.
+    let mut bytes = Vec::new();
+    for (file, text) in files {
+        bytes.extend_from_slice(file.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+    }
+    let hash = pack::hex(&f_hash::sha256(&bytes));
+
+    let admitted: Vec<f_interface::token::Theme> =
+        written.iter().filter(|entry| entry.independent).map(|entry| entry.theme).collect();
+    let Some((share, mean)) = census(&admitted) else {
+        return Err(format!(
+            "{record}the corpus holds no theme this run may count, so there is no share.\n\n\
+             This is `f_interface::token`'s `census` answering `None` for a corpus with no \
+             themes in it — the same answer it gives an empty slice, from the same function, \
+             which is what stops the emptiness of a directory and the emptiness of a corpus \
+             from ever being two conditions that disagree. A share reported here would say \
+             *this many themes in a thousand survive this layer untouched* about a corpus \
+             nobody assembled, in the one direction this metric can do damage quietly and \
+             reassuringly.\n\n\
+             What is owed is not code. It is themes written by somebody who is not working on \
+             {THE_RESOLVER}. `E3-B06m` built this route, the entry format, the refusal above \
+             and this one, and could not build that: everything in this repository was written \
+             by the tree that wrote the resolver. {THEME_CORPUS}/README.md is addressed to a \
+             theme's author.\n\n\
+             content hash of what was read: {hash}"
+        ));
+    };
+
+    record.push_str(&format!(
+        "=== the corpus ===\n\n\
+         content_hash {hash}\n\
+         themes {}\n\
+         themes_excluded {excluded}\n\n\
+         === what this layer decided ===\n\n\
+         contrast_raised {raised}\n\
+         contrast_unreachable {unreachable}\n\
+         metric_clamped {clamped}\n\
+         font_dropped {dropped_font}\n\
+         notes_truncated {truncated}\n\n\
+         === the two numbers ===\n\n\
+         themes_resolving_clean_per_thousand {share}\n\
+         decisions_per_theme_x100 {mean}\n\n",
+        admitted.len(),
+    ));
+    Ok(record)
+}
+
+/// `claims/0035`'s two numbers over the corpus, against the claim's own table.
+///
+/// The second route in [`ROUTES`] whose workload is not a subprocess, and for
+/// [`claim_canvas`]'s reason: the counting is one call to
+/// `f_interface::token`'s `census`, and a command spawned to make that call would
+/// be a second corpus reader that could come to disagree with this one about what
+/// the corpus was.
+///
+/// # Errors
+///
+/// [`theme_report`]'s refusals, or [`claim_verdict`]'s.
+fn claim_theme(claim: &str, file: &str) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+    let report = theme_report(&theme_corpus_files()?)?;
+    print!("{report}");
+    claim_verdict(
+        claim,
+        file,
+        &thresholds,
+        &report,
+        Vec::new(),
+        "A share under the floor means almost every theme is being corrected. Do not\n\
+         touch the contrast floors first: they are cited from WCAG 2.1 and nothing in\n\
+         this project has measured legibility. Read the four decision counts above —\n\
+         `metric_clamped` carrying the share is one of the four metric bounds or the\n\
+         operable minimum, every one of which RFC 0079 registers as a target with no\n\
+         measurement behind it, and `contrast_raised` piled on one ground is that\n\
+         RFC's first reversal condition arriving.\n\n\
+         A share over the ceiling is the other failure and the likelier one. The first\n\
+         question is about the corpus rather than the code: themes written against\n\
+         these floors are a measurement of this module against itself, and the record\n\
+         above is where a reader checks whose themes they were. If the corpus is\n\
+         genuinely independent and still nothing clamps, the honest finding is that\n\
+         the apparatus is ceremony — which is a finding, and is why the ceiling is\n\
+         written down.\n\n\
+         `notes_truncated` above zero is read before either: a report that dropped a\n\
+         note is the silence this module exists to remove, arriving by the back door.",
+    )
+}
+
+/// `claims/0035`'s halves: the format, the two refusals, and the arithmetic.
+///
+/// Unit tests and not a boot, because both numbers are `count`s under RFC 0069 —
+/// integers over declarations, identical on every machine — so a boot would add
+/// minutes and nothing else. What they are for is the half a green
+/// `cargo xtask claim theme-refusals` cannot show: the command refuses today, so
+/// every line that computes a share would otherwise be code nothing has run.
+#[cfg(test)]
+mod theme_corpus {
+    use super::*;
+
+    /// One corpus entry, as a `(file, text)` pair the way the directory reader
+    /// hands it over. `independent` and the theme are the arguments, because they
+    /// are what every test below varies.
+    fn entry(name: &str, independent: bool, body: &str) -> (String, String) {
+        (
+            format!("claims/theme-corpus/{name}.toml"),
+            format!(
+                "theme = \"{name}\"\n\
+                 source = \"https://example.invalid/{name}\"\n\
+                 written_by = \"somebody\"\n\
+                 independent = {independent}\n\
+                 notes = \"a theme\"\n\
+                 {body}",
+            ),
+        )
+    }
+
+    /// A theme this layer has nothing to do to, and **not** one of the seven the
+    /// resolver ships.
+    ///
+    /// It is `Theme::DEFAULT` with `text` one shade darker, and that shade is the
+    /// whole of what makes this fixture usable. The first draft of it was the
+    /// default's own values, and every test below refused it — correctly, and as
+    /// `a_corpus_of_the_resolvers_own_themes_is_refused` asks for, which is the
+    /// refusal working on its author before it works on anybody else. A darker ink
+    /// on the same grounds has strictly more contrast, so nothing about *clean*
+    /// rests on the difference; the difference is only what stops these tests
+    /// from being about the refusal instead of about the share.
+    const CLEAN: &str = "[colour]\n\
+                         surface_one = \"#FFFFFF\"\n\
+                         surface_two = \"#F2F2F2\"\n\
+                         field = \"#FFFFFF\"\n\
+                         text = \"#191919\"\n\
+                         text_muted = \"#595959\"\n\
+                         emphasis = \"#0B3D91\"\n\
+                         edge = \"#767676\"\n\
+                         field_text = \"#1A1A1A\"\n\
+                         field_danger = \"#A4000F\"\n\
+                         [metric]\n\
+                         text_size_pt_tenths = \"105\"\n\
+                         density_per_thousand = \"1000\"\n\
+                         space_em_per_hundred = \"50\"\n\
+                         stroke_em_per_hundred = \"6\"\n\
+                         [font]\n\
+                         first = \"Inter\"\n\
+                         second = \"Noto Sans\"\n\
+                         third = \"\"\n";
+
+    /// A theme this layer has three different things to do to, and none of them
+    /// is a colour this file had to compute: an ink on its own ground, a metric an
+    /// order of magnitude past its bound, and a font preference that is
+    /// punctuation.
+    const MOVED: &str = "[colour]\n\
+                         surface_one = \"#767676\"\n\
+                         surface_two = \"#F2F2F2\"\n\
+                         field = \"#FFFFFF\"\n\
+                         text = \"#767676\"\n\
+                         text_muted = \"#787878\"\n\
+                         emphasis = \"#0B3D91\"\n\
+                         edge = \"#767676\"\n\
+                         field_text = \"#1A1A1A\"\n\
+                         field_danger = \"#A4000F\"\n\
+                         [metric]\n\
+                         text_size_pt_tenths = \"50000\"\n\
+                         density_per_thousand = \"1000\"\n\
+                         space_em_per_hundred = \"-30\"\n\
+                         stroke_em_per_hundred = \"6\"\n\
+                         [font]\n\
+                         first = \"Inter\"\n\
+                         second = \"\"\n\
+                         third = \"--\"\n";
+
+    #[test]
+    fn an_empty_corpus_is_refused_rather_than_reported_as_a_clean_share() {
+        let why = theme_report(&[]).expect_err("an empty corpus has no share");
+        assert!(why.contains("no theme this run may count"), "{why}");
+        // The refusal must not be a number. A share printed here would be read as
+        // *this layer touches nothing*, which is the ceiling in `claims/0035`
+        // firing about a corpus nobody assembled.
+        assert!(!why.contains("themes_resolving_clean_per_thousand"), "{why}");
+        // And it says what is owed, because the next question after this failure
+        // is *what do I do*, and the answer is not code.
+        assert!(why.contains("addressed to a theme's author"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_nothing_but_self_written_themes_refuses_as_an_empty_one_does() {
+        let files = [entry("ours", false, CLEAN), entry("ours-too", false, MOVED)];
+        let why = theme_report(&files).expect_err("a corpus of self-written themes has no share");
+        assert!(why.contains("no theme this run may count"), "{why}");
+        // Read and recorded rather than silently ignored: the record is what
+        // `claims/0035`'s `[baseline]` asks for, and *what was counted* has to be
+        // answerable even when the answer is nothing.
+        assert!(why.contains("claims/theme-corpus/ours.toml"), "{why}");
+        assert!(why.contains("declare `independent = false`"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_the_resolvers_own_themes_is_refused() {
+        // `hostile-flat`, transcribed under a name of its own, which is why the
+        // comparison is by value: an entry that renamed it would otherwise be a
+        // corpus of the answers wearing a corpus's name.
+        let flat = "[colour]\n\
+                    surface_one = \"#008909\"\n\
+                    surface_two = \"#008909\"\n\
+                    field = \"#008909\"\n\
+                    text = \"#008909\"\n\
+                    text_muted = \"#0A8F12\"\n\
+                    emphasis = \"#008909\"\n\
+                    edge = \"#008909\"\n\
+                    field_text = \"#008909\"\n\
+                    field_danger = \"#B00020\"\n\
+                    [metric]\n\
+                    text_size_pt_tenths = \"105\"\n\
+                    density_per_thousand = \"1000\"\n\
+                    space_em_per_hundred = \"50\"\n\
+                    stroke_em_per_hundred = \"6\"\n\
+                    [font]\n\
+                    first = \"Inter\"\n\
+                    second = \"\"\n\
+                    third = \"\"\n";
+        let files = [entry("a-real-theme-honestly", true, flat), entry("another", true, MOVED)];
+        let why = theme_report(&files).expect_err("the resolver's own themes are not a corpus");
+        assert!(why.contains("is `hostile-flat` from the resolver's own table"), "{why}");
+        // The whole corpus and not the one entry: the second theme is a perfectly
+        // ordinary one and is refused with it, which is the decision this
+        // assertion exists to pin.
+        assert!(!why.contains("themes_resolving_clean_per_thousand"), "{why}");
+    }
+
+    #[test]
+    fn a_share_is_a_share_of_the_admitted_themes_and_the_mean_rounds_up() {
+        let files = [
+            entry("one", true, CLEAN),
+            entry("two", true, MOVED),
+            entry("three", true, CLEAN),
+            entry("not-ours", false, MOVED),
+        ];
+        let report = theme_report(&files).expect("three admitted themes are a corpus");
+        // Two clean of three admitted: 666 and not 750, which is what the fourth
+        // entry would make it if `independent = false` were a footnote rather than
+        // arithmetic. It is also 666 and not 667 — the share truncates, and
+        // `f_interface::token`'s `census` argues the direction.
+        assert!(report.contains("themes_resolving_clean_per_thousand 666"), "{report}");
+        assert!(report.contains("themes 3"), "{report}");
+        assert!(report.contains("themes_excluded 1"), "{report}");
+        // The breakdown `claims/0035`'s `[diagnosis]` cannot be followed without,
+        // and every kind of decision the moved theme makes is in it.
+        assert!(report.contains("metric_clamped 2"), "{report}");
+        assert!(report.contains("font_dropped 1"), "{report}");
+        assert!(report.contains("notes_truncated 0"), "{report}");
+        assert!(!report.contains("contrast_raised 0"), "{report}");
+        // Twelve decisions over the three admitted themes, and **not** over the
+        // four in the directory: the fourth is hostile too, so a mean that
+        // counted it would be 600 rather than 400 and `independent` would be a
+        // footnote rather than arithmetic. The rounding is not visible here —
+        // twelve over three divides — which is why it has a test of its own.
+        assert!(report.contains("decisions_per_theme_x100 400"), "{report}");
+        // The corpus says which corpus it was.
+        assert!(report.contains("content_hash "), "{report}");
+    }
+
+    #[test]
+    fn the_mean_rounds_up_rather_than_towards_the_bound_it_is_measured_against() {
+        // One decision across three themes: a third of a note each. The mean is
+        // 33.33 per theme times a hundred, and the two roundings differ by one.
+        //
+        // `decisions_per_theme_x100` is bounded **above** by `claims/0035`, so
+        // truncation moves every borderline corpus to the side that flatters this
+        // layer: a mean of 4.009 notes reported as 400 is a ceiling of 400 failing
+        // to fire on a corpus that met it. That is why the direction is a rule
+        // rather than whatever the division happened to do, and why a fixture
+        // where the division is exact — the one above — cannot hold it.
+        let one_dropped_font = CLEAN.replace("third = \"\"", "third = \"--\"");
+        let files = [
+            entry("one", true, CLEAN),
+            entry("two", true, CLEAN),
+            entry("three", true, &one_dropped_font),
+        ];
+        let report = theme_report(&files).expect("three admitted themes are a corpus");
+        assert!(report.contains("font_dropped 1"), "{report}");
+        assert!(
+            report.contains("decisions_per_theme_x100 34"),
+            "a third of a note a theme truncated to 33, which is the rounding this claim's              ceiling cannot afford: {report}"
+        );
+    }
+
+    #[test]
+    fn the_content_hash_moves_when_the_corpus_does() {
+        let one = theme_report(&[entry("one", true, CLEAN), entry("two", true, MOVED)])
+            .expect("two admitted themes");
+        let two = theme_report(&[entry("one", true, CLEAN), entry("three", true, MOVED)])
+            .expect("two admitted themes");
+        let hash = |report: &str| {
+            report
+                .lines()
+                .find_map(|line| line.strip_prefix("content_hash "))
+                .expect("the run records what it read")
+                .to_string()
+        };
+        // Same two themes, one renamed: the share is identical and the hash is
+        // not. That is what `claims/0035`'s `[workload]` asks the hash for — *no
+        // theme was added or removed after a run* decays quietly, and a hash over
+        // the values alone would not notice a file being swapped for another with
+        // the same palette.
+        assert_eq!(
+            hash(&one).len(),
+            64,
+            "a SHA-256 in hexadecimal, which is what the claim asks to be recorded"
+        );
+        assert_ne!(hash(&one), hash(&two), "two different corpora hashed the same");
+    }
+
+    #[test]
+    fn an_entry_that_does_not_parse_refuses_rather_than_counting_as_clean() {
+        let missing = entry("no-fonts", true, "[colour]\nsurface_one = \"#FFFFFF\"\n[metric]\n");
+        let why = theme_report(&[missing]).expect_err("half a theme is not a theme");
+        assert!(why.contains("`[colour] text` is required and missing"), "{why}");
+        assert!(why.contains("`[font]` is required and missing"), "{why}");
+        assert!(why.contains("neither counted as clean nor skipped"), "{why}");
+
+        let named = entry(
+            "not-a-colour",
+            true,
+            &CLEAN.replace("surface_one = \"#FFFFFF\"", "surface_one = \"white\""),
+        );
+        let why = theme_report(&[named]).expect_err("`white` is not a colour");
+        assert!(why.contains("it does not start with `#`"), "{why}");
+
+        // The three-digit form, which every stylesheet in the world accepts and
+        // this format does not: a shorthand is a second spelling of one value, and
+        // a transcription that may be written two ways can be got wrong in a new
+        // one. `corpus_colour` argues it where it refuses.
+        let short = entry(
+            "shorthand",
+            true,
+            &CLEAN.replace("surface_one = \"#FFFFFF\"", "surface_one = \"#FFF\""),
+        );
+        let why = theme_report(&[short]).expect_err("`#FFF` is a shorthand and not a colour");
+        assert!(why.contains("six hexadecimal digits"), "{why}");
+
+        let bad_metric = entry(
+            "not-a-number",
+            true,
+            &CLEAN.replace("density_per_thousand = \"1000\"", "density_per_thousand = \"1000%\""),
+        );
+        let why = theme_report(&[bad_metric]).expect_err("`1000%` is not an integer");
+        assert!(why.contains("is not a decimal integer"), "{why}");
+
+        let misspelt = entry("misspelt", true, &CLEAN.replace("text_muted =", "text_mutd ="));
+        let why = theme_report(&[misspelt]).expect_err("a misspelt key is not a default");
+        assert!(why.contains("`[colour] text_mutd` is not one of the nine"), "{why}");
+        assert!(why.contains("`[colour] text_muted` is required and missing"), "{why}");
+    }
+
+    #[test]
+    fn a_metric_may_be_negative_because_a_real_theme_may_ask_for_one() {
+        // The clause `claims/theme-corpus/README.md` argues at length: a format
+        // that could not spell this would leave out exactly the themes this layer
+        // exists to correct, and the share would drift towards the ceiling that
+        // means the apparatus is ceremony.
+        let written = entry(
+            "negative",
+            true,
+            &CLEAN.replace("space_em_per_hundred = \"50\"", "space_em_per_hundred = \"-30\""),
+        );
+        let report = theme_report(&[written]).expect("a negative metric is spellable");
+        assert!(report.contains("metric_clamped 1"), "{report}");
+        assert!(report.contains("themes_resolving_clean_per_thousand 0"), "{report}");
+    }
+
+    #[test]
+    fn the_corpus_directory_holds_no_entries_and_this_is_the_expected_ending() {
+        let files = theme_corpus_files().expect("the corpus directory is readable");
+        assert!(
+            files.is_empty(),
+            "there are themes in {THEME_CORPUS}/. If somebody outside this tree put them there, \
+             this assertion is the good news and should be replaced by a run: `cargo xtask claim \
+             theme-refusals`, and claims/0035's `status` moves off `pending` in the same diff. If \
+             this tree put them there, they are not a corpus. {files:?}",
         );
     }
 }

@@ -90,6 +90,12 @@ use f_compositor::routing::{self, at, bell, life, node, reported, stopped};
 use f_compositor::tree::reported_capabilities;
 use f_env::{Env, SeededEnv};
 use f_interface::backend::{Capability, select};
+// `E3-B06d`. The frame resolves the same theme the component was given and
+// compares what it published against what the resolver answered, rather than
+// against numbers written into this file. It holds no colour and computes no
+// contrast: the `Resolved` is a local, the boundary table is read rather than
+// measured, and `cargo xtask lint-token-pair` holds both of those of this file.
+use f_interface::token::{Resolved, Theme, Token, resolve};
 use f_ring::{Arena, Bell, Collector, Hardware, Mapping, Path, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
@@ -531,18 +537,18 @@ pub struct Report {
     /// is that every word is zero, which is [`Report::tree_before`], and what
     /// this number is for is saying that the fold moved.
     pub tree_blank: u64,
-    /// The nine words this component publishes, read before it ran a line.
+    /// The twelve words this component publishes, read before it ran a line.
     ///
-    /// Required to be zero, which is what makes the nine read afterwards
+    /// Required to be zero, which is what makes the twelve read afterwards
     /// evidence of anything: a component that published nothing into a tree
     /// somebody else had already filled in would be indistinguishable from one
     /// that published. Unit: as [`Report::tree`].
     pub tree_before: [u64; WORDS],
     /// The snapshot taken after it ended. Unit: none — a fold.
     pub tree_after: u64,
-    /// The nine words this component's manifest says it publishes, read back out
-    /// of the tree by id, in `node::WRITTEN`'s order: frames, edits, nodes,
-    /// refused, rung, frame, deadline, pacing, degraded.
+    /// The twelve words this component's manifest says it publishes, read back
+    /// out of the tree by id, in `node::WRITTEN`'s order: frames, edits, nodes,
+    /// refused, rung, frame, deadline, pacing, degraded, resolves, notes, rules.
     pub tree: [u64; WORDS],
     /// The deadline the client put on the last commit it submitted.
     ///
@@ -712,6 +718,42 @@ pub struct Board {
     /// which is derived from the other is the only arrangement in which their
     /// agreement says anything.
     pub halted: u64,
+
+    // --- the resolved theme, `E3-B06d` --------------------------------------
+    //
+    // Five words about one call the component made before it served anybody, and
+    // the reason the frame reads all five rather than the three that have a node
+    // is that two of them are about the *report* rather than about the machine.
+    // A component that had let its report truncate, or whose count of notes
+    // disagreed with the resolver's own verdict on the same report, would publish
+    // three plausible tree words and be caught by these two.
+    /// How many times it resolved a theme. One. Unit: none — resolutions.
+    pub resolves: u64,
+    /// How many decisions the resolver made that the theme's author did not.
+    ///
+    /// `f_interface::token::Report::len` as the component read it. Unit: none —
+    /// notes.
+    pub notes: u64,
+    /// How many notes did not fit in the report and were counted instead.
+    ///
+    /// `f_interface::token::Report::dropped`. Read beside [`Board::notes`] rather
+    /// than folded into it, because a truncated report is the one place in that
+    /// module where something happens and nothing says so, and a frame that read
+    /// only the length would put the silence back. Unit: none — notes.
+    pub dropped: u64,
+    /// One where the resolver judged the theme untouched, zero otherwise.
+    ///
+    /// `f_interface::token::Report::is_clean`, which is *no notes and none
+    /// dropped*. The frame reads it as well as the two counts and requires the
+    /// three to be consistent — a component reporting nought notes, nought
+    /// dropped and a dirty report has one of the three wrong, and no one of them
+    /// alone says which. Unit: none — a flag.
+    pub clean: u64,
+    /// How many ordered pairs of distinct grounds owe a rule between them.
+    ///
+    /// RFC 0079's one obligation on a compositor, counted. Unit: none — ordered
+    /// pairs of grounds.
+    pub rules: u64,
 }
 
 impl Board {
@@ -750,6 +792,11 @@ impl Board {
             late: board.read64(reported::LATE).ok()?,
             parked: board.read64(reported::PARKED).ok()?,
             halted: board.read64(reported::HALTED).ok()?,
+            resolves: board.read64(reported::RESOLVES).ok()?,
+            notes: board.read64(reported::NOTES).ok()?,
+            dropped: board.read64(reported::DROPPED).ok()?,
+            clean: board.read64(reported::CLEAN).ok()?,
+            rules: board.read64(reported::RULES).ok()?,
         })
     }
 }
@@ -1411,10 +1458,10 @@ impl Report {
             );
         }
         // In `node::WRITTEN`'s order, which is the order the tree was read back
-        // in. Nine words and not four: a board that agreed with a tree about the
-        // four old ones and diverged on the five new ones would be a component
-        // with two sets of numbers, which is the failure this comparison exists
-        // to catch and the reason every word on the board has a node beside it.
+        // in. Twelve words and not four: a board that agreed with a tree about
+        // the four old ones and diverged on the rest would be a component with
+        // two sets of numbers, which is the failure this comparison exists to
+        // catch and the reason every word on the board has a node beside it.
         let published = [
             self.board.frames,
             self.board.edits,
@@ -1425,6 +1472,9 @@ impl Report {
             self.board.deadline,
             self.board.estimate,
             self.board.degraded,
+            self.board.resolves,
+            self.board.notes,
+            self.board.rules,
         ];
         if self.tree != published {
             return Err(
@@ -1457,6 +1507,59 @@ impl Report {
                  costs here, or what was given up to fit",
             );
         }
+        // --- the resolved theme, `E3-B06d` ----------------------------------
+        //
+        // **The frame resolves the same theme and compares.** That is the shape
+        // of this clause and the reason it is not three equalities against
+        // numbers written here. The component holds a `Resolved` produced by
+        // `f_interface::token::resolve`; so does this function, from the same
+        // constant, after a second process on a second core has finished with
+        // it; and the two are required to agree. Three constants written into
+        // this file by hand would be a frame checking a component against what
+        // the author of the line believed on the afternoon they wrote it, which
+        // is what `submitted_deadline` exists to avoid one clause up: *a tree
+        // that agreed with the component's board and with nothing outside it
+        // would be two copies of one opinion.*
+        let (resolved, report) = resolve(&Theme::DEFAULT);
+        if self.tree[9] != 1 {
+            return Err(
+                "the component did not resolve its theme exactly once. RFC 0079 resolves an \
+                 ink once per ground, and a build that resolved per frame would answer every \
+                 colour question with the same colours and differ only in the sixty-four-step \
+                 clamp it spent per ink per ground per frame",
+            );
+        }
+        if self.tree[10] != report.len() as u64 {
+            return Err(
+                "the notes in the component's tree are not the notes resolving this theme \
+                 produces. The count is what makes RFC 0079's clamp auditable rather than \
+                 promised, so a component whose report disagrees with the resolver's has \
+                 either dropped a decision somebody was owed or invented one",
+            );
+        }
+        if self.board.dropped != 0 {
+            return Err(
+                "the component's report truncated: notes were counted instead of carried, \
+                 which is the one place in the resolver where something happens and nothing \
+                 says so",
+            );
+        }
+        if (self.board.clean != 0) != report.is_clean() || (self.tree[10] == 0) != report.is_clean()
+        {
+            return Err(
+                "the resolver's own verdict on the report and the count of notes in it do not \
+                 agree, so one of the two is being published without having been read",
+            );
+        }
+        if self.tree[11] != rules_owed(&resolved) {
+            return Err(
+                "the rules the component says it owes are not the ones this theme's grounds \
+                 owe. RFC 0079 hands a compositor exactly one obligation — draw the rule \
+                 between two grounds that do not part on their own — and a count that \
+                 disagrees with the resolver's own boundary table is that obligation read \
+                 wrongly or not at all",
+            );
+        }
         if self.tree_after == self.tree_blank {
             return Err(
                 "the tree is byte-identical to the one published before the component ran, so \
@@ -1465,6 +1568,41 @@ impl Report {
         }
         Ok(())
     }
+}
+
+/// How many ordered pairs of two *different* grounds do not part on their own.
+///
+/// # Why the frame counts this rather than asking
+///
+/// Because what is being checked is a count the *component* took, and a check
+/// that called the component's own function would be the component agreeing with
+/// itself. `f_compositor::tree` has a function of this shape and this file
+/// deliberately does not call it: two loops over one table are two opinions, and
+/// their agreeing is the whole of the evidence. It is the argument this file
+/// already makes about a `Board` against a published tree, one layer down.
+///
+/// Six and not nine: a ground over itself is one region rather than a boundary,
+/// and counting the diagonal would report that every theme in the tree owes
+/// three rules nobody can draw.
+///
+/// It reads the table `resolve` already filled and evaluates no contrast of its
+/// own. `cargo xtask lint-token-pair` is what holds that, and it holds it of this
+/// file for the same reason it holds it of the compositor: a colour remembered
+/// without the pair it was checked against is defensible against nothing.
+/// Unit: none — ordered pairs of grounds.
+fn rules_owed(resolved: &Resolved) -> u64 {
+    let mut owed = 0;
+    for over in Token::ALL {
+        for under in Token::ALL {
+            if !over.is_ground() || !under.is_ground() || over == under {
+                continue;
+            }
+            if !resolved.boundary(over, under).self_evident {
+                owed += 1;
+            }
+        }
+    }
+    owed
 }
 
 /// Print what happened, one subject per line.
@@ -1553,6 +1691,24 @@ pub fn report_lines(report: &Report) {
                 report.tree[6],
                 report.tree[7],
                 report.tree[8],
+            );
+            crate::kprintln!(
+                "  compositor    state tree resolves {}, notes {}, rules owed {}; the report \
+                 dropped {} and the resolver calls it {}",
+                report.tree[9],
+                report.tree[10],
+                report.tree[11],
+                report.board.dropped,
+                // Three answers and not two. A component that resolved nothing
+                // publishes a zero here, and *dirty* would be a sentence about a
+                // report that does not exist — which is exactly what the starved
+                // half prints, and what a reader of that half would have had to
+                // work out for themselves.
+                match (report.tree[9], report.board.clean) {
+                    (0, _) => "nothing, because no theme was resolved",
+                    (_, 0) => "dirty",
+                    _ => "clean",
+                },
             );
             crate::kprintln!(
                 "  compositor    wake {} ns = scanout {} - p99 {} over {} frame(s) - margin {}; \

@@ -37,6 +37,15 @@
 //! `E3-B01g`'s doorbell. What this file holds is the arithmetic and the
 //! bookkeeping, which is the half a host test can drive on both architectures.
 //!
+//! It also holds a [`Readability`] — `E3-B06d` — and that one *is* asked. Every
+//! colour question in this component goes through the table `Resolved` holds
+//! rather than through a value remembered here, which is RFC 0079's last
+//! reversal condition read from the side that would commit it; and this file
+//! evaluates no contrast and names no floor, which is the same clause read from
+//! the source by `cargo xtask lint-token-pair`. What is still missing is a
+//! *user* of the pairs: nothing draws, so nothing asks `Resolved::on` for a node
+//! yet. The projection that will is `E3-B06g`.
+//!
 //! # The rung is assigned in one place, and that is the whole of `E3-B02b`
 //!
 //! [`Held::new`] is the only line in this crate that writes [`Story::rung`], and
@@ -71,6 +80,7 @@
 use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal};
 use f_abi::{Cqe, Sqe, error, flags};
 use f_interface::backend::{Capabilities, Capability, select};
+use f_interface::token::{Report, Resolved, Theme, Token, resolve};
 use f_scene::arena::{Arena, Refusal as GraphRefusal};
 use f_scene::commit::{Batch, DELTAS_MAX, Offered, Refusal, Refused};
 
@@ -262,6 +272,158 @@ pub struct Story {
     pub decision: Decision,
 }
 
+/// A theme after `f_interface::token`'s resolver has had it, and the evidence
+/// that this component had it resolved once.
+///
+/// # Why the compositor holds this and not a palette
+///
+/// RFC 0079's last reversal condition — the one it says to watch first — is *a
+/// projection that stops asking `Resolved::on` for a pair and starts
+/// remembering an ink's colour*. It will not look like a reversal, it will look
+/// like a cache, and every test in `interface/src/token.rs` goes on passing
+/// while the interface is unreadable on the grounds nobody checked. So what is
+/// held is the whole nine-by-three table and the floors it was checked against,
+/// and the pair is asked for at the point of use. `cargo xtask lint-token-pair`
+/// is the negative half of the same clause, read out of this crate's own source:
+/// no type here may hold an `Rgb` without the `Token` it was checked against,
+/// and nothing here may name the arithmetic that produced one.
+///
+/// # What is not here, and it is the theme
+///
+/// **The `Theme` does not survive resolution.** It is an argument to
+/// [`Held::new`] and is not a field of anything in this crate, which is the
+/// cheapest way to make *once* structural rather than promised: a build that
+/// wanted to re-resolve per frame has nothing to re-resolve *from* and has to
+/// add a field to do it. That is the mutation
+/// `the_theme_is_resolved_once_however_many_frames_close` is written against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Readability {
+    /// The theme as values: every ink on every ground, the nine boundaries, the
+    /// metrics after their bounds and the font stack.
+    resolved: Resolved,
+    /// Every decision the resolver made on the theme author's behalf.
+    ///
+    /// **Held rather than consulted and dropped**, which is E3-B06d's third
+    /// clause. A compositor that resolved a theme and threw the notes away
+    /// would be a compositor that silently moved somebody's colours, and the
+    /// whole argument for clamping rather than refusing — RFC 0079 — rests on
+    /// every clamp being reported to somebody. `crate::component::report`
+    /// carries the shape of it out to the frame.
+    report: Report,
+    /// How many ordered pairs of two *different* grounds do not part on their
+    /// own, and therefore owe a rule between them.
+    ///
+    /// RFC 0079 puts exactly one obligation on the compositor and this is where
+    /// it is read: *`Resolved::boundary` says, for any two grounds, whether they
+    /// part on their own*, and the RFC's signal that the obligation has gone
+    /// unimplemented is `E3-B01` existing with no caller of `boundary` **in
+    /// it**. This is that caller. It counts rather than draws, because there is
+    /// no renderer in this build — `E3-B02` owes the pixels — and a component
+    /// that reported it had drawn a rule it had not is the one outcome that RFC
+    /// says would not be acceptable.
+    /// Unit: ordered pairs of grounds.
+    rules_owed: u64,
+    /// How many times this component resolved a theme.
+    ///
+    /// One, for the life of a run, and that is the clause with teeth. A
+    /// compositor that re-resolved every frame would answer every colour
+    /// question correctly and would still be wrong: resolution clamps six inks
+    /// on three grounds with a sixty-four-step scan behind each one —
+    /// `f_interface::token::CLAMP_STEPS` — and a frame budget is sixteen
+    /// milliseconds. A count is the only reading that separates the two builds,
+    /// which is why it is published beside the notes rather than left as a
+    /// property of the source.
+    /// Unit: resolutions.
+    resolves: u64,
+}
+
+impl Readability {
+    /// The theme as values.
+    ///
+    /// Shared and never exclusive, for [`Held::graph`]'s reason one type over:
+    /// a `&mut Resolved` handed out here would be a second place a colour could
+    /// be decided.
+    #[must_use]
+    pub const fn resolved(&self) -> &Resolved {
+        &self.resolved
+    }
+
+    /// Every decision the resolver made that the theme's author did not.
+    #[must_use]
+    pub const fn report(&self) -> &Report {
+        &self.report
+    }
+
+    /// How many ordered pairs of distinct grounds owe a rule between them.
+    /// Unit: ordered pairs of grounds.
+    #[must_use]
+    pub const fn rules_owed(&self) -> u64 {
+        self.rules_owed
+    }
+
+    /// How many times this component resolved a theme. Unit: resolutions.
+    #[must_use]
+    pub const fn resolves(&self) -> u64 {
+        self.resolves
+    }
+}
+
+/// Turn a theme into values, and count the turning.
+///
+/// **The only call to the resolver in this component**, which is what makes
+/// `Readability::resolves` mean anything at all.
+///
+/// # Why the counter is an argument rather than a field
+///
+/// Because a count kept beside the call can be forgotten by the edit that adds
+/// a second call, and a count threaded *through* the call cannot. The counter is
+/// the caller's `u64` and this function's first act is to increment it, so there
+/// is no way to resolve a theme in this crate without the number moving — a
+/// second call site has to decide what to pass, and every honest answer is the
+/// count it already had.
+///
+/// *What would reverse this:* a build in which a theme legitimately changes
+/// while the component runs — a caller switching to the dark theme is the
+/// obvious one — at which point *once* stops being the property and *once per
+/// theme* starts being it. The count is still the right reading; what changes is
+/// what a boot expects of it.
+fn resolve_counting(theme: &Theme, count: &mut u64) -> Readability {
+    *count += 1;
+    let (resolved, report) = resolve(theme);
+    let rules_owed = rules_owed(&resolved);
+    Readability { resolved, report, rules_owed, resolves: *count }
+}
+
+/// How many ordered pairs of two different grounds do not part on their own.
+///
+/// Six pairs and not nine: a ground over itself is not a boundary, it is one
+/// region, and counting the diagonal would report that every theme in the tree
+/// owes three rules nobody can draw.
+///
+/// It is a *lookup* and not a measurement — the resolver measures all nine
+/// ordered pairs once, and `Resolved::boundary` reads that table back — which is
+/// the whole reason this function is allowed to exist in a component that
+/// `cargo xtask lint-token-pair` forbids to evaluate a contrast.
+/// Unit: ordered pairs of grounds.
+fn rules_owed(resolved: &Resolved) -> u64 {
+    let mut owed = 0;
+    for over in Token::ALL {
+        for under in Token::ALL {
+            // Grounds only, and never a ground against itself. `is_ground` is
+            // asked rather than the three of them being listed here, so that a
+            // fourth ground added to the vocabulary is counted without anybody
+            // remembering this line.
+            if !over.is_ground() || !under.is_ground() || over == under {
+                continue;
+            }
+            if !resolved.boundary(over, under).self_evident {
+                owed += 1;
+            }
+        }
+    }
+    owed
+}
+
 /// The graph, the frame under construction, and the tally.
 ///
 /// # Why it borrows rather than owns
@@ -302,6 +464,15 @@ pub struct Held<'a> {
     pacing: Pacing,
     /// What the frame told this component.
     plan: Plan,
+    /// The theme as values, resolved once when this component started.
+    ///
+    /// Owned, for `Held::pacing`'s reason and with the same arithmetic behind
+    /// it: it is under a kibibyte and it is written at run time out of a theme,
+    /// so it is neither a constant the image has to carry nor a block the heap
+    /// has to hold. RFC 0100's rule is about what a component *materialises*,
+    /// and nothing here is materialised — `Readability` has no constant form in
+    /// this crate at all.
+    readability: Readability,
     /// What it publishes about the last frame it closed.
     story: Story,
     /// When the first delta of the frame under construction was staged.
@@ -314,20 +485,43 @@ pub struct Held<'a> {
 }
 
 impl<'a> Held<'a> {
-    /// A compositor holding an empty scene and no frame.
+    /// A compositor holding an empty scene, no frame, and a resolved theme.
     ///
     /// The two it is given are the caller's to place. `component.rs` puts them
     /// in the heap because that is the only place they fit; a host test puts
     /// them on its own stack, which is what makes this file testable without a
     /// frame under it.
+    ///
+    /// # The theme is taken and not kept
+    ///
+    /// `theme` is borrowed for the length of this call and no longer. What
+    /// survives it is a [`Readability`], which is the same theme with every ink
+    /// checked against every ground and every decision that took written down.
+    /// That is E3-B06d's *once per ground*, and holding the theme instead would
+    /// be holding the one thing from which the work could be done again.
+    ///
+    /// **Who chooses the theme is not this crate's question.** `component.rs`
+    /// hands over the resolver's own default because nothing in this build
+    /// carries a theme to a component yet; the day one does it arrives on the
+    /// routing page beside the pacing inputs and reaches this argument, and
+    /// nothing in this file changes.
     #[must_use]
-    pub fn new(graph: &'a mut Arena, batch: &'a mut Batch<FRAME_DELTAS_MAX>, plan: Plan) -> Self {
+    pub fn new(
+        graph: &'a mut Arena,
+        batch: &'a mut Batch<FRAME_DELTAS_MAX>,
+        plan: Plan,
+        theme: &Theme,
+    ) -> Self {
+        // Zero, because a compositor that has just started has resolved
+        // nothing, and `resolve_counting`'s first act is what makes it one.
+        let mut resolves = 0;
         Self {
             graph,
             batch,
             counters: Counters::ZERO,
             pacing: Pacing::ZERO,
             plan,
+            readability: resolve_counting(theme, &mut resolves),
             // The rung is decided **once**, here, and nothing below moves it.
             // RFC 0080's whole argument is that a compositor picks a rasteriser
             // when it starts and never promotes, and the cheapest way to keep
@@ -341,6 +535,18 @@ impl<'a> Held<'a> {
     #[must_use]
     pub const fn story(&self) -> &Story {
         &self.story
+    }
+
+    /// The theme as values, the notes resolving it produced, and how many times
+    /// that was done.
+    ///
+    /// Shared, and the whole of what a projection needs: every colour question
+    /// is `Resolved::on(ink, ground)` through here, which is RFC 0079's *ask for
+    /// the pair at the point of use* and the reason nothing in this crate holds
+    /// a colour of its own.
+    #[must_use]
+    pub const fn readability(&self) -> &Readability {
+        &self.readability
     }
 
     /// How many frames the pacing estimate is taken over. Unit: samples.
@@ -569,6 +775,7 @@ fn packed(refusal: &Refusal) -> (i32, u32) {
 mod tests {
     use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
     use f_interface::ladder::Rung;
+    use f_interface::token::{Metric, Note, Rgb};
 
     use super::*;
 
@@ -668,7 +875,7 @@ mod tests {
     fn a_frame_reaches_the_graph_only_when_its_commit_arrives() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         let entries = scene();
         for (entry, payload) in &entries[..5] {
@@ -694,7 +901,7 @@ mod tests {
     fn a_removal_takes_the_subtree_under_it_and_the_census_says_so() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         let entries = scene();
         for (entry, payload) in &entries[..6] {
@@ -720,7 +927,7 @@ mod tests {
     fn a_refused_entry_is_completed_and_poisons_the_frame_it_was_offered_to() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         // A create naming no node: the refusal a zeroed payload earns, which is
         // what a slot whose payload had not landed looks like.
@@ -774,7 +981,7 @@ mod tests {
     fn the_rung_is_the_one_the_reported_capabilities_select_and_is_decided_once() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         // Everything reported is the top rung, and the word is its index plus
         // one — so a build that published the index itself says 0, which is the
@@ -835,7 +1042,7 @@ mod tests {
         // is the clause the tree carries and the boot reads back.
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        let held = Held::new(&mut graph, &mut batch, hybrid_plan(), &Theme::DEFAULT);
         assert_eq!(held.story().rung, 2);
         assert_eq!(held.story().rung, Rung::ALL[1].index() as u64 + 1);
     }
@@ -844,7 +1051,7 @@ mod tests {
     fn an_overloaded_compositor_holds_the_rung_it_started_on() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        let mut held = Held::new(&mut graph, &mut batch, hybrid_plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         assert_eq!(held.story().rung, 2);
 
@@ -883,7 +1090,7 @@ mod tests {
     fn a_frame_costs_the_span_of_its_own_deltas_and_not_the_gap_before_it() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         // Six entries open and close the first frame, so the first tick is at
         // 100 and the commit is at 600: five steps, five hundred nanoseconds.
@@ -918,7 +1125,7 @@ mod tests {
     fn the_wake_time_is_the_scanout_less_the_estimate_less_the_margin() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         let entries = scene();
         for (entry, payload) in &entries[..6] {
@@ -938,7 +1145,7 @@ mod tests {
     fn a_frame_inside_its_deadline_degrades_nothing_and_one_outside_it_is_counted_late() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         // `scene()`'s commits carry deadlines of 900 and 901 nanoseconds. The
         // first frame closes at 600 with an estimate of 500, so 300 nanoseconds
@@ -970,7 +1177,7 @@ mod tests {
     fn a_frame_that_never_closed_leaves_no_sample_behind() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         // A create naming no node poisons the frame it was offered to, so the
         // commit after it is refused and the graph never changes. A refused
@@ -999,7 +1206,7 @@ mod tests {
     fn an_entry_that_asked_not_to_be_told_it_worked_is_not_told() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
         let mut clock = Ticking::new();
         let (mut entry, payload) = wire(
             Entry::CreateNode(CreateNode {
@@ -1019,5 +1226,158 @@ mod tests {
         let (mut bad, payload) = wire(Entry::RemoveNode(RemoveNode { node: NO_NODE }), 0);
         bad.flags = flags::NO_CQE;
         assert!(held.offer(&bad, &payload, clock.next()).is_some());
+    }
+
+    // --- the resolved theme, `E3-B06d` --------------------------------------
+
+    /// A theme this layer has to move, in three different ways at once.
+    ///
+    /// `text` is nearly the colour of the ground it is read on, so its pair
+    /// misses the text floor and the ink is clamped; the text size is an order
+    /// of magnitude past its bound, so the metric takes the bound; and the third
+    /// font preference is not a family name, so it is dropped from the stack. It
+    /// is hostile by *collapse and inflation together* because a report with one
+    /// kind of note in it would not show that the notes arrive from three
+    /// different producers.
+    ///
+    /// The third font preference is punctuation and no letter, which is the
+    /// clause `f_interface::token::NotAFamily::NoLetter` exists for: a stack
+    /// spelled to look populated and resolve to nothing. An *empty* slot would
+    /// not do — the resolver skips one without a note on purpose, because the
+    /// array is fixed and a theme naming one family has to spell the other two
+    /// somehow.
+    fn moved() -> Theme {
+        Theme {
+            text: Rgb::new(0xEE, 0xEE, 0xEE),
+            text_size_pt_x10: 50_000,
+            fonts: ["Inter", "Noto Sans", "--"],
+            ..Theme::DEFAULT
+        }
+    }
+
+    /// A theme whose raised ground parts from the ground under it on its own.
+    ///
+    /// `surface-2` at `#595959` on white is about seven to one, well over the
+    /// non-text floor, so those two need no rule between them. `field` is left
+    /// at white and therefore still needs one against `surface-1`, which is what
+    /// makes the count this theme produces a number rather than nought — a
+    /// fixture where every pair parted would pass a build that had stopped
+    /// asking.
+    fn parted() -> Theme {
+        Theme { surface_2: Rgb::new(0x59, 0x59, 0x59), ..Theme::DEFAULT }
+    }
+
+    #[test]
+    fn the_theme_is_resolved_once_however_many_frames_close() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        let mut clock = Ticking::new();
+        assert_eq!(
+            held.readability().resolves(),
+            1,
+            "a compositor that has started has resolved its theme exactly once"
+        );
+        for (entry, payload) in &scene() {
+            held.offer(entry, payload, clock.next());
+        }
+        // Two frames closed, and the count did not move. This is the clause with
+        // teeth: a build that re-resolved per frame would answer every colour
+        // question with the same colours and differ only in what it spent, so
+        // the count is the only reading that separates the two. The mutation it
+        // is written against is a second `resolve_counting` in `Held::close`,
+        // which makes this three.
+        assert_eq!(held.counters().frames, 2, "the fixture has to close frames to mean anything");
+        assert_eq!(
+            held.readability().resolves(),
+            1,
+            "the theme was resolved again after this component started"
+        );
+    }
+
+    #[test]
+    fn a_theme_this_layer_moved_is_carried_out_rather_than_dropped() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let held = Held::new(&mut graph, &mut batch, plan(), &moved());
+        let report = held.readability().report();
+
+        // Every hostility by name, because a report that merely said *something
+        // happened* would be the silence RFC 0079 spends the clamp-or-refuse
+        // rule avoiding.
+        assert!(
+            report.raised(Token::Text, Token::Surface1),
+            "an ink that missed its floor was moved and the compositor is not holding the note"
+        );
+        assert!(
+            report.clamped(Metric::TextSize),
+            "a metric took its bound and no note reached here"
+        );
+        assert!(
+            report.iter().any(|note| matches!(note, Note::FontDropped { .. })),
+            "a font preference was dropped and no note reached here"
+        );
+        assert_eq!(report.dropped(), 0, "a theme this small cannot overflow the report");
+        assert!(!report.is_clean(), "a report holding notes is not a clean one");
+
+        // And the control, which is what makes the assertions above evidence of
+        // a report reaching this component rather than of one being manufactured
+        // here: the layer's own default resolves with nothing to say.
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let agreed = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        assert!(
+            agreed.readability().report().is_clean(),
+            "the resolver's own default needed clamping, which is a floor or a bound being wrong"
+        );
+    }
+
+    #[test]
+    fn two_grounds_that_do_not_part_owe_a_rule_and_two_that_do_owe_none() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        // `Theme::DEFAULT`'s three grounds are white, near-white and white, so
+        // no ordered pair of two different ones parts on its own — six of six.
+        // That is RFC 0079's own example of why the boundary exists rather than
+        // a corner case: `#F2F2F2` on `#FFFFFF` is the ordinary idiom for a
+        // raised surface and it carries no contrast at all.
+        let held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        assert_eq!(held.readability().rules_owed(), 6);
+
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        // One ground moved far enough to part from one other, in both
+        // directions, leaving the pair that did not move. Four fewer, and the
+        // two that remain are `field` against `surface-1`.
+        let held = Held::new(&mut graph, &mut batch, plan(), &parted());
+        assert_eq!(held.readability().rules_owed(), 2);
+    }
+
+    #[test]
+    fn the_held_resolution_answers_per_ground_rather_than_with_one_colour() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        // `field` is as dark as `text` is, so the same ink cannot be the same
+        // colour on both grounds: on `surface-1` it clears the floor untouched,
+        // and on `field` it is a colour against itself and has to be moved.
+        let dark_field = Theme { field: Rgb::new(0x1A, 0x1A, 0x1A), ..Theme::DEFAULT };
+        let held = Held::new(&mut graph, &mut batch, plan(), &dark_field);
+        let resolved = held.readability().resolved();
+        // This is the reversal RFC 0079 says to watch first, asserted from the
+        // holding side: a compositor that remembered *the colour of text* rather
+        // than the table would hand back one answer here, and the interface
+        // would be unreadable on whichever ground nobody checked.
+        assert_ne!(
+            resolved.on(Token::Text, Token::Surface1),
+            resolved.on(Token::Text, Token::Field),
+            "one ink resolved to one colour on two grounds that cannot share one"
+        );
+        // Both pairs clear the floor the resolver was given, asked of the
+        // resolver rather than against a number written here: a floor spelled in
+        // this file would be this component deciding readability policy, which
+        // is the row `cargo xtask lint-token-pair` refuses `Floors` for.
+        let floor = held.readability().resolved().floors().text_x1000;
+        assert!(resolved.contrast_x1000(Token::Text, Token::Field) >= floor);
+        assert!(resolved.contrast_x1000(Token::Text, Token::Surface1) >= floor);
     }
 }

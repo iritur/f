@@ -1,17 +1,28 @@
-# Nothing here has been measured and nothing here can be, yet. There is no
-# compositor, no corpus of themes, and nobody outside this repository has written
-# a theme against this vocabulary at all — so the two numbers below are targets,
-# registered *before* the first theme arrives precisely so that they predate any
-# number somebody is later tempted by. `claims/0033` is the same shape and the
-# same reason; this file differs in owing a *ratio between two failures* rather
-# than a ladder of costs.
+# Nothing here has been measured, and the reason has narrowed twice. When this
+# file was written there was no compositor, no corpus and no route: the two
+# numbers below were targets registered *before* the first theme arrived,
+# precisely so that they predate any number somebody is later tempted by.
+# `claims/0033` is the same shape and the same reason; this file differs in owing
+# a *ratio between two failures* rather than a ladder of costs.
 #
-# RFC 0079 is what put it here and `E3-B01` is what moves it to `tracked`: the
-# compositor is the first thing to hold a `Resolved`, and a corpus of themes is
-# the first thing that could be run through `resolve` in bulk. Until then the
-# reproduction command has nothing to run, and should say so rather than exiting
-# zero on a measurement nobody took — `Route::Unbuilt`, the variant the registry
-# gained for exactly this.
+# `E3-B06d` closed the first half on 2026-09-24: `user/compositor` holds a
+# `Resolved`, resolved once when it starts, with the `Report` carried out into
+# its own state tree rather than dropped — so a theme now reaches something that
+# runs, and the frame resolves the same theme and requires the two to agree.
+# `E3-B06m` closed the second: `cargo xtask claim theme-refusals` reads
+# `claims/theme-corpus/`, resolves every theme in it, records the content hash of
+# what it read, prints the distribution of decisions, and **refuses**. This row is
+# no longer `Route::Unbuilt` — *nothing here could have run* — it is a
+# measurement apparatus standing ready in front of an empty room, which is a
+# different and more useful state and the one that could be reached honestly here.
+#
+# What stands between this file and a number is one thing and it is not code: a
+# corpus of themes written by somebody who is not working on
+# `interface/src/token.rs`. Nobody in this repository is that somebody, and a
+# corpus assembled here would have scored well and established nothing.
+# `claims/0034` recorded exactly that conclusion about its own corpus one wave
+# earlier, and two people reaching it independently is worth more than either
+# reaching it alone.
 #
 # **Why this claim is a share and not a count.** Because the count alone cannot
 # be read. A layer that clamps nothing in any theme is not doing anything —
@@ -67,6 +78,23 @@ stopped being something anybody reads — `NOTES_MAX` is thirty-two, and a layer
 routinely producing eight times what a reader will actually look at has made its
 own honesty useless.
 
+**The rounding is part of both numbers, and the two differ.** The mean rounds
+**up** and the share **truncates**. The mean is bounded above only, so truncation
+would move every borderline corpus to the side that flatters this layer — 4.009
+notes a theme reported as 400 is a ceiling of 400 failing to fire on a corpus
+that met it — and rounding away from a bound is the rule `claims/0034` applies to
+its own rate for the same reason. The share is bounded at both ends, so no
+direction is uniformly flattering: truncation makes the floor a shade stricter and
+the ceiling a shade more lenient, by under one part in a thousand whatever the
+corpus size, which is below the resolution either bound was argued at. Both rules
+live in `f_interface::token`'s `census` and nowhere else.
+
+**A decision that did not fit in the report is still a decision.** The mean counts
+`Report::len()` plus `Report::dropped()`, because counting only what fitted would
+make this number *fall* as the layer got noisier, which is backwards for a row
+bounded above. `dropped` is printed beside the mean rather than folded into it,
+which is what the `[diagnosis]` row asks to be read first.
+
 **What this claim does not say.** It says nothing about whether the clamped
 themes still look like themselves. `a_clamp_is_not_a_collapse` asserts that one
 saturated colour survives one hostile theme, which is a test and not a
@@ -91,12 +119,17 @@ section  = "12"
 notes    = "Section 12 owns it because section 12 is where a token stops being a name, and these two numbers are the only evidence that stopping it there was worth doing. The seam worth watching: that section argues the mechanism and this claim prices the policy, so a change to the floors or the bounds in `interface/src/token.rs` moves this claim without moving a word of that document — which is the direction that goes unnoticed. RFC 0079 is the decision behind both, and its *What would reverse this* names this row as where the metric bounds would be seen to be wrong first."
 
 [workload]
-# There is no workload. This row names the file holding the thing that would be
-# measured, because a `[workload] path` pointing at nothing is worse than one
-# pointing at the closest true thing and saying so.
-path    = "interface/src/token.rs"
-themes  = 0
-notes   = "What stands in, said before the number rather than after it: nothing. `interface/src/token.rs` carries five themes — two legal and three hostile — and they are a demonstration rather than a sample; a share computed over them would be a share computed over the answers. A corpus is legitimate under exactly two conditions, and both are decided by `E3-B01` rather than here: every theme in it was written by somebody who was not working on this module, and no theme was added or removed after a run. The second decays quietly, so whatever assembles the corpus has to record its content hash beside the number, in the manner `claims/0033` reserves a row for its scene."
+# The workload is the corpus, and the corpus is empty. This row named
+# `interface/src/token.rs` while there was nowhere for a corpus to go, on the
+# argument that a `[workload] path` pointing at nothing is worse than one pointing
+# at the closest true thing; there is somewhere now, and the directory being empty
+# is a fact a reader checks in one `ls` rather than a claim this file has to make.
+#
+# There is deliberately no `themes` count here any more. A number that has to be
+# edited by hand on the day a theme arrives is the number that goes stale, and the
+# run prints what it counted every time it refuses.
+path    = "claims/theme-corpus"
+notes   = "An empty directory with a README in it, and the README is addressed to a theme's author who is not us. What stands in: nothing, and `interface/src/token.rs`'s own themes are emphatically not a stand-in. That module carries **seven** — two legal and five hostile, one per attack it answers — and they are a demonstration rather than a sample; a share computed over them is a share computed over the answers. Since `E3-B06m` that is arithmetic rather than a sentence in this file: the seven are published as `SHIPPED` by RFC 0110, and the route compares every corpus entry against all seven **by value** and refuses the whole corpus when one matches, because a name is something an entry writes and a value is not. A corpus is legitimate under exactly two conditions. Every theme in it was written by somebody who was not working on this module — enforced by `independent`, which has no default and which excludes an entry from both numbers rather than footnoting it. And no theme was added or removed after a run: that one decays quietly, so the route records the SHA-256 of every entry it read, path and then bytes in sorted order, beside the numbers, in the manner `claims/0033` reserves a row for its scene. The format is `claims/theme-corpus/README.md`; the route is `theme_report` in `xtask/src/main.rs`; the arithmetic and the emptiness rule are one function, `f_interface::token`'s `census`, for the reason `claims/0034` gives about `canvas_census` — two conditions meaning *empty* are two conditions that will one day disagree, and the direction they disagree in here is a flattering share over a corpus nobody assembled."
 
 [metrics]
 # Two rows, both integers with the scale in the name — RFC 0004. A share is per
@@ -125,4 +158,5 @@ command = "cargo xtask claim theme-refusals"
 themes_resolving_clean_per_thousand_under = "almost every theme is being corrected. Do not touch the contrast floors first: they are cited from WCAG 2.1 and this project has measured nothing that would justify moving them. Read `decisions_per_theme_x100` and then the distribution of note kinds — the command has to print that breakdown or this row cannot be debugged at all. If the notes are `MetricClamped`, the fault is one of the four metric bounds or the operable minimum, which RFC 0079 registers as targets with nothing behind them and which this row is the first evidence about. If they are `ContrastRaised` and piled on one ground, that is RFC 0079's first reversal condition arriving — a band of grounds the floor cannot serve — and the answer is that RFC being superseded rather than this bound being widened"
 themes_resolving_clean_per_thousand_over = "the layer is not doing anything, and the first question is about the corpus rather than the code. If the themes were written against this vocabulary, the share is a measurement of this module against itself and means nothing; the workload row says what a legitimate corpus is. If the corpus is genuinely independent and still nothing clamps, then the floors sit below every palette anybody writes and the honest finding is that the apparatus is ceremony — which is a finding, and is why this ceiling exists"
 decisions_per_theme_x100_over = "a `Report` nobody reads. Check `Report::dropped()` across the corpus before anything else: a non-zero dropped count means `NOTES_MAX` is being reached, and a truncated report is the silence this module exists to remove arriving by the back door. If dropped is zero and the mean is still high, read whether the notes are spread across the eighteen pairs or concentrated on a few — spread means the bounds are wrong, concentrated means the corpus has a common idiom this layer refuses, and the second is a design conversation rather than a threshold"
-a_threshold_no_workload_printed = "the run reached no number at all, which in this epoch is the expected ending rather than a fault: there is no compositor, no corpus, and `Route::Unbuilt` refuses rather than exiting zero precisely so that this cannot be mistaken for a green measurement. It becomes a real finding on the day `E3-B01` lands a compositor and a corpus, and what to read then is which of the two is missing"
+an_empty_corpus = "the expected ending in this epoch rather than a fault, and the only ending this command has ever had. `claims/theme-corpus/` holds no entries, `f_interface::token`'s `census` answers `None` for a corpus with no themes in it, and the route refuses rather than exiting zero. This row used to read `a_threshold_no_workload_printed` and described `Route::Unbuilt` — the state where nothing could have run — and it predicted that a compositor and a corpus would turn that into a number. Half of that happened: `E3-B06d` landed the compositor, `E3-B06m` landed the route, and what is left is the corpus refusing itself for being empty. That is the run working rather than failing. What would make it a real finding: entries in that directory and this refusal anyway, which means every entry declares `independent = false` and the corpus is a collection by people working on the module, wearing a corpus's name"
+a_corpus_of_the_modules_own_themes = "the route named an entry as one of the seven in `SHIPPED` and refused the whole corpus. This is not a threshold and it is not debugged by moving one. An entry carrying `hostile-flat` or `Theme::DEFAULT` was not transcribed from a theme somebody found — it was assembled from what was to hand — so the finding is about how the corpus was gathered, and the rest of the directory is owed the same suspicion. RFC 0110 is why the refusal can name which theme it was"

@@ -63,6 +63,7 @@
 use f_abi::control::{is_notice, notice};
 use f_abi::scene::PAYLOAD_BYTES;
 use f_abi::{Cqe, door, feature, state};
+use f_interface::token::Theme;
 use f_ring::adopt::{Adopted, Client, Server};
 use f_ring::device::Window;
 use f_ring::heap::Heap;
@@ -161,7 +162,33 @@ fn serve() -> ! {
     // `crate::tree::Held`'s own comment says why: a kibibyte of zeroes is a
     // `memset` and costs the image nothing, which is RFC 0100's rule read the
     // way round that permits something rather than the way round that refuses.
-    let mut held = Held::new(&mut graph, &mut batch, parts.plan);
+    //
+    // **The theme, resolved here and never again.** `Theme::DEFAULT` is a
+    // constant of the resolver rather than something this component chose, and
+    // it is spelled here because nothing in this build carries a theme *to* a
+    // component: there is no word for one on the routing page and no ring that
+    // delivers one. The day either exists, the theme arrives beside the pacing
+    // inputs in `laid_out` and reaches this argument, and `crate::tree` does not
+    // change — which is the whole reason `Held::new` takes a theme instead of
+    // reading one.
+    //
+    // What it cost the image is **6 136 bytes, measured rather than estimated**:
+    // `cargo xtask component` reports 23 240 for this component without this
+    // argument and the three tree words that go with it, and 29 376 with them,
+    // against the 65 536 the frame maps and that command refuses past. The
+    // difference is the resolver's two hundred and fifty-six-entry sRGB transfer
+    // table and the clamp that walks it, and it is *not* a `Resolved` sitting in
+    // `.rodata` — RFC 0100's rule is about the constants a component
+    // materialises, and what this line produces is written at run time out of a
+    // theme rather than copied out of the image.
+    //
+    // It is worth a number rather than a reassurance because the number is what a
+    // future reader needs: a second theme resolved here would cost the table
+    // nothing and the `Resolved` about a kibibyte of stack, while a *constant*
+    // `Resolved` — the obvious optimisation, a palette baked at compile time —
+    // would cost the image the whole of it and would be RFC 0079's first reversal
+    // condition wearing a performance argument.
+    let mut held = Held::new(&mut graph, &mut batch, parts.plan, &Theme::DEFAULT);
 
     let mut route = Route { control: parts.control, told: false };
     let mut idle: u64 = 0;
@@ -426,6 +453,20 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::MARGIN, story.decision.margin_nanos);
         let _ = board.write64(reported::WAKE, story.decision.wake_nanos);
         let _ = board.write64(reported::SAMPLES, held.samples());
+        // The resolved theme, `E3-B06d`. **The report is carried out rather than
+        // consulted and dropped**, which is the clause: a compositor that
+        // resolved a theme, moved somebody's colours to clear a floor and then
+        // threw away the record of having done it would make RFC 0079's
+        // *clamped, not refused* an arrangement nobody could audit. Five words
+        // where a flag would do, for `reported::WAKE`'s reason — a reader handed
+        // only *clean* cannot tell a theme this layer agreed with from a report
+        // whose notes all fell out of the bottom.
+        let readability = held.readability();
+        let _ = board.write64(reported::RESOLVES, readability.resolves());
+        let _ = board.write64(reported::NOTES, readability.report().len() as u64);
+        let _ = board.write64(reported::DROPPED, u64::from(readability.report().dropped()));
+        let _ = board.write64(reported::CLEAN, u64::from(readability.report().is_clean()));
+        let _ = board.write64(reported::RULES, readability.rules_owed());
         let _ = board.write64(reported::DEGRADED, story.degraded);
         let _ = board.write64(reported::RUNG, story.rung);
         let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
@@ -466,12 +507,14 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
     let story = held.story();
     let mut written = 0;
     // In `node::WRITTEN`'s order, and the frame reads it back in that order.
-    // Nine words and not four: the five `E3-B01k` adds are the frame's story —
+    // Twelve words and not four: the five `E3-B01k` adds are the frame's story —
     // the rung it is drawing with, the frame it last closed, the deadline that
     // frame carried, what a frame costs on this machine, and what was given up
-    // to fit. Every one of them is a value this component already holds, which
-    // is RFC 0013's rule: a node with no counter behind it would be a
-    // serialisation with extra steps wearing RFC 0013's name.
+    // to fit — and the three `E3-B06d` adds are the resolved theme. Every one of
+    // them is a value this component already holds, which is RFC 0013's rule: a
+    // node with no counter behind it would be a serialisation with extra steps
+    // wearing RFC 0013's name.
+    let readability = held.readability();
     for (id, value) in [
         (node::FRAMES, counters.frames),
         (node::EDITS, counters.edits),
@@ -482,6 +525,13 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
         (node::DEADLINE, story.deadline_nanos),
         (node::PACING, story.decision.estimate_nanos),
         (node::DEGRADED, story.degraded),
+        // The resolved theme, `E3-B06d`. `len()` is a `usize` in a crate that
+        // compiles for two architectures, so the widening is written rather than
+        // inferred; on neither of them can a count bounded by
+        // `f_interface::token::NOTES_MAX` fail to fit.
+        (node::RESOLVES, readability.resolves()),
+        (node::NOTES, readability.report().len() as u64),
+        (node::RULES, readability.rules_owed()),
     ] {
         if tree.set(id, value) {
             written += 1;
