@@ -1353,6 +1353,58 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the ninth wave, 2026-09-24.** Forty-three `[x]`, one `[>]`, fifty
+`[ ]`. The wave opened by **closing a marker from outside the container**:
+`E3-B01h`'s unmet clause was *on both architectures*, and the
+`tests (AArch64, weak memory)` job ran the test at `cbd58e8` and reported it
+green, with `git diff` proving nothing in the tree was edited to get one. Then
+three lines closed and one more moved. **The compositor holds a `Resolved`** and
+the frame resolves the same theme and compares against it with its own loop
+rather than the component's, which is what made a miscount a red boot. **The
+frame trace is a fixed-width record in `abi/` with no clock in it**, and its
+sibling found that the *implicit wait* this tree had refused for one wave was
+still expressible — not for want of a check, but because the decoded value was
+still a builder, so a driver could add a wait to a client's record with nothing
+wrong with it. The shaping cache is `[>]` on `E3-B01h`'s own terms: its counts
+are literals and the arm runner is the second observer.
+
+***The epoch's hardware blockers left the `needs:` lists on 2026-09-24, and none
+of them became a debt.*** Roughly half of E3's open lines cannot be realised on
+any machine this project can reach, and until today that fact existed only inside
+`needs:` lists — where a reader meeting the epoch does not look and
+`cargo xtask todo` cannot explain it. `docs/TECHNICAL-DEBT.md` now carries the
+**machines**: two blockers it did not have — a **GPU**, the machine `E5-D01`
+names and nobody owns, and an **energy meter**, which no line in this file
+acquires at all — and a machine-first section naming, per line, what waits on
+which purchase and what half a virtual machine can close. **Nothing was narrowed
+and no register row was added**, which is RFC 0109's decision rather than its
+omission: a row under RFC 0093 is the receipt for a clause a *closing* task gave
+up, and every line in question is `[ ]`. `E0-P05` earns `[~]` owed on
+*everything it needs from this tree exists*; `E3-P02` needs seventeen subtasks
+and six parts, and marking it owed would record a line as closed-out on which
+nobody has begun. `lint-debt` stays at eighteen rows against eighteen
+declarations and agrees with that reading rather than obstructing it. The
+register's own reversal is per machine, and the arithmetic is the point: **no
+single purchase moves that section by more than half.**
+
+**Three readings of this file came out of that sweep and all three are acted on
+here, because a graph defect left in a report is a graph defect.** `E3-B02j` —
+*the scene `claims/0033` deliberately did not fix* — waited on rung 4 of a GPU,
+and its exit is a choice, an argument and a content hash; RFC 0088 settled that
+a decide task's exit may not require its own implementation, and waiting for
+every rung to draw the scene would have made it a scene chosen for
+**reachability**, which is what the line exists to refuse. It is available now.
+`E3-P02` waited on the whole of `E3-P01`, which reaches the rig's *method
+document*, while its own sibling `E3-B04` had already rejected that reasoning in
+writing — *a document is not a prerequisite for a measurement* — so it now names
+the injector and the calibration. And **`E5-P06` is new**: six E3 lines named
+`E5-D01` where they meant a GPU, and that line's exit is a bill of materials, so
+the day it closed five rasteriser stages would have ranked as available with no
+machine in the building. `E0-D10` and `E0-P18` are the same pair handled
+correctly one epoch earlier, and `E0-P18`'s own note already names the decay: a
+machine that is only a name in prose cannot be obtained. This is the second
+time.
+
 **After the eighth wave, 2026-09-23.** Thirty-nine `[x]`, one `[>]`, fifty-four
 `[ ]`. `E3-B03b` closed on the foundation RFC 0108 laid the day before: a boot
 loads a typeface out of the blob store by content address and refuses one the
@@ -1595,28 +1647,29 @@ thing it will measure would be blocking a ruler on a wall.
   *needs:* E3-B01e, E3-B02b
 - [ ] **E3-B02d** `L` Rung 1, stage 2 — coarse raster: segments binned into 16x16 tiles, a prefix scan computing per-tile counts and offsets.
   *exit:* counts and offsets are bit-identical to a serial reference over the scene corpus, and the test names the scan as the one stage that requires cooperating lanes — which is what rung 2 exists for.
-  *needs:* E3-B02c, E5-D01
+  *needs:* E3-B02c, E5-D01, E5-P06
 - [ ] **E3-B02e** `L` Rung 1, stage 3 — fine raster: exact coverage per pixel, composited in linear space, effects as stages of this pass rather than as separate targets.
   *exit:* one scene renders to a reference within an integer tolerance, and the number of intermediate targets a scene forces is counted and is zero for scenes that do not genuinely need one.
-  *needs:* E3-B02d, E5-D01
+  *needs:* E3-B02d, E5-D01, E5-P06
 - [ ] **E3-B02f** `M` Rung 1, stage 4 — present: the swapchain write, or the surface handed straight to the display controller when one surface covers the screen.
   *exit:* a trace shows no composition at all in the single-surface case, and the present path costs one MMIO write rather than a system call.
-  *needs:* E3-B02e, E5-D01, E1-B04 (the backend this rides, named here rather than on the parent, because this is the line that touches it)
+  *needs:* E3-B02e, E5-D01, E5-P06, E1-B04 (the backend this rides, named here rather than on the parent, because this is the line that touches it)
 - [ ] **E3-B02g** `L` Rung 2, the hybrid: the scan moves to the CPU and everything else stays on the GPU.
   *exit:* on a backend whose scan is refused, the hybrid's image is *identical* to rung 1's on the same scene — identical, because `Fidelity::Exact` is a claim this test either keeps or breaks.
-  *needs:* E3-B02f, E5-D01
+  *needs:* E3-B02f, E5-D01, E5-P06
 - [ ] **E3-B02h** `L` Rung 3, the all-CPU raster.
   *exit:* identical again, with the backend absent rather than degraded; the control is that the test runs on a machine with no GPU at all, which is every machine this project currently has.
   *needs:* E3-B02e (the image it must match is rung 1's, which is why this line waits on a machine its own test does not use)
 - [ ] **E3-B02i** `L` Rung 4, the tessellating floor.
   *exit:* an image that is *not* identical, whose difference from rung 1 is bounded and characterised, and which no consumer treats as exact — `Fidelity::Approximate` is read by something rather than merely declared.
-  *needs:* E3-B02h, E5-D01 (RFC 0080's fourth column for this rung is *a fixed-function triangle pipeline*, which is a machine and not a fallback from one)
+  *needs:* E3-B02h, E5-D01, E5-P06 (RFC 0080's fourth column for this rung is *a fixed-function triangle pipeline*, which is a machine and not a fallback from one)
 - [ ] **E3-B02j** `M` The scene `claims/0033` deliberately did not fix.
+  **Freed from rung 4 on 2026-09-24, and the reading is RFC 0088's.** This line used to name `E3-B02i` — the tessellating floor, on a GPU nobody here owns — and its own exit is a choice, an argument and a content hash. RFC 0088 settled that a decide task's exit may not require its own implementation; this is a build line whose exit is a decision, and it is the same shape. Waiting on rung 4 also inverted the exit's point: a scene chosen once every rung can already draw it is a scene chosen for **reachability**, which is the choice this line exists to refuse. It is available now, which is when a scene chosen for representativeness is worth choosing. Found by reading the epoch's graph for its hardware blockers rather than by trying to start the line.
   *exit:* one scene chosen and named in the claim's `[workload]` row with its content hash, and the argument recorded is representativeness rather than reachability — the claim says a scene chosen this early is chosen to be reachable, and this is the task that must not.
-  *needs:* E3-B02i
+  *needs:* E3-B02a (the vocabulary a scene is described in, which is this line's whole dependency now)
 - [ ] **E3-B02k** `M` Four rungs, one scene, one machine, one invocation: `claims/0033` moves off `pending`.
   *exit:* `cargo xtask claim raster-cost-per-rung` produces four numbers from one build instead of the `Route::Unbuilt("E3-B02")` refusal it produces today, or refuses again and names which rung would not build; a run that rebuilt between rungs is refused by the harness rather than averaged.
-  *needs:* E3-B02j, E0-D10, E0-P18, E5-D01
+  *needs:* E3-B02j, E0-D10, E0-P18, E5-D01, E5-P06
 - [ ] **E3-B02l** `S` The ladder exercised on hardware that cannot run the top rung — moved here from the parent's exit, because it is an observation about a machine with no GPU.
   *exit:* a machine reporting no compute shaders starts at rung 3 and renders, recorded with the machine named; the descent is one step, and no total order over hardware is computed anywhere, because none exists.
   *needs:* E3-B02b, E3-B02h
@@ -1876,7 +1929,8 @@ thing it will measure would be blocking a ruler on a wall.
   *needs:* E3-P01e
 - [ ] **E3-P02** `M` The latency claim: input to photon, p99 under 14 ms, on the rig, under load.
   *exit:* recorded as gating, with the load stated and any firmware-jitter observation reported beside it.
-  *needs:* E3-P01, E3-B01 (something between the input and the photon to measure), E0-D10, E0-P18 (a time gates on `runner-class-A` with F on it, and every timing claim in the registry is `pending` until both exist)
+  **The blanket rig dependency was narrowed on 2026-09-24, on its own sibling's argument.** This line used to name `E3-P01`, which reaches `E3-P01f` — *the method, documented well enough for a third party to build one* — so a measurement waited on a document. `E3-B04`'s own `needs:` comment already rejected exactly that reasoning for itself: *a document is not a prerequisite for a measurement*. One sibling corrected the blanket parent and the other did not. It now names the two rig lines a number actually needs: the injector, because nothing presses the key without one, and the calibration, because an uncalibrated rig produces a figure with no error bar. `E3-P01e`'s own `needs:` does not name `E3-P01b`, which is why both are named here rather than one standing for the other.
+  *needs:* E3-P01b, E3-P01e (the injector and the calibration, rather than the whole of `E3-P01` and its method document), E3-B01 (something between the input and the photon to measure), E0-D10, E0-P18 (a time gates on `runner-class-A` with F on it, and every timing claim in the registry is `pending` until both exist)
 - [ ] **E3-P03** `M` The parity claim: a derived scene graph costs no more than an authored one.
   *exit:* published either way. A negative result invalidates the pillar and is reported as such rather than re-scoped.
   *needs:* E3-B06, E0-D10, E0-P18 ("within noise" is a time on a named machine, and TCG's noise is the emulator's)
@@ -2020,6 +2074,11 @@ plan is most likely to need its fallback.*
   *needs:* E5-B07
 - [ ] **E5-P05** `L` Long soak: a week of continuous mixed workload with the state tree recorded throughout.
   *exit:* no drift in memory, latency distribution or zone utilisation across the week; the recording is a release artifact.
+- [ ] **E5-P06** `M` Obtain the machine `E5-D01` specifies, and boot F on it.
+  Found on 2026-09-24 by reading E3's graph for its hardware blockers rather than by trying to start a line. **Six lines in E3 name `E5-D01` where they mean a GPU** — `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` and `E3-B02k` — and `E5-D01`'s exit is *a bill of materials anyone can buy*. A bill of materials is not a workstation, so the day that line closes `cargo xtask todo` would rank five rasteriser stages as available with no machine in the building.
+  **`E0-D10` and `E0-P18` are the same shape handled correctly**, and this is that pair one epoch later: the specification half is `E5-D01`, the machine half is this line, and the dependents name both, so the wait is on a boot rather than on a file. `E0-P18`'s own note states the decay in one sentence — *a machine that is only a name in prose cannot be obtained* — and records it as the reason that line exists at all. This is the second time, which is why the register in `docs/TECHNICAL-DEBT.md` now carries the machine instead of leaving it inside a `needs:` list.
+  *exit:* the workstation `E5-D01` names exists, `M0 ok` reaches a serial console from it with the procedure that produced it, and the log records what that machine reported about its own graphics hardware — because the six lines waiting on this one wait on a GPU and not on a chassis.
+  *needs:* E5-D01
 
 ### Release
 

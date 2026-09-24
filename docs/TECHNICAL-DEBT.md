@@ -92,7 +92,11 @@ than a reason to record a debt nobody owes.
 
 ## The blockers
 
-Six things stand behind every row below.
+Six things stand behind every row below, and two more stand behind E3 and
+behind no row at all. They are here because a blocker a reader cannot see is a
+blocker nobody has costed. Why they carry no row is RFC 0109 and the section
+after the register: a row is the receipt for a clause a closing task gave up,
+and every E3 line these two block is `[ ]`.
 
 ### `runner-class-A` — a machine nobody has bought
 
@@ -202,6 +206,48 @@ a staleness check so the figures cannot quietly become a quotation.
 Three exits name a person who has not read this tree doing something and
 timing it. No commit can be that person.
 
+### A GPU — a machine `E5-D01` names and nobody owns
+
+`E3-B02`'s ladder has four rungs and this tree can observe one stage of the top
+one. `E3-B02c` closed on 2026-09-23 saying so in its own title — *the only stage
+of rung 1 observable without a GPU* — and the three stages after it, the two
+lower rungs that must match rung 1's image, and `claims/0033`'s four numbers all
+want compute shaders that no machine here reports.
+
+**What stands where `claims/runner-class-A.md` stands for the other machine is
+`E5-D01`, and it is not the same kind of thing.** That line is *name the
+machine*, and its exit is *a bill of materials anyone can buy* — a document. It
+has no second clause saying the machine exists, so it has nothing to narrow and
+no row, and six E3 lines name it in `needs:` as though closing it would unblock
+them. `E0-D10` is the same shape handled correctly: the specification half is met
+and the **machine half** is the row below. Until `E5-D01` grows that half, the
+honest statement is that six E3 lines wait on a purchase nobody has specified and
+the graph says they wait on a file.
+
+It is **not** one of RFC 0093's four categories. It is a purchase, like `E0-D10`
+and like the rig, and the precedent for treating a purchase as a blocker is
+already on this page.
+
+### An energy meter — an instrument with no line in the file
+
+`E3-P07` is *energy per frame, external meter rather than a model*, and **nothing
+in `TODO.md` acquires a meter**. Its `needs:` names `E3-B01`, `E0-D10` and
+`E1-D06`; not one of the three is an instrument. There is no bill of materials,
+no `claims/` directory in the shape `claims/photodiode-rig/` uses, no error bar
+stated before a part exists, and no task whose exit is *a meter*.
+
+Four exits depend on it — `E3-P07`, `E5-P03`, `E5-P04` and E7's watts-per-token
+line — and `bench/src/lib.rs` carries `joules_per_op` as `Metric::Unavailable`
+with RFC 0006 naming `E5-B07` as the day it stops being. `E0-D10` and `E3-P01a`
+both exist because a purchase with no specification is a blocker nobody has
+costed. This is that, un-prevented, and naming it is the only thing this page can
+do about it.
+
+**The half that could be had from here is the one the rig already has.**
+`E3-P01a` is a bill of materials and `E3-P01c` is an error bar *stated as an
+integer before any measurement is taken* — neither needs a part. Nobody has
+written either for the meter and no line asks for them.
+
 ## The register
 
 Each row: the clause as it stood, the task it came out of, the blocker, what a
@@ -230,6 +276,143 @@ virtual machine did establish in its place, and what would close it.
 | `E2-P10` | the whole exit — *“bytes written to the device per byte written by the application, against a tuned Linux filesystem on the same device”* | the same host `E2-B02` waits for | `claims/0016` registered `pending` with both thresholds **stated before any measurement existed**, so they cannot be written to fit a first run; the modelled ratio 1.1336 with its decomposition; and `claims/baselines/linux-6.x-tuned-zoned/` — nine files with a `verify.sh` that cross-checks four workload dials against `zone/tests/cycle.rs`, so the baseline is configuration in the tree rather than prose that decays. | The same host, a guest booted on it, and the two pieces of plumbing `E2-B02`'s row names. |
 | `E2-R01` | *“the rollback demonstration runs from the release image on a stranger’s machine”* | a person | Three of the release's six contents, each described as narrowly as it was built: `cargo xtask rollback` with `claims/0030` gating and running nightly; `cargo xtask swap` and `cargo xtask blk swapped`/`abandoned` for the live swap, with what a failed swap still costs a client written down rather than omitted; and `cargo xtask attest` with `claims/0032` and RFC 0012's five residuals named, so *attestation* cannot appear in release notes without them. | Somebody who is not this project running the command on a machine this project has never seen. The long plan calls this shape `G4` and puts it deliberately outside the team's control — the same condition `E1-R01` and `E0-R02` carry. |
 | `E0-P06` | *“recorded with the reservation conditions from RFC 0007 named in the claim”* — the whole exit | `runner-class-A`, and `tsc-deadline` | 60 000 ticks at 1 kHz with a log-bucketed distribution, p50/p99/p99.9 and an exact maximum; every boot runs a hundred ticks of the same path. The measured path is the APIC one-shot, because TCG refuses `tsc-deadline` by name. | The same machine, with all four RFC 0007 components carved by F’s own frame and each recorded as obtained by partition or by exclusion. |
+
+## E3 is open, so its blockers are machines and not yet rows
+
+RFC 0109 is the decision behind this section and the argument for it being a
+section rather than twenty-three rows. In one sentence: **a row is the receipt
+for a clause a closing task gave up, and every line below is `[ ]`.** Four E3
+exits have been narrowed — `E3-B01b`, `E3-B01d`, `E3-B04c` and `E3-B07a` — and
+all four were narrowed by RFC 0084 on a *measurement*, not on a machine, which is
+a fifth thing this page does not hold and RFC 0084 does.
+
+What follows is therefore **not the register**. It is the answer to *which
+machine, for which line*, which is the fact a `needs:` list hides.
+
+### Which machine, and what waits on it
+
+Read the third column as the interesting one. A line there is blocked by a line
+that is blocked by hardware, and that is not the same as being blocked by
+hardware: some of them have most of their work available and a reader flattening
+the two kinds together would never find out.
+
+| The machine | Lines that wait on it directly | Lines that wait on one of those | What closes it |
+|---|---|---|---|
+| A GPU — the machine `E5-D01` has not named | `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` | `E3-B02h`, `E3-B02j`, `E3-B02k`, `E3-B02l`, `E3-B03g`, `E3-B03h`, `E3-B03j`, `E3-B06g`, and behind the last of those `E3-B06`, `E3-P04` and `E3-P05` | A part reporting compute shaders, and **`E5-P06`** — added on 2026-09-24 for this reading: *obtain the machine `E5-D01` specifies, and boot F on it*, on `E0-D10` and `E0-P18`'s precedent, with all five direct dependents naming both lines so the wait is on a boot rather than on a bill of materials. Five lines directly, eight behind them: the largest single purchase in the epoch. |
+| `runner-class-A`, with F booted on it | `E3-B05d`, `E3-B07`, `E3-B07f`, `E3-P03` | `E3-P06` behind `E3-B07`; `E3-P02` needs it as well as the rig | The row for `E0-D10` above, and `E0-P18`. `bench/src/lib.rs` refuses a recording outside a recording class and that refusal is the harness working. |
+| `photodiode-rig` | `E3-P01b`, `E3-P01e` | `E3-P01`, `E3-P01f`, `E3-P02`, `E3-B04`, `E3-R01` | The section above. Three of `E3-P01`'s six subtasks closed on the near side of the purchase and three did not. |
+| An energy meter | `E3-P07` | none in E3 | A specification first — nothing in the file buys one, and there is no line to close. |
+
+### What the virtual machine can close, line by line
+
+Where a half exists it is named concretely enough to start on tomorrow. Where
+there is none, that is said rather than padded.
+
+- **`E3-B02h`** — rung 3, the all-CPU raster. **The half is almost all of it.**
+  `scene/src/encode.rs` produces the linear encoding today, and binning, the
+  scan and coverage are integer CPU arithmetic that needs no backend. What is
+  missing is the *reference*: the exit says *identical again*, and the image it
+  must be identical to is rung 1's. Its own `needs:` comment states the shape —
+  *this line waits on a machine its own test does not use*. A rung-3 raster
+  checked bit-exactly against a serial reference of its own is buildable and is
+  strictly weaker, because `Fidelity::Exact` is a claim relating two
+  implementations and a test comparing rung 3 to its own model does not make it.
+  **That narrowing is charged to this line and is not taken here** — RFC 0084
+  puts an exit edit in `intent/0012-the-interface/spec.md`, and the clause moves
+  into the table above in the diff that closes the line.
+- **`E3-B02l`** — the ladder on hardware that cannot run the top rung. Its
+  subject is *a machine reporting no compute shaders*, which is every machine
+  here, so it is on this page **only** because it waits on `E3-B02h`, and it
+  comes off the day `E3-B02h` renders at all. Nothing about it is a purchase.
+- **`E3-B02j`** — the scene `claims/0033` did not fix. Its exit is a choice, an
+  argument and a content hash: three things a text editor produces. It waits on
+  `E3-B02i`, which is rung 4 on a GPU. RFC 0088 settled that a decide task's exit
+  may not require its implementation, and this is a build line whose exit is a
+  decision. Naming that is this page's business; moving the `needs:` is
+  `intent/`'s.
+- **`E3-B02k`** — four rungs, one scene, one machine, one invocation. **No half.**
+  A GPU and a recording environment, both, and `cargo xtask claim
+  raster-cost-per-rung` refuses with `Route::Unbuilt("E3-B02")` until there is
+  one.
+- **`E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i`** — the halves are the
+  serial sides and the plumbing. `E3-B02d` is *bit-identical to a serial
+  reference*, and the serial reference is half of that test. `E3-B02f`'s *one MMIO
+  write rather than a system call* is a property of a submission path
+  `abi/src/sync.rs` already carries the shape of. What none of them has is an
+  image or a device, which is the other half of each.
+- **`E3-B03g`, `E3-B03h`** — the atlas and the size rule. *Residency bounded by a
+  named maximum* and *no atlas entry regenerated for unchanged text, counted per
+  frame* are counts over a CPU-side cache; *the rule is data a test reads rather
+  than a constant in a branch* is a table. Both end in pixels that come from
+  `E3-B02e`.
+- **`E3-B03j`** — how a rendering is compared to a reference. *An integer over
+  pixels with a stated tolerance, and a deliberate one-pixel regression goes red*
+  needs two images and no GPU. It waits on `E3-B02e` because the rendering is
+  rung 1's; the day rung 3 renders, the comparison has a producer. This is the
+  strongest half on this page.
+- **`E3-B06g`** — the display projection. The exhaustive `Role` match with no
+  wildcard arm is a compile-time property available today. *Reaches pixels* is
+  not, and `E3-B06`, `E3-P04` and `E3-P05` are behind it.
+- **`E3-B05d`, `E3-B07`, `E3-B07f`, `E3-P03`** — the halves are what `E0-P05`'s
+  row above already records for a time: a workload that runs, thresholds written
+  before any number exists, and a distribution drawn. `E3-B05d`'s own sentence is
+  the one to keep — *a bound whose evidence is a central tendency is not a bound*
+  — and a maximum is the hardest thing to take in an emulator.
+- **`E3-P01b`, `E3-P01e`, `E3-P01f`, `E3-P01`, `E3-P02`** — the photodiode
+  section above is the full account and nothing here changes it. A distribution
+  is a set of measurements of a real actuator, a calibration is a reproduction of
+  a known number, and a document containing a calibration result contains one.
+- **`E3-P07`** — **no half at all, and no line that would make one.** See the
+  meter's section above: what could be had from here is a bill of materials and a
+  stated error bar, which is what `E3-P01a` and `E3-P01c` are for the rig, and
+  nobody has written either.
+- **`E3-B04`** — a full frame of latency removed, *shown as before-and-after on
+  the rig*. No half; the measurement is the exit. Its `needs:` names `E3-P01e`
+  rather than `E3-P01`, on the argument that a document is not a prerequisite for
+  a measurement — which is right, and `E3-P02`'s blanket `needs: E3-P01` does not
+  carry it.
+- **`E3-R01`** — release 0.4, carrying `E3-P02`'s claim, `E3-P04`'s demonstration
+  and `E3-P03`'s parity result. Two of the three are on this page, so there is no
+  half until they have one.
+
+### What is deliberately not on this list
+
+**The fourteen open E3 lines that are reachable here.** `E3-B05b`, `E3-B05c`,
+`E3-B05f`, `E3-B06d`, `E3-B06e`, `E3-B06f`, `E3-B06h`, `E3-B06m`, `E3-B07c`,
+`E3-B07d`, `E3-B07g`, `E3-B01i`, `E3-B01j` and `E3-B03c` name no machine. They
+are written out because `cargo xtask lint-debt` compares two sets of task ids and
+cannot know whether a clause was reachable — only a reader can, and a reader
+needs the list to refuse a row with.
+
+**`E3-B06l`.** Its exit wants *a corpus of applications ported by somebody who
+did not write the vocabulary*, which reads like a second person and is not one.
+RFC 0110 settled the same requirement for `claims/0035` with no purchase: a
+corpus is a directory with recorded provenance, and the module's own
+demonstration is refused **by value** so a flattering share is not expressible.
+What `E3-B06l` lacks is applications, of which this tree has one declaration.
+Work, not debt — with a residue: RFC 0110's by-value refusal has no analogue for
+an application, so independence there is provenance a reader trusts rather than
+arithmetic a run performs.
+
+**`E3-P04`, `E3-P05`, `E3-P06`.** Derived only, through `E3-B06` and `E3-B07`, and
+listed in the table above so a reader does not count them twice. `E3-P05`'s own
+exit is a property of the tree's tests, already narrowed by RFC 0091, and what it
+waits for is a UI suite rather than a machine. Unstarted work behind unstarted
+work is not debt at either depth.
+
+**The AArch64 gap, which closed.** `E3-B01h` held at `[>]` for two days on *on
+both architectures* and `E3-B04a` on *one time source in the whole path*; both
+closed, and neither closed on hardware — the first on the
+`tests (AArch64, weak memory)` job at commit `cbd58e8`, the second on
+`cargo xtask input deliver`. A gap paid by a runner that already existed is the
+opposite of a row on this page, and the two should not be written in one voice.
+
+**The four exits RFC 0084 narrowed.** `E3-B01b`'s quantifier, `E3-B01d`'s *model
+of* a ring, `E3-B04c`'s maximum over a named corpus, and `E3-B07a`'s constructor
+— since superseded in part by RFC 0102's seventh opcode. Each lost a clause and
+none of them lost it to a machine: they lost sentences that could not survive
+their own first measurement. RFC 0093's four categories do not include that, and
+RFC 0084 is where they are recorded.
 
 ## How this page is kept honest
 
