@@ -268,7 +268,7 @@ order. It moves to `E3-B02l`, where it can be observed the day rung 3 exists.
   *needs:* E3-B02h, E5-D01 (RFC 0080's fourth column for this rung is *a fixed-function triangle pipeline*, which is a machine and not a fallback from one)
 - [ ] **E3-B02j** `M` The scene `claims/0033` deliberately did not fix.
   *exit:* one scene chosen and named in the claim's `[workload]` row with its content hash, and the argument recorded is representativeness rather than reachability — the claim says a scene chosen this early is chosen to be reachable, and this is the task that must not.
-  *needs:* E3-B02i
+  *needs:* E3-B02a (**corrected on 2026-09-24.** This line named `E3-B02i` when it was written — rung 4, on a GPU — and its own exit is a choice, an argument and a content hash. RFC 0088 settled that a decide task's exit may not require its own implementation, and waiting on every rung would have made this *a scene chosen for reachability*, which the exit above forbids. Found by a reader comparing this file against `TODO.md`, which is the comparison that catches a spec and a tracker drifting apart)
 - [ ] **E3-B02k** `M` Four rungs, one scene, one machine, one invocation: `claims/0033` moves off `pending`.
   *exit:* `cargo xtask claim raster-cost-per-rung` produces four numbers from one build instead of the `Route::Unbuilt("E3-B02")` refusal it produces today, or refuses again and names which rung would not build; a run that rebuilt between rungs is refused by the harness rather than averaged.
   *needs:* E3-B02j, E0-D10, E0-P18, E5-D01
@@ -314,9 +314,13 @@ contradiction between two written exits is a reversal that needs an RFC. That is
 - [ ] **E3-B03d** `S` Every metric in the text path is a fixed-point integer with its scale in its name.
   *exit:* no `f32` or `f64` reaches the tree, `DETERMINISM_ALLOW` gains no entry, and the rounding rule is stated once where advances accumulate rather than at each call site.
   *needs:* E3-B03a
+- [ ] **E3-B03e0** `M` The Unicode data arrives: the tables generated, the corpus committed, and the boundary taught the difference.
+  **Added on 2026-09-24, and this decomposition not containing it is the finding.** `E3-B03e` was refused twice for want of two decisions that were not its own to take — a licence decision and a corpus decision — and RFC 0114 and RFC 0115 take them. What is left over is an import with no owner, which is what this line is.
+  *exit:* `third_party/unicode/` carries `LICENSE` and a `PROVENANCE.md` naming upstream, the Unicode version, every file and its SHA-256; `text/src/` carries the generated `Bidi_Class` and bracket tables, each opening with the dual SPDX line and a header naming the upstream file, its hash and the command that rebuilt it; `LICENSING.md` carries the third row and the sentence a redistributor of a *binary* needs, since a binary carries no file headers; and `cargo xtask lint` shows the four checks RFC 0114 specifies, each demonstrated red.
+  *needs:* E3-B03d
 - [ ] **E3-B03e** `L` Bidirectional reordering, UAX #9.
   *exit:* the conformance corpus passes at a level named in the task rather than implied by the code, and the cases that level excludes are listed where a reader will find them.
-  *needs:* E3-B03c, E3-B03d
+  *needs:* E3-B03c, E3-B03d, E3-B03e0
 - [ ] **E3-B03f** `L` Line breaking and cluster boundaries, UAX #14 and UAX #29.
   *exit:* the conformance cases pass, and no break falls inside a cluster — asserted over the corpus rather than over an example.
   *needs:* E3-B03e

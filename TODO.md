@@ -1353,6 +1353,35 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the tenth wave, 2026-09-24.** Forty-seven `[x]`, one `[>]`, forty-seven
+`[ ]` of ninety-five — the denominator moved by one for `E3-B03e0`, which RFC
+0114 named and the decomposition did not contain. **The compositor's frame is now
+a record rather than a sequence of calls**: `E3-B05b` had written down what it
+could not hold, and the diff it named landed, so every wait the component enters
+goes through a door that takes the trace and three more words reach its subtree —
+which took that manifest to `STATE_NODES_MAX` exactly, so the next node this
+component wants is an RFC and not a row. **The crossing counter came in at eight
+per UI frame and not the forty-seven this file predicted**, and the prediction was
+a guess where the exit said *whatever the number is*; `claims/0038` gates on eight
+and explains at length why it does not gate on ten, which is `E3-B01`'s sentence
+and not this instrument's. **The solve stage is built and its own dishonest
+version is what shaped it**: a solver that re-solves ten thousand nodes and counts
+five would satisfy every word of the clause, so the count is produced by a walk
+the solver never runs — and the mutation that plans honestly and re-solves the
+forest anyway goes red on *work*, `left: 10000, right: 55`.
+
+**Two decisions and a scene, none of which is code.** `E3-B02j` was freed from
+rung 4 this morning and met this afternoon, and the scene it chose is one **this
+tree cannot draw a single node of** — seven rows of an `[unreachable]` table name
+what no rung can do and the task that would change each. That is the exit rather
+than a shortfall, because a scene reachable today would have been a scene drawn by
+the five-by-seven character console in `kernel/src/screen.rs`. And `E3-B03e`'s two
+blockers are decided without its algorithm being written, which is RFC 0088's
+shape: RFC 0114 puts Unicode data under `third_party/unicode/` with a *generated*
+table in the permissive tree, and RFC 0115 refuses to bend `corpus.rs`'s rule —
+on the ground that the rule's own stated reason is **false** about an embedding
+level, which is the premise a reader would otherwise have bent it from.
+
 **After the ninth wave, 2026-09-24.** Forty-three `[x]`, one `[>]`, fifty
 `[ ]`. The wave opened by **closing a marker from outside the container**:
 `E3-B01h`'s unmet clause was *on both architectures*, and the
@@ -1668,9 +1697,11 @@ thing it will measure would be blocking a ruler on a wall.
 - [ ] **E3-B02i** `L` Rung 4, the tessellating floor.
   *exit:* an image that is *not* identical, whose difference from rung 1 is bounded and characterised, and which no consumer treats as exact — `Fidelity::Approximate` is read by something rather than merely declared.
   *needs:* E3-B02h, E5-D01, E5-P06 (RFC 0080's fourth column for this rung is *a fixed-function triangle pipeline*, which is a machine and not a fallback from one)
-- [ ] **E3-B02j** `M` The scene `claims/0033` deliberately did not fix.
-  **Freed from rung 4 on 2026-09-24, and the reading is RFC 0088's.** This line used to name `E3-B02i` — the tessellating floor, on a GPU nobody here owns — and its own exit is a choice, an argument and a content hash. RFC 0088 settled that a decide task's exit may not require its own implementation; this is a build line whose exit is a decision, and it is the same shape. Waiting on rung 4 also inverted the exit's point: a scene chosen once every rung can already draw it is a scene chosen for **reachability**, which is the choice this line exists to refuse. It is available now, which is when a scene chosen for representativeness is worth choosing. Found by reading the epoch's graph for its hardware blockers rather than by trying to start the line.
-  *exit:* one scene chosen and named in the claim's `[workload]` row with its content hash, and the argument recorded is representativeness rather than reachability — the claim says a scene chosen this early is chosen to be reachable, and this is the task that must not.
+- [x] **E3-B02j** `M` The scene `claims/0033` deliberately did not fix.
+  **Freed from rung 4 on 2026-09-24, and met the same day.** This line used to name `E3-B02i` — the tessellating floor, on a GPU nobody here owns — while its own exit is a choice, an argument and a content hash. RFC 0088 settled that a decide task's exit may not require its own implementation, and waiting on rung 4 also inverted the exit's point: a scene chosen once every rung can already draw it is a scene chosen for **reachability**, which is the choice this line exists to refuse.
+  **The first thing to say about the scene is what it is not.** It is an audio timeline at the moment its playhead moves — `claims/0033-scene/scene.toml`, named in the claim's `[workload]` by the SHA-256 of its bytes — and **this tree cannot draw one node of it.** That is the exit rather than a shortfall: seven rows of an `[unreachable]` table name what no rung can do and the task that would change each, from *there is no rung* through *`third_party/` holds no shaper, so every glyph run including `latin` is unbuildable* to *no pixel above the frame reaches a screen*. A scene reachable on the day it was chosen would have been a scene drawn by the five-by-seven character console in `kernel/src/screen.rs`, which is the only thing in this repository that puts anything on a screen.
+  The argument is section 13's: the audio timeline is the case that document says *sank every predecessor*, and the file carries that section's own test as integers — the clip between 4 200 ms and 6 800 ms on track 3, selectable and describable without a pixel. **Three dirty nodes of 995** is the number the rest of the choice turns on, because the encode stage touches changed nodes only and a scene that dirties everything bounds a renderer on a state real interfaces are in once. The scene copies no text: every glyph run cites an entry of `text/src/corpus.rs` by name and scalar count, so a script removed from the corpus is a scene that cannot be built. Nothing in this tree reads the file — the seven relations are written out in `claims/0033-scene/README.md` and the check belongs to `E3-B02`'s encoder, which can compare the graph it builds against the census. Broken six ways by hand first, including one mutation that changes nothing but a sentence and is caught only by the hash, and two the first version of the check could not see because it held a copy of the scene's composition instead of reading it.
+  *exit:* **met.** one scene chosen and named in the claim's `[workload]` row with its content hash, and the argument recorded is representativeness rather than reachability — the claim says a scene chosen this early is chosen to be reachable, and this is the task that must not.
   *needs:* E3-B02a (the vocabulary a scene is described in, which is this line's whole dependency now)
 - [ ] **E3-B02k** `M` Four rungs, one scene, one machine, one invocation: `claims/0033` moves off `pending`.
   *exit:* `cargo xtask claim raster-cost-per-rung` produces four numbers from one build instead of the `Route::Unbuilt("E3-B02")` refusal it produces today, or refuses again and names which rung would not build; a run that rebuilt between rungs is refused by the harness rather than averaged.
@@ -1710,9 +1741,15 @@ thing it will measure would be blocking a ruler on a wall.
   **Met in round two, and the rounding rule is structural rather than stated.** `text/src/metric.rs` puts the only division in the crate inside a private `mod fine`, gives `Fine` no `Debug` so that `#[derive(Debug)]` on a `Scale` or a `Pen` is a compile error, and hands out no distance that has not already been rounded. The number that makes the rule worth having is in a test name: `rounding_each_advance_instead_would_lose_thirty_four_pixels_in_a_hundred_glyphs`. What round two took **out** is also kept as a test — `a_consumer_outside_this_crate_can_round_its_own_way` is the withdrawal of an over-strong sentence, kept executable so it cannot come back by accident.
   *exit:* **met.** no `f32` or `f64` reaches the tree, `DETERMINISM_ALLOW` gains no entry, and the rounding rule is stated once where advances accumulate rather than at each call site.
   *needs:* E3-B03a
+- [ ] **E3-B03e0** `M` The Unicode data arrives: the tables generated, the corpus committed, and the boundary taught the difference.
+  **Owed by RFC 0114 on 2026-09-24, and named here because the decomposition does not contain it.** `E3-B03e` was refused twice — once for a licence decision and once for a corpus decision — and taking both decisions turned an absence into work with an owner. The four checks this line owes `lint_licensing` are specified in that RFC and deliberately unmade, because the entry that specifies a check and the diff that makes it are not the same diff.
+  *exit:* `third_party/unicode/` carries `LICENSE` and a `PROVENANCE.md` naming upstream, the Unicode version, every file and its SHA-256; `text/src/` carries the generated `Bidi_Class` and bracket tables, each opening with the dual SPDX line and a header naming the upstream file, its hash and the command that rebuilt it; `LICENSING.md` carries the third row and the sentence a redistributor of a *binary* needs, since a binary carries no file headers; and `cargo xtask lint` shows the four checks RFC 0114 specifies, each demonstrated red — the SPDX value check against a file carrying a second licence, `IMPORT_READERS` against an unnamed reader, the `LICENSE`/`PROVENANCE.md` check against a directory with neither, and `TOOLING`'s row stating why the generator may read the import.
+  *needs:* E3-B03d
 - [ ] **E3-B03e** `L` Bidirectional reordering, UAX #9.
+  **Both blockers are decided as of 2026-09-24 and the algorithm is not written, which is RFC 0088's shape.** The refusal one wave earlier named a licence decision and a corpus decision, in that order, and neither was this line's to take inside its own diff. RFC 0114 takes the first: Unicode data is imported as data under `third_party/unicode/`, a property table consulted per character is *generated* into the permissive tree with provenance and a dual SPDX line, and the conformance corpus stays behind the boundary and is opened by a named host test. Three of the four routes were already refused by checks this tree has — a build step by `BUILD_SCRIPT_ALLOW` being empty, an `include_str!` by the net that reads dep-info, and typing the table by hand by what it would mean — and a ring is refused on arithmetic rather than on the word *absurd*. RFC 0115 takes the second: `corpus.rs`'s rule does **not** bend, and the reason it does not need to is that its stated reason — *an expected output needs a shaper* — is false about an embedding level, which is the premise a reader would otherwise bend the rule from. The exhaustive expectations are the specification's own files read by a host harness; the argued eight belong to the pass that holds them, each with the numbered rules it was derived from beside it.
+  **What this line still waits on is an import that has not happened**, and it is now a line of its own rather than an absence: `E3-B03e0`. The worst of the four checks RFC 0114 specifies is that `lint_licensing`'s SPDX check reads a *prefix* rather than a value, so a file carrying a second licence passes today and looks exactly like the 261 sources that are purely liftable.
   *exit:* the conformance corpus passes at a level named in the task rather than implied by the code, and the cases that level excludes are listed where a reader will find them.
-  *needs:* E3-B03c, E3-B03d
+  *needs:* E3-B03c, E3-B03d, E3-B03e0
 - [ ] **E3-B03f** `L` Line breaking and cluster boundaries, UAX #14 and UAX #29.
   *exit:* the conformance cases pass, and no break falls inside a cluster — asserted over the corpus rather than over an example.
   *needs:* E3-B03e
