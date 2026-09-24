@@ -87,7 +87,7 @@
 //! side of the world.
 
 use f_abi::input::{
-    self, Entry, Event, Key, PointerButton, PointerMotion, Scroll, axis_source, edge,
+    self, Crossing, Entry, Event, Key, PointerButton, PointerMotion, Scroll, axis_source, edge,
 };
 use f_input::stamp::StampNanos;
 use f_ring::adopt::Client;
@@ -480,6 +480,20 @@ pub struct Outbound {
     slots: u32,
     /// The next slot to write. Unit: none — a slot index.
     next: u32,
+    /// What this driver has put on the ring, folded.
+    ///
+    /// The **producer's half of the attestation**, and it is here rather than
+    /// on [`Driver`] because here is the one place that knows an entry reached
+    /// the ring: an entry the peer had no room for is counted in
+    /// [`Counters::dropped`] and never crossed, and folding it would make this
+    /// word a record of what this component built rather than of what it sent.
+    /// A consumer holding the second half can then tell a relay that dropped
+    /// one from a driver that never submitted it — which are the same symptom
+    /// with different repairs, which is the argument
+    /// `user/virtio-input/manifest.toml` already makes for publishing
+    /// `dropped`.
+    /// Unit: none — an `f_abi::input::Crossing`.
+    crossing: Crossing,
 }
 
 impl Outbound {
@@ -501,13 +515,19 @@ impl Outbound {
         if slots == 0 {
             return Err(Trouble::Layout);
         }
-        Ok(Self { client, slots, next: 0 })
+        Ok(Self { client, slots, next: 0, crossing: Crossing::new() })
     }
 
     /// How many payload slots there are. Unit: slots.
     #[must_use]
     pub const fn slots(&self) -> u32 {
         self.slots
+    }
+
+    /// What has crossed, folded. Unit: none — an `f_abi::input::Crossing`.
+    #[must_use]
+    pub const fn crossing(&self) -> Crossing {
+        self.crossing
     }
 
     /// Put one entry on the ring.
@@ -540,6 +560,13 @@ impl Outbound {
             return Err(Trouble::Layout);
         }
         self.client.submit(entry).map_err(|_| Trouble::NoRoom)?;
+        // After the submit and not before it, which is the whole discipline of
+        // this field: an entry the ring refused did not cross, and a producer
+        // whose word counted it would be attesting to something its consumer
+        // was never sent. The event folded is the one that went out — with the
+        // offset this function chose — and the fold deliberately ignores that
+        // offset, so the word survives being carried in a second channel.
+        self.crossing.absorb(&event);
         self.next = (self.next + 1) % self.slots;
         Ok(())
     }
@@ -671,6 +698,25 @@ impl Driver {
     #[must_use]
     pub const fn clock_at_nanos(&self) -> u64 {
         self.clock.at_nanos()
+    }
+
+    /// What this driver put on the ring, folded into one word.
+    ///
+    /// Not a [`Counters`] field, and the reason is the manifest's: every node
+    /// this component declares is one of its own counters, one for one, so that
+    /// publishing the tree is the store it was already going to make. This is
+    /// not a count of anything — it is a checksum — so it goes where
+    /// [`Driver::clock_at_nanos`] goes, onto the routing page the frame reads
+    /// after the run, and the `[[state]]` list is left alone.
+    ///
+    /// *What would reverse this:* a consumer that wants to check the crossing
+    /// while the driver is still running, which cannot read a page the frame
+    /// takes back at the end. That consumer needs this word on a ring or in the
+    /// tree, and the tree is where a reader would look.
+    /// Unit: none — an `f_abi::input::Crossing`.
+    #[must_use]
+    pub const fn crossing(&self) -> Crossing {
+        self.out.crossing()
     }
 
     /// Put the device back in reset, so that it stops writing into memory the
@@ -911,6 +957,14 @@ mod tests {
             (ev::SYN, syn::REPORT, 0),
         ];
         let mut crossed = 0;
+        // The two halves of the attestation, kept apart on purpose: `sent` is
+        // folded from what this driver built, `arrived` from what came back out
+        // of the bytes. `Outbound` cannot be stood up here — the ring needs
+        // `unsafe` and this crate has none — so what this test covers is the
+        // fold either side of an encode and a decode, and the boot covers the
+        // fold either side of a real channel.
+        let mut sent_fold = Crossing::new();
+        let mut arrived_fold = Crossing::new();
         for record in records {
             for event in decoder.feed(&mut clock, record).events.iter().flatten() {
                 // The offset a submitter would have filled in. Anything but zero
@@ -921,10 +975,64 @@ mod tests {
                 let back = Event::decode(&entry, &payload).expect("a consumer accepts it");
                 assert_eq!(back, sent, "what a consumer reads is what this driver wrote");
                 assert_ne!(back.stamp_nanos, input::NOT_STAMPED);
+                sent_fold.absorb(&sent);
+                arrived_fold.absorb(&back);
                 crossed += 1;
             }
         }
         assert_eq!(crossed, 5, "two reports and three key records produce five entries");
+        assert!(
+            arrived_fold.agrees_with(sent_fold.word()),
+            "the stamps and the bodies this driver wrote are the ones a consumer reads back"
+        );
+        assert_eq!(arrived_fold.absorbed(), crossed);
+    }
+
+    #[test]
+    fn a_report_this_driver_did_not_send_is_not_in_its_word() {
+        // The clause `Outbound::put` folds after the submit for. A consumer
+        // holds the second half of this word, so a producer that folded an
+        // entry the ring refused would be attesting to something nobody was
+        // sent — and the boot would then go red at the consumer, blaming a
+        // relay for a drop that happened before the crossing. The two counts
+        // are the difference between those two repairs.
+        // Both decoders taken before either name shadows the helper, so the two
+        // runs start from one seed and differ only in what was folded.
+        let ((mut decoder, mut clock), (mut again, mut again_clock)) = (decoder(), decoder());
+        let mut sent_fold = Crossing::new();
+        let mut built = 0;
+        for record in [
+            (ev::REL, rel::X, 4),
+            (ev::SYN, syn::REPORT, 0),
+            (ev::REL, rel::Y, 9),
+            (ev::SYN, syn::REPORT, 0),
+        ] {
+            for event in decoder.feed(&mut clock, record).events.iter().flatten() {
+                built += 1;
+                // The second report is the one the peer had no room for.
+                if built < 2 {
+                    sent_fold.absorb(event);
+                }
+            }
+        }
+        assert_eq!(built, 2);
+        assert_eq!(sent_fold.absorbed(), 1, "one of the two entries crossed");
+
+        let mut both = Crossing::new();
+        for record in [
+            (ev::REL, rel::X, 4),
+            (ev::SYN, syn::REPORT, 0),
+            (ev::REL, rel::Y, 9),
+            (ev::SYN, syn::REPORT, 0),
+        ] {
+            for event in again.feed(&mut again_clock, record).events.iter().flatten() {
+                both.absorb(event);
+            }
+        }
+        assert!(
+            !both.agrees_with(sent_fold.word()),
+            "a word that counted a dropped entry is not the word a consumer folds"
+        );
     }
 
     #[test]

@@ -293,6 +293,31 @@ pub mod reported {
     /// `Counters::spun` — turns of the loop that found nothing anywhere.
     /// Unit: turns.
     pub const SPUN: u32 = super::REPORT + 80;
+    /// `Driver::crossing` — what this component put on the data ring, folded
+    /// into one word by `f_abi::input::Crossing`.
+    ///
+    /// **The producer's half of the attestation, and the only field on this
+    /// page that is about what the consumer received rather than about what
+    /// this component did.** Every other number here is a tally the frame reads
+    /// to learn what happened inside the driver; this one exists to be compared
+    /// against a word the frame folded itself, out of the entries that arrived,
+    /// with neither side holding the other's copy.
+    ///
+    /// Not a counter and therefore not a `[[state]]` row — `Driver::crossing`
+    /// is where that is argued. It sits beside [`CLOCK_AT`], which is the other
+    /// field here that is a value rather than a tally.
+    /// Unit: none — a checksum.
+    pub const CROSSING: u32 = super::REPORT + 88;
+    /// How many entries went into [`CROSSING`].
+    ///
+    /// Published beside it rather than left to be inferred from [`SUBMITTED`],
+    /// and the two are not the same claim: `SUBMITTED` is what this component
+    /// counted, and this is what the fold absorbed. A driver whose two
+    /// disagree has a submit path that counts an entry it did not fold or folds
+    /// one it did not send, and that is worth a distinct sentence rather than
+    /// being hidden inside a word that would simply not match.
+    /// Unit: entries.
+    pub const CROSSED: u32 = super::REPORT + 96;
 }
 
 /// Why the component's loop ended.

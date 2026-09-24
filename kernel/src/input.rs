@@ -110,6 +110,61 @@
 //! a compositor that applied one would have got it by some route other than this
 //! relay.
 //!
+//! # What arrived is what was sent, and how a frame says so without holding a
+//! reading
+//!
+//! Every count in this file is a tally: how many records came off the device,
+//! how many reports closed, how many entries were submitted and drained and
+//! decoded. Not one of them says the entries that *arrived* are the entries
+//! that were *sent*. A relay that minted a reading on arrival, handed two on
+//! out of order, dropped one out of the middle or moved a coordinate by one
+//! satisfies all of them — and the first of those four is the defect
+//! `input/src/stamp.rs` is written against, which is not a wrong number but a
+//! right-looking one that improves as the system gets slower.
+//!
+//! So `E3-B04f` adds a second kind of observation. The driver folds every entry
+//! it puts on the ring into `f_abi::input::Crossing` and publishes the word on
+//! its routing page; this frame folds every entry it drains into one of its
+//! own; and `Report::driver_verdict` requires the two to agree. Neither side
+//! holds the other's copy and neither word travels with the entries. What is
+//! shared is the implementation, which is `E3-B04c`'s distinction: a defect
+//! inside the fold moves both words the same way and is `abi`'s own corpus to
+//! catch, and a defect in a relay moves one of them.
+//!
+//! **And this frame still names no stamp.** `Crossing::absorb` reads the
+//! payload the way `Event::decode` reads it — inside `abi/`, the crate that
+//! declares the field and carries an `INPUT_PATH` row for it — and hands back a
+//! checksum. A checksum is not a time: it is not ordered against anything, not
+//! invertible, and there is no expression in this file that could subtract one
+//! from another and publish the difference as a latency. That is the whole of
+//! why `kernel/` stays off `lint-stamp`'s list, and RFC 0124 is the argument at
+//! length, including what would reverse it.
+//!
+//! # What the compositor has to do to drain this itself, and why the four
+//! steps are not written here
+//!
+//! They are `docs/rfc/0124`'s section *What the consumer has to do*, in full,
+//! with the call names spelled out. They are there and not here because
+//! **writing them here is a red build**, which is a thing this file learned by
+//! doing it: `cargo xtask lint-stamp` decides whether a crate is on the input
+//! path by looking for that vocabulary in the crate's text, prose included, and
+//! a paragraph in this module naming the stamp's type and its wire field earns
+//! `kernel/` an `INPUT_PATH` row — which the one `rdtsc` in this tree, the
+//! counter `crate::smp` reads to bound a spin, turns red immediately.
+//!
+//! That is the rule working rather than the rule in the way, and it is worth a
+//! reader's attention because it is the sharper half of why the frame folds a
+//! checksum instead of carrying a position: this file may not so much as
+//! *describe* the number, let alone hold one. An RFC is not a workspace member,
+//! so the description lives where a description belongs.
+//!
+//! The one-sentence version, in words this file is allowed to use: the
+//! compositor holds the other end of the driver's data channel itself, decodes
+//! each entry with the same decoder this frame calls, rebuilds the reading from
+//! the field that entry carries, and folds what it drained so that it can check
+//! the driver's published word. What it must not do is read a clock when an
+//! entry arrives and call that the event's time.
+//!
 //! # What this demonstration does not show
 //!
 //! One device, one queue, relative motion, and no seat. It says nothing about
@@ -131,7 +186,7 @@
 )]
 
 use f_abi::cap::{CapType, rights};
-use f_abi::input::{Entry as InputEntry, Event, PAYLOAD_BYTES};
+use f_abi::input::{Crossing, Entry as InputEntry, Event, PAYLOAD_BYTES};
 use f_abi::scene::{Commit, CreateNode, Delta, Entry as SceneEntry, NO_NODE, SetTransform, kind};
 use f_abi::{ABI_VERSION, Cqe, class, control, feature, state};
 use f_compositor::routing as scene_routing;
@@ -587,6 +642,16 @@ pub struct Reported {
     pub clock_at: u64,
     /// Why its loop ended, as a `routing::stopped` ordinal. Unit: none.
     pub outcome: u64,
+    /// What it put on the data ring, folded into one word.
+    ///
+    /// The **producer's** half, published by the component and read here. This
+    /// frame never computes it and could not: it is a fold over every entry the
+    /// driver submitted, taken in the driver, on the component's side of the
+    /// boundary. Unit: none — a checksum.
+    pub crossing: u64,
+    /// How many entries went into that word, as the component counted them.
+    /// Unit: entries.
+    pub crossed: u64,
 }
 
 impl Reported {
@@ -613,6 +678,8 @@ impl Reported {
             spun: read(routing::reported::SPUN),
             clock_at: read(routing::reported::CLOCK_AT),
             outcome: read(routing::reported::OUTCOME),
+            crossing: read(routing::reported::CROSSING),
+            crossed: read(routing::reported::CROSSED),
         })
     }
 }
@@ -658,6 +725,18 @@ pub struct Produced {
     pub kept: [Kept; EVENTS_MAX],
     /// How many of [`Produced::kept`] are filled. Unit: entries.
     pub events: usize,
+    /// What arrived, folded into one word by this frame.
+    ///
+    /// The **consumer's** half of the crossing attestation, and the reason it
+    /// is a fold rather than a copy is the one this file spends a section on:
+    /// the frame may not hold the reading an entry carries. `Crossing::absorb`
+    /// reads the payload the way `Event::decode` reads it — inside `abi/`,
+    /// which is the crate that declares the field and is on `lint-stamp`'s
+    /// path — and hands back a checksum, which is not a time, is not
+    /// invertible, and is not anything this frame could publish a latency
+    /// from. RFC 0124 is that argument at length.
+    /// Unit: none — a checksum.
+    pub crossing: Crossing,
 }
 
 /// What the compositor stage saw.
@@ -801,6 +880,43 @@ impl Report {
         if seen.board.submitted != seen.drained {
             return Err("the driver and the frame disagree about how many entries crossed the \
                  data ring");
+        }
+        // --- the crossing, `E3-B04f` ----------------------------------------
+        //
+        // The counts above say *how many* entries crossed and every clause so
+        // far has been about a tally. None of them says the entries that
+        // arrived are the entries that were sent: a relay that re-stamped on
+        // arrival, handed them on in a different order, or moved a coordinate
+        // by one satisfies every count in this function, and the first of those
+        // three is what `input/src/stamp.rs` exists to prevent.
+        //
+        // So the driver folds what it submitted, this frame folds what it
+        // drained, and the two words are required to agree. Neither is computed
+        // from the other: the driver's is taken in `Outbound::put` on the far
+        // side of the boundary and published on its routing page; this one is
+        // built in `drain` out of entries that arrived. What they share is the
+        // implementation, which is `E3-B04c`'s distinction and is why a defect
+        // inside the fold is `abi`'s corpus to catch and not this boot's.
+        if seen.board.crossed != seen.board.submitted {
+            return Err(
+                "the driver folded a different number of entries than it counted submitting, so \
+                 its own submit path counts an entry it did not attest to or attests to one it \
+                 did not send",
+            );
+        }
+        if seen.crossing.absorbed() != seen.decoded {
+            return Err("this frame folded a different number of entries than it decoded, which \
+                 is this file's own arithmetic and not the driver's");
+        }
+        if !seen.crossing.agrees_with(seen.board.crossing) {
+            return Err(
+                "what arrived is not what was sent: the driver's fold over the entries it \
+                 submitted and this frame's fold over the entries it drained disagree, and the \
+                 fold covers the opcode and the whole payload - so a reading minted on arrival, \
+                 a pair handed on out of order, one dropped out of the middle, or a coordinate \
+                 moved by one all land here. `agrees_with` also refuses a fold of nothing, so a \
+                 run in which no entry crossed fails on this line rather than passing quietly",
+            );
         }
         if seen.motions == 0 {
             return Err(
@@ -959,6 +1075,23 @@ pub fn report_lines(report: &Report) {
         seen.decoded,
         seen.drained,
         seen.refused,
+    );
+    // The crossing, on its own line, because it is the only thing in this log
+    // that two stages computed separately about one sequence. The counts are
+    // printed beside the words so that a reader of a red boot can tell a
+    // disagreement about *how many* from a disagreement about *what*.
+    crate::kprintln!(
+        "  input cross   the driver folded {} entr(y/ies) into {:#018x} and this frame folded \
+         {} into {:#018x}; {}",
+        seen.board.crossed,
+        seen.board.crossing,
+        seen.crossing.absorbed(),
+        seen.crossing.word(),
+        if seen.crossing.agrees_with(seen.board.crossing) {
+            "what arrived is what was sent, stamps and bodies alike"
+        } else {
+            "THEY DISAGREE"
+        },
     );
     crate::kprintln!(
         "  input relay   {} event(s) kept, {} of them pointer motion, {} handed to the \
@@ -1414,6 +1547,7 @@ unsafe fn produce(
         acknowledged: seen.acknowledged,
         kept: seen.kept,
         events: seen.events,
+        crossing: seen.crossing,
     })
 }
 
@@ -1429,6 +1563,7 @@ struct Drained {
     overflowed: bool,
     kept: [Kept; EVENTS_MAX],
     events: usize,
+    crossing: Crossing,
 }
 
 impl Default for Drained {
@@ -1444,6 +1579,7 @@ impl Default for Drained {
             overflowed: false,
             kept: [Kept { tx_x65536: 0, ty_x65536: 0 }; EVENTS_MAX],
             events: 0,
+            crossing: Crossing::new(),
         }
     }
 }
@@ -1484,6 +1620,13 @@ fn drain(events: &Consumer<'_>, arena: &Arena<'_>, seen: &mut Drained) -> Result
             continue;
         };
         seen.decoded = seen.decoded.saturating_add(1);
+        // The consumer's half of the attestation, folded here and from nowhere
+        // else, in the order the entries came off the ring. It is taken from
+        // the decoded event rather than from the bytes in the arena on purpose:
+        // what is being attested is that the *event* crossed unchanged, and an
+        // entry that did not decode is not an event at all — it is counted in
+        // `refused`, which the verdict already requires to be zero.
+        seen.crossing.absorb(&event);
 
         // Where the pointer is, as the driver's accumulator has it. A motion
         // event carries the position and every other opcode carries none, so an

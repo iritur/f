@@ -1370,6 +1370,168 @@ const _: () = assert!(STAMP_BYTES == core::mem::size_of::<u64>());
 // and the ring's own envelope check refuses.
 const _: () = assert!(FLAGS_ACCEPTED & !flags::KNOWN == 0);
 
+/// Everything that crossed, folded into one word, so that the stage that sent
+/// it and the stage that received it can say the same thing about it without
+/// either one holding the other's copy.
+///
+/// # What [`Event::decode`] establishes, and the one thing it cannot
+///
+/// A decoded entry *arrived stamped*: a payload whose first eight bytes are
+/// [`NOT_STAMPED`] is refused before the body is read at all, so a consumer
+/// holding an [`Event`] is holding a reading somebody took. What no decoder can
+/// establish, because it sees one entry and has nothing to compare it against,
+/// is that the reading is **the one the driver took**. A stage in between that
+/// re-stamped on arrival, handed the entries on in a different order, dropped
+/// one out of the middle, or moved a coordinate by one produces entries that
+/// every decoder accepts — and `input/src/stamp.rs` spends a page on what the
+/// first of those four does to the number this path exists to publish: it does
+/// not add noise to the latency, it subtracts the relay's own delay out of it,
+/// in the direction that makes the figure improve as the system gets slower.
+///
+/// So the producer folds every entry it submits, the consumer folds every entry
+/// it drains, and the two words are compared. Neither is computed from the
+/// other and neither travels with the entries: the producer publishes its word
+/// where it reports what it did, and the consumer builds its own out of what
+/// arrived. What is shared is this implementation and not the instance, which
+/// is the distinction `E3-B04c`'s seam draws and the reason this is evidence
+/// rather than a tautology — a defect *inside* this fold moves both words the
+/// same way and is caught by this module's own corpus, and a defect in a relay
+/// moves one of them.
+///
+/// # Why the whole payload and not the stamp alone
+///
+/// Because a relay that preserved every stamp and rewrote a coordinate has
+/// invented what the user did, which is the same class of defect wearing a
+/// different field, and a fold that watched one field would have to be widened
+/// by hand every time a record gained one. The stamp is the first
+/// [`STAMP_BYTES`] of every payload for every opcode there is —
+/// [`Event::payload`] writes it before it dispatches — so folding the payload
+/// folds the stamp structurally, and a seventh opcode is watched on the day it
+/// is declared for the same reason it is stamped on that day.
+///
+/// The cost is that a disagreement does not say *which* field moved. That is
+/// worth stating rather than engineering around: the boot comparing these two
+/// words prints both sides' counts beside them, and the question a reader then
+/// asks — was it a stamp or a body — is answered by the corpus in this module
+/// rather than by a second word on a routing page.
+///
+/// # What is folded, and what is deliberately left out
+///
+/// The opcode and the payload. **Not** [`Event::payload_offset`], which says
+/// where in an arena the bytes were parked; **not** [`Event::user_data`] or
+/// [`Event::flags`], which say what the submission wanted of the ring; and
+/// **not** [`Event::class`], which the module above calls the ring's field and
+/// not this format's. All four are properties of the carriage rather than of
+/// the event, and a fold that included them would go red the first time an
+/// entry is carried in a second channel — which is the crossing this
+/// attestation exists to survive. What is folded is what the device did and
+/// when, and nothing about how it was delivered.
+///
+/// *What would reverse this:* a relay entitled to rewrite what the device said
+/// — a coalescer, or the router `E3-B04`'s parent owes, which may legitimately
+/// hand on one motion where two arrived. Such a stage cannot carry this word
+/// through and must publish its own, with the arithmetic relating the two
+/// written down; the repair is a second attestation with a stated relation, not
+/// a fold that stops watching the body.
+///
+/// # Why this is not `f-hash`
+///
+/// `f-hash` is SHA-256 and it is what *names* things — a blob, a release, a
+/// generation — where a collision an adversary can choose is the whole risk.
+/// This word names nothing and is looked up by nobody: it is a checksum across
+/// one boot between two stages of one machine, and what it has to do is change
+/// when any byte of the crossing changes. `abi` additionally has no
+/// dependencies, which its own manifest calls a property rather than an
+/// omission, so a digest here would be a fourth copy of one rather than a use
+/// of the one there is.
+///
+/// *What would reverse this:* a peer that is not this machine's own driver, at
+/// which point the adversary chooses the entries and a fold anybody can invert
+/// stops being evidence. That is a content address, belongs in `f-hash`, is
+/// taken over a transcript, and costs what `claims/` would have to measure —
+/// not a wider constant here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Crossing {
+    /// The fold so far. Private, and that is the point: a word that could be
+    /// assigned is a consumer that can agree with a producer it never listened
+    /// to.
+    /// Unit: none — a checksum.
+    word: u64,
+    /// How many entries have gone into it. Unit: entries.
+    absorbed: u64,
+}
+
+/// Where a fold starts, before anything has crossed.
+///
+/// FNV-1a's offset basis, and the value matters in exactly one way: it is not
+/// zero. A page nobody wrote reads as zero, so a fold that started there would
+/// make *nothing crossed and nobody published* indistinguishable from *the
+/// producer published a fold of nothing*.
+/// Unit: none — a checksum.
+const CROSSING_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
+
+/// The multiplier the fold mixes with. FNV-1a's 64-bit prime.
+/// Unit: none.
+const CROSSING_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+impl Crossing {
+    /// A fold with nothing in it.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { word: CROSSING_BASIS, absorbed: 0 }
+    }
+
+    /// Fold one entry in, in the order it crossed.
+    ///
+    /// Order-sensitive, because the byte stream is: two entries swapped are two
+    /// different streams unless they are byte-identical, in which case they are
+    /// two events nothing downstream could have told apart either.
+    pub fn absorb(&mut self, event: &Event) {
+        self.word = mixed(self.word, event.opcode());
+        for byte in event.payload() {
+            self.word = mixed(self.word, byte);
+        }
+        self.absorbed = self.absorbed.saturating_add(1);
+    }
+
+    /// The fold, for a routing page or a boot log.
+    /// Unit: none — a checksum.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        self.word
+    }
+
+    /// How many entries went into it. Unit: entries.
+    #[must_use]
+    pub const fn absorbed(self) -> u64 {
+        self.absorbed
+    }
+
+    /// Does what crossed match what the other side says it sent?
+    ///
+    /// The emptiness guard is the clause worth reading. Two stages that each
+    /// folded nothing hold [`CROSSING_BASIS`] and agree, which is a green
+    /// answer about a crossing that never happened — the vacuity this workspace
+    /// keeps finding one layer down from where it was looking. So a fold with
+    /// nothing in it agrees with nobody, and a caller that genuinely means *no
+    /// entries crossed* says so with a count rather than with this.
+    #[must_use]
+    pub const fn agrees_with(self, published: u64) -> bool {
+        self.absorbed != 0 && self.word == published
+    }
+}
+
+impl Default for Crossing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One byte into the fold.
+fn mixed(word: u64, byte: u8) -> u64 {
+    (word ^ u64::from(byte)).wrapping_mul(CROSSING_PRIME)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1776,6 +1938,135 @@ mod tests {
             assert_eq!(domain, error::ARGUMENT, "{}", refusal.message());
             assert!(!refusal.message().is_empty());
         }
+    }
+
+    /// A crossing of the whole corpus, in the order the specimens are declared.
+    ///
+    /// The producer's side of every test below. One specimen per opcode, so a
+    /// seventh opcode is in the crossing the day it is declared rather than the
+    /// day somebody remembers to add it.
+    fn crossed() -> Crossing {
+        let mut fold = Crossing::new();
+        for body in Entry::SPECIMENS {
+            fold.absorb(&event(body));
+        }
+        fold
+    }
+
+    #[test]
+    fn what_was_sent_and_what_arrived_agree_only_when_they_are_the_same_crossing() {
+        // The consumer's side is built out of the bytes, through `decode`,
+        // rather than out of the events the producer holds — which is what a
+        // consumer actually has and is the only version of this test that says
+        // anything. A fold over the producer's own values on both sides would
+        // agree on a wire format that lost a field.
+        let sent = crossed();
+        let mut arrived = Crossing::new();
+        for body in Entry::SPECIMENS {
+            let (entry, payload) = event(body).encode();
+            let back = Event::decode(&entry, &payload).expect("a specimen decodes");
+            arrived.absorb(&back);
+        }
+        assert!(arrived.agrees_with(sent.word()));
+        assert_eq!(arrived.absorbed(), sent.absorbed());
+        assert_eq!(arrived.absorbed(), op::COUNT as u64);
+    }
+
+    #[test]
+    fn a_stamp_minted_on_arrival_is_what_this_fold_is_for() {
+        // The defect `input/src/stamp.rs` is written against, as a relay: every
+        // entry still decodes, every entry is still stamped, and the number the
+        // path publishes afterwards is the consumer's queueing delay subtracted
+        // out of the latency. One entry re-stamped moves the word.
+        let sent = crossed();
+        let mut arrived = Crossing::new();
+        for (index, body) in Entry::SPECIMENS.into_iter().enumerate() {
+            let mut one = event(body);
+            if index == 2 {
+                one.stamp_nanos = STAMPED_AT + 1;
+                assert_eq!(one.check(), Ok(()), "a re-stamped entry is still a legal entry");
+            }
+            arrived.absorb(&one);
+        }
+        assert!(!arrived.agrees_with(sent.word()));
+        // And the count is no help at all, which is why the word exists: the
+        // relay handed on exactly as many entries as it was given.
+        assert_eq!(arrived.absorbed(), sent.absorbed());
+    }
+
+    #[test]
+    fn a_relay_that_reorders_or_drops_moves_the_word_and_a_count_does_not_always() {
+        let sent = crossed();
+
+        // Reordered: the same entries, the same number of them, a different
+        // sequence. Nothing about a count can see this.
+        let mut reordered = Crossing::new();
+        for body in Entry::SPECIMENS.into_iter().rev() {
+            reordered.absorb(&event(body));
+        }
+        assert!(!reordered.agrees_with(sent.word()));
+        assert_eq!(reordered.absorbed(), sent.absorbed());
+
+        // Dropped out of the middle, which is the case a first-and-last
+        // attestation misses.
+        let mut dropped = Crossing::new();
+        for (index, body) in Entry::SPECIMENS.into_iter().enumerate() {
+            if index == 3 {
+                continue;
+            }
+            dropped.absorb(&event(body));
+        }
+        assert!(!dropped.agrees_with(sent.word()));
+    }
+
+    #[test]
+    fn a_body_moved_by_one_moves_the_word() {
+        // The half the module's *why the whole payload and not the stamp alone*
+        // argues for: a relay that kept every reading and rewrote a coordinate
+        // has invented what the user did.
+        let sent = crossed();
+        let mut arrived = Crossing::new();
+        for body in Entry::SPECIMENS {
+            let moved = match body {
+                Entry::PointerMotion(motion) => {
+                    Entry::PointerMotion(PointerMotion { x_x65536: motion.x_x65536 + 1, ..motion })
+                }
+                other => other,
+            };
+            arrived.absorb(&event(moved));
+        }
+        assert!(!arrived.agrees_with(sent.word()));
+    }
+
+    #[test]
+    fn where_the_bytes_were_parked_is_not_part_of_the_crossing() {
+        // The clause that lets an entry be carried in a second channel. The
+        // arena offset is chosen by whichever ring the payload lands in, so a
+        // fold that watched it would go red on a relay that did nothing wrong —
+        // and this is the property the compositor's own drain will depend on.
+        let sent = crossed();
+        let mut elsewhere = Crossing::new();
+        for body in Entry::SPECIMENS {
+            let mut one = event(body);
+            one.payload_offset = 0x40;
+            one.user_data = 0xDEAD_BEEF;
+            elsewhere.absorb(&one);
+        }
+        assert!(elsewhere.agrees_with(sent.word()));
+    }
+
+    #[test]
+    fn a_fold_of_nothing_agrees_with_nobody() {
+        // Two stages that both folded nothing hold one basis and would agree,
+        // which is a green answer about a crossing that never happened. The
+        // guard is what makes a boot whose driver produced nothing fail rather
+        // than pass quietly.
+        let empty = Crossing::new();
+        assert_eq!(empty.absorbed(), 0);
+        assert!(!empty.agrees_with(empty.word()));
+        assert!(!empty.agrees_with(0));
+        assert_ne!(empty.word(), 0, "a page nobody wrote must not read as a fold of nothing");
+        assert_eq!(empty, Crossing::default());
     }
 
     #[test]

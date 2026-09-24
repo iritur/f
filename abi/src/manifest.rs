@@ -1447,11 +1447,73 @@ impl Record {
     /// call; and a stop is neither, which is why a stop never restarts — it is
     /// the supervisor's own decision and restarting after it would be the
     /// supervisor arguing with itself.
+    ///
+    /// **This is the older spelling and is no longer the table.** It translates
+    /// its two flags into the cause vocabulary and asks
+    /// [`Record::restarts_after_cause`], which is where the rows live. Kept
+    /// rather than replaced because `sim/src/chaos.rs` models a restart storm
+    /// through it and a signature change there would be a second diff in a crate
+    /// this one has no business editing — and kept as a *translation* rather
+    /// than as a second `match`, because two tables are two policies and the one
+    /// that gets audited is never the one that ran.
     #[must_use]
     pub const fn restarts_after(&self, faulted: bool, exited: bool) -> bool {
-        match self.restart {
-            restart::ON_FAULT => faulted,
-            restart::ALWAYS => faulted || exited,
+        // Fault first, so that both flags set is a fault: the old body answered
+        // `faulted || exited` under `ALWAYS` and `faulted` under `ON_FAULT`, and
+        // both of those are what `FAULT` answers now. Neither flag is a stop,
+        // which is the case this mapping must not lose.
+        let cause = if faulted {
+            crate::control::cause::FAULT
+        } else if exited {
+            crate::control::cause::EXIT
+        } else {
+            crate::control::cause::STOPPED
+        };
+        self.restarts_after_cause(cause)
+    }
+
+    /// Does this policy restart after a death the wire named this way?
+    ///
+    /// RFC 0008's table, over `f_abi::control::cause` — the words a peer-gone
+    /// notice actually carries, rather than two flags a reader has to have
+    /// derived from one. A supervisor holding the notice holds the cause; this
+    /// is the function it asks.
+    ///
+    /// # Where a timeout lands, and why it is not a fourth policy
+    ///
+    /// **With a fault**, and RFC 0123 is the argument. A timeout and a fault are
+    /// the two deaths the occupant did not *choose*: an exit is a door call it
+    /// made and a stop is a supervisor's own decision, and neither is a failure
+    /// of the component to do what it was admitted to do. Grouping the timeout
+    /// with the fault keeps a component author's declaration to the three words
+    /// `docs/manifest.md` already spells, and keeps `restart = "on_fault"`
+    /// meaning *restart this when it fails*, which is what every manifest in
+    /// this tree that carries it was written to mean.
+    ///
+    /// *What would reverse this:* a deployment that wants a component restarted
+    /// after a fault and **ridden out** after a timeout — a component whose
+    /// stuck frame is better than its cold start. That is a fourth
+    /// [`restart`] value, a schema bump, and it should arrive with the workload
+    /// that wants it rather than be guessed at now. Until then a manifest cannot
+    /// spell the distinction, which is a limit of the declaration and is stated
+    /// here rather than in a reviewer's head.
+    ///
+    /// A cause this build does not name answers `false`. R04: a supervisor told
+    /// something it cannot interpret refills nothing, because spawning into a
+    /// place whose occupant ended for a reason this build cannot read is the one
+    /// direction that cannot be undone.
+    #[must_use]
+    pub const fn restarts_after_cause(&self, cause: u64) -> bool {
+        use crate::control::cause;
+        match cause {
+            // `RETIRED` is deliberately not here and is not `false` by accident:
+            // a retired place has no further occupant at all, so a policy that
+            // answered *yes* would be answering a question about a place that
+            // has stopped existing.
+            cause::FAULT | cause::TIMEDOUT => {
+                matches!(self.restart, restart::ON_FAULT | restart::ALWAYS)
+            }
+            cause::EXIT => matches!(self.restart, restart::ALWAYS),
             _ => false,
         }
     }
@@ -2507,6 +2569,82 @@ mod tests {
                 "policy {} with faulted={faulted} exited={exited}",
                 restart::label(policy)
             );
+        }
+    }
+
+    /// The same table over the words the wire carries, every cause against
+    /// every policy.
+    ///
+    /// **A cross product and not a sample**, because the rows that matter are
+    /// the ones nobody would think to write: a cause this build does not name,
+    /// and `RETIRED`, which is a fact about a *place* rather than about an
+    /// occupant and would restart something that has stopped existing.
+    #[test]
+    fn the_cause_table_names_every_word_the_wire_carries() {
+        use crate::control::cause;
+        let mut record = well_formed();
+        for (policy, cause, expect) in [
+            (restart::NEVER, cause::FAULT, false),
+            (restart::NEVER, cause::EXIT, false),
+            (restart::NEVER, cause::TIMEDOUT, false),
+            (restart::ON_FAULT, cause::FAULT, true),
+            (restart::ON_FAULT, cause::EXIT, false),
+            // `E3-B05e`, and the row this function was widened for: a timeout is
+            // a failure of the occupant to do what it was admitted to do, which
+            // is the class `on_fault` names. RFC 0123.
+            (restart::ON_FAULT, cause::TIMEDOUT, true),
+            (restart::ALWAYS, cause::FAULT, true),
+            (restart::ALWAYS, cause::EXIT, true),
+            (restart::ALWAYS, cause::TIMEDOUT, true),
+            // Neither of these restarts under any policy, and each is here for
+            // its own reason: a stop is the supervisor's own decision, and a
+            // retired place has no next occupant to spawn.
+            (restart::ALWAYS, cause::STOPPED, false),
+            (restart::ALWAYS, cause::RETIRED, false),
+            // R04. A word from a build that knew a sixth cause refills nothing.
+            (restart::ALWAYS, 6, false),
+            (restart::ALWAYS, u64::MAX, false),
+        ] {
+            record.restart = policy;
+            assert_eq!(
+                record.restarts_after_cause(cause),
+                expect,
+                "policy {} with cause {}",
+                restart::label(policy),
+                cause::label(cause)
+            );
+        }
+    }
+
+    /// The two-flag door and the cause table are one table.
+    ///
+    /// The older spelling is a translation now, and this is what says so: every
+    /// flag pair against every policy, compared against the cause the pair
+    /// names. A second `match` behind `restarts_after` would pass every test
+    /// above and this one is where it dies.
+    #[test]
+    fn the_two_flag_spelling_is_the_cause_table_translated() {
+        use crate::control::cause;
+        let mut record = well_formed();
+        for policy in [restart::NEVER, restart::ON_FAULT, restart::ALWAYS] {
+            record.restart = policy;
+            for (faulted, exited, named) in [
+                (true, false, cause::FAULT),
+                (false, true, cause::EXIT),
+                (false, false, cause::STOPPED),
+                // Both set is a fault: the body this replaced answered
+                // `faulted || exited` under `ALWAYS` and `faulted` under
+                // `ON_FAULT`, and a mapping that sent this pair to `EXIT` would
+                // change `ON_FAULT`'s answer without changing any row above.
+                (true, true, cause::FAULT),
+            ] {
+                assert_eq!(
+                    record.restarts_after(faulted, exited),
+                    record.restarts_after_cause(named),
+                    "policy {} with faulted={faulted} exited={exited}",
+                    restart::label(policy)
+                );
+            }
         }
     }
 

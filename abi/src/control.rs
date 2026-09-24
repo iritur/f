@@ -242,6 +242,19 @@ pub const ORDER: [&str; 4] = ["slots ascending", "stop", "reclaim by core ascend
 /// causes, because there are three ways a component ends and a client that
 /// cannot tell them apart cannot tell a crash from a planned shutdown — which
 /// is exactly the distinction a restart policy is written in terms of.
+///
+/// # Why a fifth word, and why it is not a fault with a different detail
+///
+/// [`TIMEDOUT`] is `E3-B05e`'s, and RFC 0123 is the argument. The short version
+/// is that a restart policy cannot be written in terms of a distinction the
+/// vocabulary does not carry: an occupant that stopped making progress and one
+/// that executed an instruction it was not allowed to execute call for the same
+/// *mechanism* and are different *facts*, and a supervisor told only `FAULT`
+/// would restart a wedged component with a log line saying it had crashed.
+/// Packing it as a fault with a reserved vector was the alternative and it is
+/// worse in the one way that matters here: `detail` is the processor's word for
+/// a fault, and a vector this architecture does not define would be a value only
+/// the frame that wrote it could read back.
 pub mod cause {
     /// An exception at ring 3, or a control ring the component corrupted. The
     /// high half carries the vector.
@@ -254,6 +267,22 @@ pub mod cause {
     /// The place was retired: its restart budget ran out, so there will be no
     /// further occupant and a connect will not pend.
     pub const RETIRED: u64 = 4;
+    /// The occupant stopped making progress, and a supervisor said so.
+    ///
+    /// **Named above the frame and carried by it**, which is the one sentence
+    /// that separates this word from the four above it. Every other cause is a
+    /// fact the frame observed — an exception it took, a door call it answered,
+    /// a deadline it compared, a budget it spent. This one is a *judgement* over
+    /// what an occupant published about itself, and RFC 0008 puts that judgement
+    /// in a supervisor: `f_supervisor::policy::fate` is where it is made, and
+    /// nothing in `kernel/` computes it.
+    ///
+    /// The high half carries no vector and no status. What it carries is the
+    /// occupant's own count of abandoned frames at the moment the judgement was
+    /// made — the reading the decision was taken on, beside the decision, for
+    /// the reason a claim carries its workload.
+    /// Unit of the detail: frames — the occupant's own abandoned-frame count.
+    pub const TIMEDOUT: u64 = 5;
 
     /// Pack a cause and its detail into one word.
     ///
@@ -280,7 +309,7 @@ pub mod cause {
     /// Is this a cause a component may be told?
     #[must_use]
     pub const fn known(cause: u64) -> bool {
-        matches!(cause, FAULT | EXIT | STOPPED | RETIRED)
+        matches!(cause, FAULT | EXIT | STOPPED | RETIRED | TIMEDOUT)
     }
 
     /// A word for a log.
@@ -291,6 +320,7 @@ pub mod cause {
             EXIT => "exit",
             STOPPED => "stopped",
             RETIRED => "retired",
+            TIMEDOUT => "timed out",
             _ => "unknown",
         }
     }
@@ -844,8 +874,17 @@ mod tests {
         for kind in [0i32, 8, -1, i32::MAX] {
             assert!(!notice::known(kind));
         }
-        for cause in [0u64, 5, u64::MAX] {
+        // Six and not five: `cause::TIMEDOUT` took five on 2026-09-24 and this
+        // line is the one that had to move for it, which is the point of
+        // asserting the first *unnamed* value rather than a handful of large
+        // ones. RFC 0123.
+        for cause in [0u64, 6, u64::MAX] {
             assert!(!cause::known(cause));
+            assert_eq!(cause::label(cause), "unknown");
+        }
+        for cause in [cause::FAULT, cause::EXIT, cause::STOPPED, cause::RETIRED, cause::TIMEDOUT] {
+            assert!(cause::known(cause));
+            assert_ne!(cause::label(cause), "unknown");
         }
     }
 

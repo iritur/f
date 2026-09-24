@@ -31,6 +31,22 @@
 //! Neither half is novel and neither should be clever. The archive is POSIX
 //! ustar with every variable field nailed to a constant.
 
+/// The longest path ustar's name field can hold.
+///
+/// One hundred bytes, and it is the format's rather than this tree's: a ustar
+/// header's name field is `header[0..100]` and a name that fills it leaves no
+/// room for the NUL, so the predicate in [`Tar::file`] is `>= NAME_MAX` and 100
+/// is already over.
+///
+/// It is a constant rather than a literal in that predicate because
+/// `xtask::lint_paths` is the other reader: three CI jobs failed on 2026-09-23
+/// with four RFC filenames at or past this bound, and the check that could have
+/// said so before the push is a string length. Two constants for one format
+/// field would be the defect `lint-bounds` exists to find, so there is one and
+/// the lint reads it from here.
+/// Unit: bytes.
+pub const NAME_MAX: usize = 100;
+
 /// A digest, as the sixty-four characters everything else in the world prints.
 #[must_use]
 pub fn hex(digest: &[u8; 32]) -> String {
@@ -84,9 +100,9 @@ impl Tar {
     /// its own set of variable fields and this type's whole claim is that it
     /// has none.
     pub fn file(&mut self, name: &str, executable: bool, data: &[u8]) -> Result<(), String> {
-        if name.len() >= 100 {
+        if name.len() >= NAME_MAX {
             return Err(format!(
-                "{name} is {} bytes and ustar's name field is 100. Shorten the path,\n\
+                "{name} is {} bytes and ustar's name field is {NAME_MAX}. Shorten the path,\n\
                  or teach this to write a prefix field — but not a PAX header.",
                 name.len()
             ));

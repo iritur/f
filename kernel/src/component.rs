@@ -281,6 +281,18 @@ const OCCUPANT_MICROS: u64 = 500_000;
 /// that file's own note says what the run of ids has become: not a forecast that
 /// keeps coming true, but a consequence of the bound being a constant. RFC 0044
 /// is where it stops.
+///
+/// **Nine, and the ninth is `user/virtio-input`.** The ordinals above are the
+/// order this bound moved and not the order `COMPONENTS` lists — `user/panel`
+/// was the eighth component file when the paragraph above it was written, and
+/// the driver that carries a keystroke arrived after it. This paragraph is here
+/// because the one above said *eight* over a nine for a commit, and RFC 0116 has
+/// since made this constant a `lint-bounds` bound: the next reader of that
+/// failure lands on these paragraphs, so the last of them has to say the number
+/// the constant says. `kernel/src/state.rs`'s `COMPONENT_TREE_8` records what
+/// this one cost — a ninth component file dropped in silence, reported by `sim
+/// --join` as a stale or partial build, which is why `component::places_dropped`
+/// now makes the overflow a refusal rather than an absence.
 const PLACES_MAX: usize = 9;
 
 /// Why the lifecycle could not do what it was asked.

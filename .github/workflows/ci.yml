@@ -175,6 +175,11 @@ jobs:
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
       - run: cargo xtask lint-bounds
+      # The same argument as the line above, applied to a string: three jobs in
+      # this file went red on four RFC filenames past ustar's 100-byte name
+      # field, and the only thing checking that packs the whole tree. A path
+      # length is a file read.
+      - run: cargo xtask lint-paths
       - run: cargo xtask lint-mutations
       # The three rules from docs/what-must-be-stated.html section 15 that
       # could be made executable. CONTRIBUTING.md carries all twelve and says

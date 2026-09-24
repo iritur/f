@@ -157,7 +157,17 @@ fn supervise() -> u64 {
     // arrives at. It is **not** a wait — an empty ring means nothing happened,
     // which is the ordinary case and the reason this returns rather than spins.
     let mut told = 0;
-    let mut died = [false; crate::routing::PLACES_MAX];
+    // The cause each place's occupant went by, as the notice carried it, packed.
+    //
+    // **Words and not flags, since `E3-B05e`.** This was `[bool; PLACES_MAX]`
+    // and the decision below read it as *faulted*, which meant a supervisor told
+    // an occupant had exited would have restarted it as though it had crashed —
+    // under a policy whose entire content is telling those two apart. The cause
+    // has been in `Cqe::ext` since RFC 0008 and nothing read it.
+    //
+    // Zero is *nothing died here*, which is safe for the reason it is safe on
+    // the routing page: zero is not a cause, so no notice can produce it.
+    let mut ended = [0u64; crate::routing::PLACES_MAX];
     while let Ok(Some(entry)) = control.take() {
         if !f_abi::control::is_notice(&entry) {
             // An answer to something submitted on a previous run, arriving now
@@ -176,14 +186,19 @@ fn supervise() -> u64 {
             continue;
         }
         told += 1;
-        // Which place, by the endpoint the notice pends in. The board is the
-        // only thing that maps a handle to a row, which is why a supervisor is
-        // given its endpoints rather than left to infer them.
+        // R04 again, one field in: a cause this build cannot read is carried
+        // through rather than translated, and `Record::restarts_after_cause`
+        // answers `Leave` for it. Refused at the decision and not here, because
+        // *told and did not act* is a fact worth having in `TOLD` — a drain that
+        // dropped the notice would report a death nobody was told about.
         for (index, row) in board.rows.iter().enumerate().take(board.places) {
+            // Which place, by the endpoint the notice pends in. The board is the
+            // only thing that maps a handle to a row, which is why a supervisor
+            // is given its endpoints rather than left to infer them.
             if u64::from(row.endpoint) == entry.user_data
-                && let Some(slot) = died.get_mut(index)
+                && let Some(slot) = ended.get_mut(index)
             {
-                *slot = true;
+                *slot = entry.ext;
             }
         }
     }
@@ -229,11 +244,19 @@ fn supervise() -> u64 {
             assembled.as_ref().and_then(|it| it.filled.get(index)).copied().unwrap_or(false);
         let verdict = if taken {
             crate::policy::Verdict::Leave
-        } else if died.get(index).copied().unwrap_or(false) {
-            // `faulted`: an occupant the frame tore down is a death this
-            // supervisor treats as a fault. A stop is the supervisor's own act
-            // and never arrives here as something to decide about.
-            crate::policy::decide(&declared(), &mut budget, true, false, board.now)
+        } else if let Some(packed) = ended.get(index).copied()
+            && packed != 0
+        {
+            // The cause the frame put on the notice, and not this component's
+            // guess at one. A stop still never restarts — it is this
+            // supervisor's own act — but now because the *word* says `STOPPED`
+            // rather than because a boolean was hard-coded to say fault.
+            crate::policy::decide(
+                &declared(),
+                &mut budget,
+                f_abi::control::cause::of(packed),
+                board.now,
+            )
         } else if budget == crate::policy::Budget::default() {
             crate::policy::Verdict::Restart(0)
         } else {
