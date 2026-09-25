@@ -16,10 +16,11 @@
 #
 # What it declares, in one paragraph: a compositor in the `private` speculation
 # domain, made out of an account's memory with a heap large enough for one
-# retained graph, serving one client on one ring whose deltas travel inline;
-# restarted on a fault and not on an exit, at the price of every client's
-# retained scene; in the soft class, because nothing here yet has a deadline it
-# can miss; and publishing fifteen numbers about itself that a reader can check
+# retained graph, serving one client on one ring whose deltas travel inline and
+# are capped at fifty a frame; restarted on a fault and not on an exit, at the
+# price of every client's retained scene; in the soft class, because that is
+# the lowest-ranked class with a deadline and the compositor is the least
+# important deadline task on the machine; and publishing fifteen numbers about itself that a reader can check
 # against what a client asked for — four about what it applied, five that are one
 # frame's story (the rung it would draw with, the frame it last closed, the
 # deadline that frame carried, what a frame costs here, and what was given up to
@@ -33,7 +34,7 @@
 # STATE_NODES_MAX` exactly. This manifest is full, and the paragraph at the foot of
 # the file says what the next node costs.
 
-schema = 4
+schema = 5
 name   = "compositor"
 image  = "user/compositor"
 
@@ -121,6 +122,35 @@ type   = "endpoint"
 rights = ["write", "grant"]
 from   = "supervisor"
 
+# The routing page, and the reason this compositor could not be served from its
+# place until it was declared. `E3-B05e`, RFC 0129: a place's occupant is told
+# where its rings are on a board the frame fills in before its first
+# instruction, and a component that declares no `board` gets no board — so the
+# occupant this place held had nowhere to be told anything, its serving life
+# would have ended `NO_ROUTING`, and `kernel/src/compositor.rs` stood a second
+# compositor up *beside* the place to have one that could run. That second
+# instance published the reading a supervisor judged, while the one it stopped
+# and restarted was this place's, which had never run. `user/virtio-blk` hit the
+# same wall first and answered it the same way (`TODO.md` `E1-B05`). One page,
+# which the frame refuses at any other size: `f_compositor::routing::BYTES`.
+[[capability]]
+name   = "board"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
+# The data ring's memory, for the board's reason one step on: the frame writes
+# the header as the grantor and this component adopts the server end, and a
+# component that forbids `unsafe` cannot map the page for itself. One page; how
+# deep the ring is and what it speaks stay the `[[ring]]` table's below.
+[[capability]]
+name   = "data"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
 # --- Rings: the control ring is implicit; this is the data ring ---------------
 
 # One server ring, one client, speaking `scene` version 1 — the opcode space
@@ -151,6 +181,35 @@ from   = "supervisor"
 # nothing for want of time, and a bit claiming otherwise would be R08 with a
 # feature name on it. `E3-B01h` is what computes a wake time from a commit's
 # deadline, and that is the task that may declare it.
+#
+# `deltas_per_frame_max = 50`: the cap `docs/design/ring-scene-boot.html`
+# section 10 asks for — *not merely a lower priority, an explicit cap, so a
+# pathological frame cannot transiently starve anything above it* — declared
+# where RFC 0128 put it and required of every `scene` server, so a compositor
+# without one is refused by `cargo xtask lint-manifests` and by the frame's own
+# reader rather than noticed.
+#
+# Fifty is section 07's number and not one chosen here: *a typical UI frame
+# changes somewhere between five and fifty nodes*, and the batch this component
+# sizes its frame for, `f_scene::commit::DELTAS_MAX`, is that with headroom to
+# sixty-four. So a frame at or under fifty is the frame the design is drawn for
+# and is never touched; a frame past it is the pathological one, and the
+# fifty-first delta onward is refused rather than applied, with the commit that
+# closes the frame never counted — the frame still closes, on time, with the
+# changes it could afford. That is `E3-B07`'s *miss quality rather than the
+# frame*, and it is why the cap sits below the batch rather than at it: the
+# sixty-fifth delta poisons the batch and loses the frame, and a cap that is
+# only reached after that point would be a cap that only ever stops frames.
+#
+# What this counts is deltas crossing this ring, and that is a stand-in the
+# RFC names rather than hides. Section 10 caps the compositor's **GPU**
+# submissions, and this component submits nothing to a device — no ring from
+# here reaches `virtio-gpu`. Every delta is the same fifty-six bytes, so a cap
+# in deltas is a cap in bytes accepted per frame, which bounds what one frame
+# can cost this component to apply. *What would reverse this:* a client ring
+# from this component to a display driver, at which point the cap moves to that
+# ring and counts this component's own submissions — and the unit becomes what
+# a submission there moves, which is bytes of surface and not deltas.
 [[ring]]
 name        = "scene"
 role        = "server"
@@ -161,6 +220,7 @@ entries     = 16
 payload     = "inline"
 clients     = 1
 features    = []
+deltas_per_frame_max = 50
 
 # --- Restart: the supervisor's policy, the frame's mechanism ------------------
 
@@ -194,26 +254,36 @@ budget_window_ms = 60_000
 
 # --- Reservation: what admission may refuse ----------------------------------
 
-# Soft class, and the reader who expects otherwise is owed the argument, because
-# a compositor is the component a reader would most expect to hold a deadline.
+# Soft class, and it is a decision now rather than a waypoint. RFC 0128.
 #
-# It does not hold one yet, and declaring `hard` on the strength of what it will
-# hold would be R08's own failure: nothing in this build schedules against a
-# commit's deadline, so there is no deadline this component can miss and a
-# reserved core would be capacity held for work nothing does. `E3-B01h` is the
-# task that computes a wake time backwards from the next scanout, and that task
-# is what earns `hard` here — together with RFC 0007's schedulability test, which
-# is what would have to grant it.
+# `docs/design/ring-scene-boot.html` section 10: *the compositor is the
+# lowest-ranked deadline task on the machine.* This tree's admission vocabulary
+# has four urgencies and two of them carry a deadline at all — `abi::class::HARD`,
+# *deadline must be met*, and `abi::class::SOFT`, *deadline honoured
+# best-effort; missing it degrades quality*. The lowest-ranked deadline class is
+# `soft`, and its own definition is `E3-B07`'s policy word for word. RFC 0025
+# makes the declared class a ceiling, so nothing this component ever submits —
+# to a display driver, the day it has one — can outrank a hard-class entry.
 #
-# **`E3-B01h` has now landed and this line did not move, which is worth stating
-# rather than leaving as a forecast that quietly came due.** What that task built
-# is the arithmetic: a rolling p99 over this component's own frames, a wake time
-# computed backwards from the next scanout, and a word saying whether the last
-# frame fitted. What it did not build is anything that *misses* — nothing here
-# renders, so no work is scheduled against a deadline and there is still no
-# deadline this component can fail to meet. `hard` would be capacity reserved for
-# work nothing does. The line that earns it is the first one that draws, together
-# with RFC 0007's schedulability test, which is what would have to grant it.
+# **This line used to say the first task that draws would earn `hard`, and that
+# was wrong in a way worth keeping.** A hard reservation here holds whole
+# physical cores and their exclusion domains, and `abi::reserve::Table` grants
+# them first come first served — it has no rank to give, only capacity to hand
+# out in order. So a hard-class compositor is not the lowest-ranked deadline
+# task; on a part that cannot partition it is the one that takes the only
+# reservation the machine has and leaves the audio loop section 10 protects to be
+# refused. `abi::reserve::Demand::displaces` is that arithmetic, and
+# `xtask::manifest`'s `the_compositor_is_the_lowest_ranked_deadline_task` asks it
+# of the record this file compiles to. And on the machine every boot in this
+# tree runs on, `kernel/src/admit.rs` already says a hard reservation is refused
+# for cores — so `hard` here would be every compositor boot refused at its spawn.
+# Both readers now refuse `class = "hard"` beside a `scene` server ring.
+#
+# *What would reverse this:* an admission that ranks within the hard class —
+# deadlines sharing a core under a schedulability test, rather than whole cores
+# held apart — at which point *lowest-ranked* is a position in that ranking,
+# this line is `hard` with the longest period on the machine, and RFC 0128's
+# refusal is the thing that changes.
 #
 # The word is load-bearing at run time and not only at admission, exactly as it
 # is for the three drivers: the frame reads it out of the compiled record and

@@ -124,14 +124,21 @@ fn serve() -> ! {
     // like, and a zero length taken for a length reads as a peer problem rather
     // than as a frame that did not speak.
     if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_ROUTING);
+        report(&board, None, None, &Inbound::UNCONNECTED, stopped::NO_ROUTING);
         end(stopped::NO_ROUTING)
     }
 
     let Some(parts) = laid_out(&board) else {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::BAD_ROUTING);
+        report(&board, None, None, &Inbound::UNCONNECTED, stopped::BAD_ROUTING);
         end(stopped::BAD_ROUTING)
     };
+    // Which occupant of its place this is, as the control ring's own header says
+    // and nothing on the board does. Taken once, here, and reported on every
+    // ending after this line — including the starved one, whose reading a
+    // supervisor judges exactly as it judges a serving one's, so it owes the same
+    // answer to *which instance published this*. `reported::EPOCH` is the long
+    // form.
+    let epoch = parts.epoch;
 
     // --- the graph ----------------------------------------------------------
     //
@@ -150,7 +157,7 @@ fn serve() -> ! {
     // reachable outcome rather than a name for something that aborts.
     let heap = Heap::COMPONENT;
     if !heap.valid() || (heap.bytes() as usize) < crate::HELD_BYTES + crate::HEAP_OVERHEAD {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_GRAPH);
+        report(&board, None, Some(epoch), &Inbound::UNCONNECTED, stopped::NO_GRAPH);
         end(stopped::NO_GRAPH)
     }
     // **Two boxes and not one, and `crate::tree::Held`'s own comment is the
@@ -349,7 +356,19 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
+        let closed = held.counters().frames;
         if let Some(answer) = held.offer(&entry, &payload, now) {
+            // **The cut, `E3-B01`**, when this entry closed a frame: the three
+            // counters as they stand now, before the commit's completion is
+            // posted, so the ring's `Release` below is what makes them visible
+            // to a client that reaps it. `crate::routing::reported::CUT_FRAMES`
+            // argues the moment; nothing here is counted that was not already.
+            let counters = *held.counters();
+            if counters.frames != closed {
+                let _ = board.write64(reported::CUT_DRAINED, counters.drained);
+                let _ = board.write64(reported::CUT_ANSWERED, counters.answered);
+                let _ = board.write64(reported::CUT_FRAMES, counters.frames);
+            }
             if parts.data.post(answer).is_err() {
                 break stopped::NO_RING;
             }
@@ -367,7 +386,7 @@ fn serve() -> ! {
         }
     };
 
-    report(&board, Some(&held), &inbound, outcome);
+    report(&board, Some(&held), Some(epoch), &inbound, outcome);
     end(outcome)
 }
 
@@ -408,6 +427,9 @@ fn drain_input(input: Server, inbound: &mut Inbound, held: &mut Held<'_>) -> Res
 /// Everything the routing page said, in the types that use it.
 struct Parts {
     control: Client,
+    /// The `epoch` the frame wrote into the control ring's header, read back
+    /// through the adoption rather than off the board. `reported::EPOCH`.
+    epoch: u32,
     data: Server,
     /// The input driver's data channel, whose consumer end this component
     /// holds, or `None` where the frame connected none — `input=withheld`, and
@@ -443,8 +465,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         feature::CONTROL_EVENTS,
         feature::CONTROL_EVENTS,
     )
-    .ok()?
-    .client();
+    .ok()?;
+    // Read off the header before the adoption becomes a client end, because the
+    // header is where the frame said which occupant this is and the client end
+    // does not carry it. `reported::EPOCH` says why it is this word and not one
+    // the frame writes on the board.
+    let epoch = control.epoch();
+    let control = control.client();
 
     // The data ring offers nothing and requires nothing. A scene delta's payload
     // travels in the channel's own arena — `payload = "inline"` in the manifest
@@ -480,6 +507,19 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
+    // The cap, `E3-B07e`, and unlike the pacing inputs below it **is** refused
+    // at zero. Every one of those has an honest answer at zero; this one does
+    // not, because zero is what a frame that never found this component's
+    // framed ring writes, and a compositor that read it as *no cap* would serve
+    // uncapped over a word nobody wrote. `crate::routing::at::DELTAS_PER_FRAME_MAX`
+    // is the argument. Narrowed here, where the page's word becomes the
+    // manifest's `u32`; a word past that range is a page this build cannot
+    // honour, not a cap to truncate.
+    let deltas_per_frame_max = u32::try_from(board.read64(at::DELTAS_PER_FRAME_MAX).ok()?).ok()?;
+    if deltas_per_frame_max == 0 {
+        return None;
+    }
+
     // The pacing inputs, read and **not** refused. Every one of them has an
     // honest answer at zero — no display declared, no margin wanted, no
     // capability reported — and `crate::pacing` says what each zero produces: a
@@ -498,6 +538,7 @@ fn laid_out(board: &Window) -> Option<Parts> {
         // it becomes: no latch, published as a decline on every frame, rather
         // than a truncation that would name a different node.
         pointer_node: u32::try_from(board.read64(at::POINTER_NODE).ok()?).unwrap_or(0),
+        deltas_per_frame_max,
     };
 
     // Not refused at any value, and the reason is the same shape as the pacing
@@ -520,7 +561,7 @@ fn laid_out(board: &Window) -> Option<Parts> {
         Some(Adopted::at(input_at, len, 0, 0).ok()?.server())
     };
 
-    Some(Parts { control, data, input, spins, plan, doorbell })
+    Some(Parts { control, epoch, data, input, spins, plan, doorbell })
 }
 
 /// Write what this component did into the half of the routing page that is its
@@ -530,8 +571,17 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// a page this function never finished finds a zero rather than a plausible
 /// tally. RFC 0013's *read, never delivered* — the frame takes these numbers out
 /// of memory it granted, and this component is never asked for them.
-fn report(board: &Window, held: Option<&Held>, inbound: &Inbound, outcome: u64) {
+fn report(
+    board: &Window,
+    held: Option<&Held>,
+    epoch: Option<u32>,
+    inbound: &Inbound,
+    outcome: u64,
+) {
     let mut published = 0;
+    // Which instance wrote everything below, plus one, or zero for a run that
+    // never adopted a control ring. Before the magic like every other word here.
+    let _ = board.write64(reported::EPOCH, epoch.map_or(0, |epoch| u64::from(epoch) + 1));
     // The input ring, `E3-B04g`, on every ending and whether or not a graph was
     // ever held: a component that refused its routing page still says it was
     // not connected, which is the true sentence about that run.
@@ -565,6 +615,9 @@ fn report(board: &Window, held: Option<&Held>, inbound: &Inbound, outcome: u64) 
         let _ = board.write64(reported::REFUSED, counters.refused);
         let _ = board.write64(reported::TOKEN, counters.token);
         let _ = board.write64(reported::LATE, counters.late);
+        // The cap's refusals, `E3-B07e`: their own word beside `REFUSED`, which
+        // `reported::CAPPED` says is a different fact.
+        let _ = board.write64(reported::CAPPED, counters.capped);
         // The pacing decision, whole. Four numbers where one would do, because
         // the exit's sentence is a subtraction and a reader handed only the
         // answer cannot check it — `crate::routing::reported::WAKE` argues the
@@ -640,6 +693,20 @@ fn report(board: &Window, held: Option<&Held>, inbound: &Inbound, outcome: u64) 
         let _ = board.write64(reported::POINTER_UNSTAMPED, latch.unstamped());
         let _ = board.write64(reported::LATCHES, latch.latches());
         let _ = board.write64(reported::LATCH_DECLINES, latch.declines());
+        // The restore, RFC 0131: the tally, the refusals, and the graph's own
+        // answer for the pointer's node — `reported::RESTORES` says why the last
+        // is the one a tally cannot fake.
+        let _ = board.write64(reported::RESTORES, latch.restores());
+        let _ = board.write64(reported::UNRESTORED, counters.unrestored);
+        let held_at = held.pointer_transform();
+        let _ = board.write64(
+            reported::LATCH_HELD_X,
+            held_at.map_or(0, |transform| transform.tx_x65536 as u64),
+        );
+        let _ = board.write64(
+            reported::LATCH_HELD_Y,
+            held_at.map_or(0, |transform| transform.ty_x65536 as u64),
+        );
         let _ = board.write64(reported::LATCH_AIM_NANOS, latch.aimed_at_nanos());
         if let Ok(latched) = latch.last() {
             let _ = board.write64(reported::LATCH_ENTRY, u64::from(latched.before_entry()));

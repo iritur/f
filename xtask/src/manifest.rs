@@ -76,7 +76,26 @@ use std::path::{Path, PathBuf};
 /// them in the record and grew it by a quarter — and the assembler owns a record
 /// by value, so every boot in the tree died on a guard page three subsystems
 /// away. `abi::manifest::Face` holds the whole argument.
-pub const SCHEMA: u64 = 4;
+///
+/// Five since RFC 0128, which lets a `scene` server declare
+/// `deltas_per_frame_max` and requires it to. The field is four of the five
+/// bytes a ring slot had reserved, so no width in the record moves — the check
+/// RFC 0101 asks for before a width changes came out as *no width changes*,
+/// and `the_record_layout_matches_the_abi` pins the offset. A schema-4 manifest
+/// is refused and edited rather than defaulted: a compositor whose ring said
+/// nothing about a cap has not chosen an uncapped one.
+pub const SCHEMA: u64 = 5;
+
+/// The one protocol whose rings carry frames. `abi::manifest::FRAMED_PROTOCOL`,
+/// mirrored for [`CAP_TYPES`]'s reason and checked by
+/// `the_record_layout_matches_the_abi`.
+pub const FRAMED_PROTOCOL: &str = "scene";
+
+/// The largest `deltas_per_frame_max` a framed server may declare.
+/// `abi::manifest::FRAME_DELTAS_CAP_MAX`, which is `f_scene::commit::
+/// DELTAS_MAX` — `the_frame_cap_bound_is_the_batchs` reads both.
+/// Unit: deltas per frame.
+pub const FRAME_DELTAS_CAP_MAX: u64 = 64;
 
 /// The longest component, capability or ring name, in bytes. Names are
 /// `[a-z0-9-]`, so bytes are characters. Thirty-two is what a fixed-layout
@@ -444,6 +463,10 @@ mod record {
     pub const NEED: usize = 80;
     /// Bytes in one `[[ring]]` slot.
     pub const RING: usize = 104;
+    /// Where in a ring slot `deltas_per_frame_max` is stamped —
+    /// `abi::manifest::Ring::deltas_per_frame_max`, which is where four of the
+    /// slot's five reserved bytes were. RFC 0128.
+    pub const RING_CAP_AT: usize = 100;
     /// Bytes in the `[transfer]` declaration — `abi::transfer::Declaration`.
     pub const TRANSFER: usize = 16;
     /// Bytes in one `[[device]]` slot — `abi::manifest::Binding`.
@@ -657,6 +680,10 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
             record::NO_CAPABILITY
         };
         put8(&mut out, at + 98, through);
+        // RFC 0128. Absent reads as zero, which is what every ring but a framed
+        // server carries; the checker has already required it there and refused
+        // it everywhere else, so this writes what was judged.
+        put32(&mut out, at + record::RING_CAP_AT, narrow(int(table, "deltas_per_frame_max")));
     }
 
     // `[[state]]`, in file order — which is the order the words tile the data
@@ -1465,6 +1492,9 @@ impl Checker<'_> {
         // Any server ring at all: `Manifest::serves` says why the answer is
         // read here rather than counted downstream.
         let mut serves = false;
+        // A server ring speaking `scene`, which `[reservation]` below needs to
+        // know about: RFC 0128 refuses such a component the hard class.
+        let mut frames = false;
         for (index, (line, table)) in ring_items.into_iter().enumerate() {
             let place = format!("[[ring]] #{}", index + 1);
             let mut f = self.fields(place, line, table);
@@ -1479,15 +1509,34 @@ impl Checker<'_> {
             }
             let role = f.one_of("role", ROLES).map(|(_, r)| r);
             serves |= role.as_deref() == Some("server");
-            if let Some((line, protocol)) = f.string("protocol", true) {
+            let protocol = f.string("protocol", true);
+            if let Some((line, protocol)) = &protocol {
                 let sound = !protocol.is_empty()
                     && protocol.len() <= NAME_MAX
                     && protocol.bytes().all(|b| {
                         b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.'
                     });
                 if !sound {
-                    f.refuse(line, &format!("`protocol = \"{protocol}\"` is not `[a-z0-9.-]` of at most {NAME_MAX} bytes"));
+                    f.refuse(*line, &format!("`protocol = \"{protocol}\"` is not `[a-z0-9.-]` of at most {NAME_MAX} bytes"));
                 }
+            }
+            // RFC 0128: a framed server declares its per-frame cap, and nothing
+            // else may. The whole label is compared, not a prefix, so
+            // `scene.v2` is a different protocol here exactly as it is to
+            // `abi::manifest::Ring::framed_server` — and a different protocol
+            // is one no compositor serves, which the frame finds at the first
+            // boot that connects a scene client to it.
+            let framed = role.as_deref() == Some("server")
+                && protocol.as_ref().is_some_and(|(_, p)| p == FRAMED_PROTOCOL);
+            frames |= framed;
+            if framed {
+                if let Some((line, cap)) = f.int("deltas_per_frame_max", true)
+                    && !(1..=FRAME_DELTAS_CAP_MAX).contains(&cap)
+                {
+                    f.refuse(line, &format!("`deltas_per_frame_max = {cap}` is not between 1 and {FRAME_DELTAS_CAP_MAX}; zero is no cap, and a cap above the batch a compositor sizes its frame for is reached only after the batch has refused the frame — RFC 0128"));
+                }
+            } else {
+                f.forbid("deltas_per_frame_max", "only a server speaking `scene` has a frame to count deltas in, and a cap nothing counts against is R08 — RFC 0128");
             }
             let min = f.int("version_min", true);
             let max = f.int("version", true);
@@ -1640,7 +1689,19 @@ impl Checker<'_> {
             }
             Some((line, table)) => {
                 let mut f = self.fields("[reservation]".into(), line, table);
-                let class = f.one_of("class", CLASSES).map(|(_, c)| c);
+                let declared = f.one_of("class", CLASSES);
+                // RFC 0128: the compositor is the lowest-ranked deadline task
+                // on the machine, and in this admission vocabulary that is the
+                // soft class — the hard one holds whole cores and their
+                // exclusion domains first come first served, which is ranking
+                // *above* the workload section 10 protects.
+                if frames
+                    && let Some((line, word)) = &declared
+                    && word == "hard"
+                {
+                    f.refuse(*line, "`class = \"hard\"` on a component serving `scene`: the compositor is the lowest-ranked deadline task on the machine, which is `soft` — a hard reservation holds whole cores and their exclusion domains and can be granted ahead of the deadline workload it must yield to — RFC 0128");
+                }
+                let class = declared.map(|(_, c)| c);
                 let memory = f.int("memory_bytes", true);
                 if let Some((line, bytes)) = memory {
                     let grain =
@@ -2046,7 +2107,7 @@ mod tests {
     /// test can break a single line of it.
     const SOUND: &str = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 4
+schema = 5
 name   = \"example\"
 image  = \"user/example\"
 domain = \"shared\"
@@ -2271,7 +2332,7 @@ unit   = \"entries\"
 
     #[test]
     fn a_later_schema_is_refused() {
-        refused_for(&edit("schema = 4", "schema = 5"), "knows schema 4");
+        refused_for(&edit("schema = 5", "schema = 4"), "knows schema 5");
     }
 
     #[test]
@@ -2793,8 +2854,8 @@ unit   = \"entries\"
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
         refused_for(&edit("name   = \"example\"", "name   = \"ex\\nample\""), "backslash");
-        refused_for(&edit("schema = 4", "schema = -1"), "signed");
-        refused_for(&edit("schema = 4", "schema = 4\nschema = 4"), "appears twice");
+        refused_for(&edit("schema = 5", "schema = -1"), "signed");
+        refused_for(&edit("schema = 5", "schema = 5\nschema = 5"), "appears twice");
         refused_for(&edit("[restart]", "[restart]\n[restart]"), "appears twice");
         refused_for(
             &edit("memory_bytes = 65536", "memory_bytes = { min = 65536 }"),
@@ -2806,7 +2867,7 @@ unit   = \"entries\"
             "same line",
         );
         refused_for(&edit("memory_bytes = 65536", "memory_bytes = 65_536_"), "between digits");
-        refused_for(&edit("schema = 4", "just some words"), "`key = value`");
+        refused_for(&edit("schema = 5", "just some words"), "`key = value`");
         // Underscores between digits are TOML and are read.
         let m = check(
             "user/example/manifest.toml",
@@ -2825,7 +2886,7 @@ unit   = \"entries\"
     fn a_syntax_error_stops_before_the_fields_are_judged() {
         // Otherwise a file with one broken line reports every field after it
         // as missing, which is noise wearing a finding's clothes.
-        let f = findings(&edit("schema = 4", "schema = 4\n[[capability"));
+        let f = findings(&edit("schema = 5", "schema = 5\n[[capability"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("array header"));
     }
@@ -2840,7 +2901,7 @@ unit   = \"entries\"
         // with no tree is one nobody can read.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 4
+schema = 5
 name   = \"init\"
 image  = \"user/init\"
 domain = \"shared\"
@@ -3098,6 +3159,247 @@ unit = \"none\"
             RECORD_ALIGN,
             "abi::transfer::RECORD_ALIGN has drifted from this checker's"
         );
+    }
+
+    /// RFC 0128's field, compared against the reader that judges it rather than
+    /// against a line of its source.
+    ///
+    /// `xtask` depends on `f-abi` now, so the constants and the offset are
+    /// compared as values: a mirror checked by reading text is a mirror a
+    /// reformatted line can walk past. The batch bound is the one number still
+    /// read as text, because `f-scene` is not a dependency of this crate and
+    /// the bound's whole meaning is that it is the batch's.
+    #[test]
+    fn the_frame_cap_bound_is_the_batchs() {
+        assert_eq!(
+            core::mem::offset_of!(f_abi::manifest::Ring, deltas_per_frame_max),
+            record::RING_CAP_AT,
+            "the cap has moved inside a ring slot, and this writer stamps it at the old offset"
+        );
+        assert_eq!(f_abi::manifest::FRAMED_PROTOCOL, FRAMED_PROTOCOL.as_bytes());
+        assert_eq!(u64::from(f_abi::manifest::FRAME_DELTAS_CAP_MAX), FRAME_DELTAS_CAP_MAX);
+        assert_eq!(u64::from(f_abi::manifest::SCHEMA), SCHEMA);
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let commit =
+            std::fs::read_to_string(root.join("scene/src/commit.rs")).expect("scene/src/commit.rs");
+        let batch: u64 = commit
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("pub const DELTAS_MAX: usize = "))
+            .and_then(|rest| rest.trim_end_matches(';').replace('_', "").parse().ok())
+            .expect("f_scene::commit::DELTAS_MAX");
+        assert_eq!(
+            batch, FRAME_DELTAS_CAP_MAX,
+            "the batch a compositor sizes its frame for has moved, so a cap at the old bound is \
+             either reached after the frame is poisoned or refuses frames the batch would hold"
+        );
+    }
+
+    /// Every manifest in the tree, compiled and then read by the frame's own
+    /// reader — which is the one round trip nothing else in this file makes.
+    ///
+    /// The offsets above say where this writer *should* stamp; this says the
+    /// reader believes what it stamped. A cap written one byte early lands in
+    /// the reserved byte and every compositor file is refused `Reserved` at
+    /// boot, which is the boot going red three subsystems from the cause.
+    #[test]
+    fn every_manifest_in_the_tree_is_read_by_the_frames_reader() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let mut framed = 0;
+        let mut read = 0;
+        for entry in std::fs::read_dir(root.join("user")).expect("user/") {
+            let dir = entry.expect("a directory entry").path();
+            let path = dir.join(FILE_NAME);
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let rel = format!(
+                "user/{}/{FILE_NAME}",
+                dir.file_name().and_then(|n| n.to_str()).expect("a UTF-8 name")
+            );
+            let bytes = compile(&rel, &text, &[0x90; 4])
+                .unwrap_or_else(|f| panic!("{rel} does not compile:\n{}", f.join("\n")));
+            let record = f_abi::manifest::Record::read_unaligned(&bytes)
+                .unwrap_or_else(|why| panic!("the frame refuses {rel}: {}", why.message()));
+            read += 1;
+            for ring in record.rings() {
+                if ring.framed_server() {
+                    framed += 1;
+                    assert_ne!(ring.deltas_per_frame_max, 0, "{rel} serves `scene` uncapped");
+                } else {
+                    assert_eq!(ring.deltas_per_frame_max, 0, "{rel} caps a ring with no frame");
+                }
+            }
+        }
+        assert!(read >= 9, "only {read} manifests were read, so the walk is not over the tree");
+        assert_eq!(framed, 1, "one compositor serves `scene` in this tree, and {framed} rings did");
+    }
+
+    /// [`SOUND`] with its client ring replaced by a server speaking `scene`,
+    /// carrying `tail` after the fields every server ring has.
+    fn scene_server(tail: &str) -> String {
+        let client = "\
+[[ring]]
+name        = \"store\"
+role        = \"client\"
+protocol    = \"store\"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = \"inline\"
+to          = \"store\"
+";
+        let server = format!(
+            "\
+[[ring]]
+name        = \"scene\"
+role        = \"server\"
+protocol    = \"scene\"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = \"inline\"
+clients     = 1
+{tail}"
+        );
+        edit(client, &server)
+    }
+
+    #[test]
+    fn a_scene_server_declares_its_cap_and_nothing_else_may() {
+        // The control first: a capped scene server is a sound manifest, so
+        // every refusal below is about the line it changes.
+        let sound = scene_server("deltas_per_frame_max = 50\n");
+        check("user/example/manifest.toml", &sound)
+            .unwrap_or_else(|f| panic!("a capped scene server was refused:\n{}", f.join("\n")));
+
+        refused_for(&scene_server(""), "`deltas_per_frame_max` is required and missing");
+        refused_for(&scene_server("deltas_per_frame_max = 0\n"), "not between 1 and 64");
+        refused_for(&scene_server("deltas_per_frame_max = 65\n"), "not between 1 and 64");
+        // A cap where nothing counts a frame: `SOUND`'s own client ring.
+        refused_for(
+            &edit(
+                "to          = \"store\"\n",
+                "to          = \"store\"\ndeltas_per_frame_max = 8\n",
+            ),
+            "`deltas_per_frame_max` is refused here",
+        );
+        // And the spelling round the rule: `scene` with something after it is
+        // another protocol, uncapped and unrequired, and a cap on it is refused
+        // exactly as the frame's reader refuses it.
+        refused_for(
+            &scene_server("deltas_per_frame_max = 50\n")
+                .replace("\"scene\"\nversion_min", "\"scene.v2\"\nversion_min"),
+            "`deltas_per_frame_max` is refused here",
+        );
+    }
+
+    #[test]
+    fn a_scene_server_is_refused_the_hard_class() {
+        let hard = scene_server("deltas_per_frame_max = 50\n").replace(
+            "class        = \"soft\"\nmemory_bytes = 65536",
+            "class        = \"hard\"\nmemory_bytes = 2097152\ncores = 1\ncpu_period_ns = 16666666\ncpu_budget_ns = 4166666",
+        );
+        refused_for(&hard, "the compositor is the lowest-ranked deadline task on the machine");
+        // The spelling round it that a file's order offers: `[reservation]`
+        // written above the ring, so a checker that learned about the ring as it
+        // read would judge the class before it knew. Tables are judged in the
+        // checker's order and not the file's, and this is what says so.
+        let (above, ring) = hard.split_once("[[ring]]\nname        = \"scene\"").unwrap();
+        let (ring, below) = ring.split_once("[restart]").unwrap();
+        let (between, reservation) = below.split_once("[reservation]").unwrap();
+        let (reservation, rest) = reservation.split_once("[transfer]").unwrap();
+        let reordered = format!(
+            "{above}[reservation]{reservation}[[ring]]\nname        = \"scene\"{ring}[restart]{between}[transfer]{rest}"
+        );
+        refused_for(&reordered, "the compositor is the lowest-ranked deadline task on the machine");
+        // The control: the same hard reservation on `SOUND`'s client ring is a
+        // sound manifest, so the refusal above is about serving `scene` and not
+        // about the reservation's shape.
+        let control = SOUND.replace(
+            "class        = \"soft\"\nmemory_bytes = 65536",
+            "class        = \"hard\"\nmemory_bytes = 2097152\ncores = 1\ncpu_period_ns = 16666666\ncpu_budget_ns = 4166666",
+        );
+        check("user/example/manifest.toml", &control)
+            .unwrap_or_else(|f| panic!("the hard-class control was refused:\n{}", f.join("\n")));
+    }
+
+    /// `E3-B07i`'s exit, asked of the record the compositor's manifest actually
+    /// compiles to rather than of a demand a test wrote down.
+    ///
+    /// Three answers from `f_abi::reserve`, the arithmetic the frame's spawn
+    /// runs. The declared demand is **honoured** on a machine shaped like the
+    /// boots' and on both described parts, and admitting it first costs no
+    /// hard-class workload the reservation it gets alone — which is what
+    /// *lowest-ranked* means where a reservation holds whole cores. The hard
+    /// variant is **refused** on the boots' machine, for cores, and on a part
+    /// that cannot partition it **displaces** the workload it must yield to:
+    /// the reason RFC 0128 did not build the class that looked like the answer.
+    #[test]
+    fn the_compositor_is_the_lowest_ranked_deadline_task() {
+        use f_abi::manifest::{HUGE_BYTES, class, domain};
+        use f_abi::reserve::{Demand, Machine, Offers, Refusal, Table};
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let rel = "user/compositor/manifest.toml";
+        let text = std::fs::read_to_string(root.join(rel)).expect(rel);
+        let bytes = compile(rel, &text, &[0x90; 4]).expect("the compositor's manifest compiles");
+        let record = f_abi::manifest::Record::read_unaligned(&bytes).expect("the frame reads it");
+        let declared = Demand::of(&record);
+        assert_eq!(declared.class, class::SOFT, "the compositor no longer declares `soft`");
+
+        // `kernel::admit::machine` under `-smp 2`: one contention domain, the
+        // frame's core in it.
+        let boots = Machine {
+            physical_cores: 2,
+            threads_per_core: 1,
+            cores_per_cache: 2,
+            cores_per_bandwidth: 2,
+            cache: Offers::Exclusion,
+            bandwidth: Offers::Exclusion,
+            partitions: 0,
+            frame_cores: 1,
+            reservable_bytes: 8 * HUGE_BYTES,
+            tick_ns: 1_000_000,
+        };
+        // A part with no partitioning and two four-core domains: exactly one
+        // hard reservation to give.
+        let poor =
+            Machine { physical_cores: 8, cores_per_cache: 4, cores_per_bandwidth: 4, ..boots };
+        // `kernel::admit`'s described part: siblings, RDT, partitions to spare.
+        let rich = Machine {
+            physical_cores: 16,
+            threads_per_core: 2,
+            cores_per_cache: 8,
+            cores_per_bandwidth: 16,
+            cache: Offers::Partition,
+            bandwidth: Offers::Partition,
+            partitions: 8,
+            reservable_bytes: 64 * HUGE_BYTES,
+            ..boots
+        };
+        let workload = Demand {
+            cores: 1,
+            period_ns: 4_000_000,
+            budget_ns: 1_500_000,
+            memory_bytes: HUGE_BYTES,
+            class: class::HARD,
+            domain: domain::SHARED,
+        };
+
+        for machine in [boots, poor, rich] {
+            assert!(
+                Table::new(machine).unwrap().admit(&declared).is_ok(),
+                "admission refused the compositor's own declaration on {machine:?}"
+            );
+            assert_eq!(declared.displaces(machine, &workload), Ok(false));
+        }
+        // The workload fits `poor` alone, so the `false` above is a statement
+        // about the compositor and not about a workload that never fitted.
+        assert!(Table::new(poor).unwrap().admit(&workload).is_ok());
+
+        let hardened = declared.hardened(1, 16_666_666, 4_166_666);
+        assert_eq!(Table::new(boots).unwrap().admit(&hardened).err(), Some(Refusal::NoCore));
+        assert_eq!(hardened.displaces(poor, &workload), Ok(true));
+        assert_eq!(hardened.displaces(rich, &workload), Ok(false));
     }
 
     /// The conversion from milliseconds to timer ticks is a number in this file

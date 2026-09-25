@@ -14,7 +14,7 @@
 //! lays the driver's data channel out, hands one end to each component, and
 //! never takes an entry off it.
 //!
-//! Four lines close on it.
+//! Five lines close on it.
 //!
 //! `E3-B04d`'s exit is *a driver component delivers events a compositor
 //! consumes, using `kernel/src/supervisor.rs`'s shared half rather than a fourth
@@ -46,6 +46,15 @@
 //! the only place a client that was never told a position can honestly put it;
 //! and `cargo xtask input` — the process that moved the pointer — checks the
 //! difference against the motion it injected.
+//!
+//! `E3-B04e`'s is *the latched value is the predicted one, asserted from both
+//! sides of the seam*, and it closes on the `gesture=steady` run. The driver
+//! holds a second predictor, fed where each report closes and asked about the
+//! display's first scanout, which this frame tells it — a target, stated by
+//! the party that declares the display, and never a reading. The verdict
+//! requires the compositor to have aimed there too, both sides to have
+//! extrapolated, and the two answers to be one value by one lead; the harness
+//! closes *how far it moved* with the one number neither side holds. RFC 0134.
 //!
 //! # Why the frame is not on `lint-stamp`'s list, and why that is truer now
 //!
@@ -306,23 +315,49 @@ const STILL_NODE: u32 = 3;
 /// How many nodes the setup deltas create. Unit: nodes.
 const SETUP_NODES: u64 = 3;
 
-/// How many transforms this client commits: the pointer's, at the origin, and
-/// the still sibling's. Unit: deltas.
+/// How many transforms this client commits: the pointer's, where the driver's
+/// accumulator starts, and the still sibling's. Unit: deltas.
 const COMMITTED_TRANSFORMS: u64 = 2;
 
-/// Where this client commits the pointer, along x.
+/// Where this client commits the pointer, along x — **and where this frame
+/// tells the driver its accumulator starts**, which is the same number on
+/// purpose.
 ///
-/// The origin, and not a number chosen to look like a screen position: this
+/// Where the accumulator starts, and not a position chosen for a screen: this
 /// client is never told where the pointer is — that is `E3-B04g` — so the one
 /// place it can honestly commit it is where the driver's accumulator starts.
 /// `commit`'s own doc is the argument, and it is what makes *latched minus
 /// committed* the motion the harness injected rather than an offset from a
 /// position somebody made up.
+///
+/// **Not zero, and that is the point of it.** Until 2026-09-25 the driver could
+/// not be told a start, so it began at `(0, 0)` and this client committed
+/// there; and over a committed translation of zero, a latch that *added* the
+/// position to it — `tx = committed.tx + predicted` — submits exactly the frame
+/// a latch that replaced it does. The harness's subtraction and this file's
+/// *latched is where the driver's accumulator ended* both passed it; only the
+/// host test, which commits at `(640, 360)`, caught it. It is the host
+/// fixture's number here too, so the boot catches it on a device path. The
+/// same shape as the identity matrix `COMMITTED_A_X65536` replaced, on the
+/// other axis of the transform. RFC 0132.
 /// Unit: device pixels, scaled by 65 536.
-const COMMITTED_TX_X65536: i64 = 0;
+const COMMITTED_TX_X65536: i64 = 640 * 65_536;
 
 /// And along y. Unit: device pixels, scaled by 65 536.
-const COMMITTED_TY_X65536: i64 = 0;
+const COMMITTED_TY_X65536: i64 = 360 * 65_536;
+
+// Non-zero on each axis, which is the property; different from each other, so
+// a latch that crossed the axes is a number that moved; and inside `i32`, which
+// is the accumulator the driver is told to start it in and refuses otherwise.
+const _: () = assert!(
+    COMMITTED_TX_X65536 != 0
+        && COMMITTED_TY_X65536 != 0
+        && COMMITTED_TX_X65536 != COMMITTED_TY_X65536
+        && COMMITTED_TX_X65536 <= i32::MAX as i64
+        && COMMITTED_TY_X65536 <= i32::MAX as i64
+        && COMMITTED_TX_X65536 >= i32::MIN as i64
+        && COMMITTED_TY_X65536 >= i32::MIN as i64
+);
 
 /// Where the still sibling is committed, along x.
 ///
@@ -362,6 +397,29 @@ const COMMITTED_D_X65536: i64 = 3 * 65_536;
 /// this boot commits does not come close to.
 /// Unit: nanoseconds.
 const SCANOUT_PERIOD_NANOS: u64 = 16_666_667;
+
+/// The display's first scanout, which this frame tells the **driver** so that
+/// its own predictor is asked the question the compositor's latch will be.
+///
+/// The display this boot declares scans out at every multiple of
+/// [`SCANOUT_PERIOD_NANOS`] from the channel's epoch — phase zero, which is
+/// `f_compositor::pacing::scanout_after`'s own assumption and has that
+/// function's reversal: a display that reports its phase. So its first scanout
+/// is one period in, and that is a statement about a display and not a reading
+/// of anything: RFC 0120 calls the instant a compositor aims at a *target*, and
+/// this is the same kind of instant said by the party that declares the
+/// display.
+///
+/// **It is not the compositor's aim, and the verdict does not assume it is.**
+/// On one worker core the driver has been reaped before the compositor mints
+/// its aim, so the aim cannot reach the driver, and a frame that carried it
+/// there would first have had to learn it. The compositor mints its own out of
+/// the period and its clock; the steady gesture's verdict then requires that
+/// aim, this instant and the instant the driver says it was asked about to be
+/// one number — two predictors asked about two instants disagree for a reason
+/// that is not a defect, and that is a sentence rather than a pass. RFC 0134.
+/// Unit: nanoseconds.
+const FIRST_SCANOUT_NANOS: u64 = SCANOUT_PERIOD_NANOS;
 
 /// What it tells the compositor to hold back against its estimate being wrong.
 /// Unit: nanoseconds.
@@ -454,6 +512,44 @@ impl Half {
     }
 }
 
+/// Which motion the harness says it injects, and so which latch the verdict
+/// requires.
+///
+/// Not a [`Half`], because it is not a control: both gestures give the
+/// compositor the ring, and what differs is whether the motion turns inside
+/// the predictor's window. The frame cannot see the motion — the harness is the
+/// process that moved the pointer — so the harness says which one it is, on the
+/// command line beside `input=deliver`, and the verdict holds it to what it
+/// said: a steady gesture that held is refused, and so is a turning one that
+/// extrapolated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Gesture {
+    /// The motion turns inside the window, so both predictors **hold** the
+    /// newest report. `E3-B01i`'s gesture: latched minus committed is exactly
+    /// the motion, and the seam agrees only by copying one sample.
+    Turning,
+    /// The motion does not turn, so both predictors **extrapolate**. `E3-B04e`'s
+    /// gesture, and the one on which a held latch is refused as vacuous.
+    Steady,
+}
+
+impl Gesture {
+    /// The gesture a boot's command line names: `gesture=steady`, or turning.
+    #[must_use]
+    pub fn of(boot: &BootInfo) -> Self {
+        if boot.has_parameter(b"gesture=steady") { Self::Steady } else { Self::Turning }
+    }
+
+    /// A word for the log.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Turning => "turning",
+            Self::Steady => "steady",
+        }
+    }
+}
+
 /// Why the demonstration could not be run.
 ///
 /// None of these is the result being looked for. A path that could not be set up
@@ -486,6 +582,9 @@ pub enum Trouble {
     NoHeap,
     /// That heap and `f_compositor::routing::HEAP_BYTES` are different numbers.
     HeapDisagrees,
+    /// The compositor's record serves no `scene` ring, so there is no cap to
+    /// hand it. `crate::compositor::Trouble::Unframed`'s reason, RFC 0128.
+    Unframed,
     /// A component could not be built as a process, carrying which step.
     Process(crate::process::Error),
     /// A component's state tree could not be published or read back.
@@ -522,6 +621,10 @@ impl Trouble {
             Self::NoHeap => "the compositor's manifest declares no heap for its graph",
             Self::HeapDisagrees => {
                 "the manifest's heap and the compositor crate's own constant are different numbers"
+            }
+            Self::Unframed => {
+                "the compositor's record serves no `scene` ring, so there is no \
+                 deltas_per_frame_max to hand it (RFC 0128)"
             }
             Self::Process(_) => "a component could not be built as a process",
             Self::StateTree(_) => "a component's state tree could not be published or read",
@@ -638,6 +741,31 @@ pub struct Reported {
     pub pointer_x_x65536: i64,
     /// The same along y. Unit: device pixels, scaled by 65 536.
     pub pointer_y_x65536: i64,
+    /// The scanout the driver's own predictor was asked about, as it read the
+    /// word this frame wrote. Zero where it predicted nothing.
+    ///
+    /// **The input path's half of `E3-B04e`, and the seven fields after this
+    /// one are the rest of it.** Positions, a flag, a count, a target and a
+    /// lead — and no reading: this frame compares them with the compositor's
+    /// and computes nothing out of either. RFC 0134.
+    /// Unit: nanoseconds.
+    pub predicted_for: u64,
+    /// Where the driver's predictor put the pointer, along x.
+    /// Unit: device pixels, scaled by 65 536.
+    pub predicted_x_x65536: i64,
+    /// And along y. Unit: device pixels, scaled by 65 536.
+    pub predicted_y_x65536: i64,
+    /// The newest report that prediction stands on, along x.
+    /// Unit: device pixels, scaled by 65 536.
+    pub anchor_x_x65536: i64,
+    /// And along y. Unit: device pixels, scaled by 65 536.
+    pub anchor_y_x65536: i64,
+    /// How far forward the driver's predictor extrapolated. Unit: nanoseconds.
+    pub predicted_lead_nanos: u64,
+    /// One where it extrapolated, zero where it held. Unit: none — a flag.
+    pub predicted_extrapolated: u64,
+    /// Positions the driver's predictor took. Unit: reports.
+    pub predictor_reports: u64,
 }
 
 impl Reported {
@@ -672,6 +800,14 @@ impl Reported {
             // origin is an ordinary place and not an enormous one.
             pointer_x_x65536: read(routing::reported::POINTER_X_X65536) as i64,
             pointer_y_x65536: read(routing::reported::POINTER_Y_X65536) as i64,
+            predicted_for: read(routing::reported::PREDICTED_FOR_NANOS),
+            predicted_x_x65536: read(routing::reported::PREDICTED_X_X65536) as i64,
+            predicted_y_x65536: read(routing::reported::PREDICTED_Y_X65536) as i64,
+            anchor_x_x65536: read(routing::reported::ANCHOR_X_X65536) as i64,
+            anchor_y_x65536: read(routing::reported::ANCHOR_Y_X65536) as i64,
+            predicted_lead_nanos: read(routing::reported::PREDICTED_LEAD_NANOS),
+            predicted_extrapolated: read(routing::reported::PREDICTED_EXTRAPOLATED),
+            predictor_reports: read(routing::reported::PREDICTOR_REPORTS),
         })
     }
 }
@@ -697,19 +833,33 @@ pub struct Produced {
     pub asked: u32,
     /// Whether anything outside the machine said it had injected.
     pub acknowledged: bool,
-    /// Entries on the driver's ring when the driver had been reaped and before
-    /// the compositor was stood up — submitted and not yet taken by anybody.
+    /// The data ring's producer cursor when the driver had been reaped and
+    /// before the compositor was stood up.
     ///
     /// **The measurement behind *the frame relayed no input entry*.** Until a
     /// mutation that had this frame take one entry off the ring went red on the
     /// wrong sentence, the boot log said *this frame took 0 entries* as a
     /// literal: true of this file, and printed whatever this file did. So it is
     /// read off the ring's own cursors instead, at the one moment nothing is
-    /// running on either end, and required to equal what the driver says it put
-    /// there — every event and its attestation. A frame, or anything else, that
-    /// took an entry between the two components is a smaller number here.
-    /// Unit: entries.
-    pub on_ring: u64,
+    /// running on either end.
+    ///
+    /// **The cursors, and not their difference.** Until 2026-09-25 this was
+    /// `Producer::occupancy`, `head - tail`, and an audit showed by reading that
+    /// a relay which popped all six entries and resubmitted them to the same
+    /// ring left head 12 and tail 6: occupancy six, both folds unchanged, the
+    /// verdict green. A ring nobody has taken from is at one place and not at a
+    /// difference — tail zero, where `describe` laid it out, and head at every
+    /// event and attestation the driver says it put there.
+    /// Unit: entries, as a free-running cursor.
+    pub head: u64,
+    /// The consumer cursor at the same moment: zero, or somebody consumed.
+    ///
+    /// *What this cannot see:* a reader that copies entries without advancing
+    /// it, or one that puts both cursors back afterwards. Neither is reachable
+    /// from this file without a `Consumer` or a `Cursor::set` on this ring, and
+    /// the absence of both is `E3-B04g`'s structural half; this is the half a
+    /// boot can measure. Unit: entries, as a free-running cursor.
+    pub tail: u64,
 }
 
 /// What the compositor stage saw.
@@ -734,6 +884,8 @@ pub struct Consumed {
 pub struct Report {
     /// Which half ran.
     pub half: Half,
+    /// Which gesture the harness says it injected.
+    pub gesture: Gesture,
     /// What the driver's manifest declares.
     pub declared: Declared,
     /// Which function the device is.
@@ -880,13 +1032,49 @@ impl Report {
         // attestation — must still be there when the compositor is given it.
         // On both halves: the withholding half is the same ring with the same
         // entries, and a control that lost one would be a control for two
-        // things.
-        if seen.on_ring != seen.board.submitted.saturating_add(seen.board.attested) {
+        // things. The two cursors each against where an untouched ring leaves
+        // it, and not their difference — `Produced::head`'s doc has the relay
+        // that a difference cannot see. The ring holds sixteen and is laid out
+        // at zero, so these cursors have not wrapped and equality is exact.
+        if seen.tail != 0 {
+            return Err("the ring's consumer cursor had moved when the compositor was stood up: \
+                 something took entries off it between the two components - whether or not it \
+                 put them back, which the difference of the two cursors cannot see - and on \
+                 this path nothing may, the frame least of all");
+        }
+        if seen.head != seen.board.submitted.saturating_add(seen.board.attested) {
             return Err(
-                "the ring did not hold every entry the driver put on it when the compositor was \
-                 stood up: something took entries off it between the two components, and on \
-                 this path nothing may - the frame least of all",
+                "the ring's producer cursor is not at every entry the driver says it put there \
+                 when the compositor was stood up: something besides the driver submitted to \
+                 it, or the driver's own count is wrong",
             );
+        }
+        // The input path's own predictor, `E3-B04e`, on every half: the driver
+        // does not know whether anybody is connected, and predicts either way.
+        // Fed where a report closes rather than where an entry is submitted, so
+        // these are two paths through the driver agreeing.
+        if seen.board.predictor_reports != seen.board.motions {
+            return Err(
+                "the driver's own predictor took a different number of positions than the \
+                 driver sent as motion, so the input path's side of the seam predicts from a \
+                 window the compositor was never given",
+            );
+        }
+        if seen.board.predicted_for != FIRST_SCANOUT_NANOS {
+            return Err(
+                "the driver's own predictor was not asked about the scanout this frame told it, \
+                 so whatever it answered is an answer to a different question",
+            );
+        }
+        // The predictor's newest report and the accumulator's end are two
+        // numbers inside the driver, taken on two paths, and they must be one
+        // place: the anchor is where the prediction starts from.
+        if seen.board.anchor_x_x65536 != seen.board.pointer_x_x65536
+            || seen.board.anchor_y_x65536 != seen.board.pointer_y_x65536
+        {
+            return Err("the driver's own predictor stands on a report that is not where its \
+                 accumulator ended, so the input path's prediction is anchored somewhere the \
+                 device did not leave the pointer");
         }
         if seen.asked != 0 {
             return Err(
@@ -931,6 +1119,41 @@ impl Report {
             return Err(
                 "the compositor applied a different number of deltas than this frame sent it: \
                  three setup nodes and two committed transforms, on both halves",
+            );
+        }
+        // **RFC 0131's restore, which no boot could see until these clauses.**
+        // The latch writes its patch into the retained graph for one submission
+        // and takes it back out once the frame has left; the component kept the
+        // count to itself, dropped the answer, and this boot closes one frame, so
+        // no later latch ever read a leftover patch as *committed*. Three
+        // clauses, on both halves. The tally first: every latched frame
+        // restored — the withholding half latches nothing and so restores
+        // nothing — and none refused, which is the word that tells a restore the
+        // graph refused from one nobody asked for. Then the graph's own answer
+        // for the pointer's node when the run ended, against the transform this
+        // client committed: a count cannot fake that, so a restore that tallied
+        // itself and never wrote the graph leaves the patch there and lands on
+        // the third clause and nowhere else.
+        if seen.board.restores != seen.board.latches {
+            return Err(
+                "the compositor restored a different number of frames than it latched, so a \
+                 latch's patch outlived the frame it was made for and the retained graph holds \
+                 a transform no client sent (RFC 0131)",
+            );
+        }
+        if seen.board.unrestored != 0 {
+            return Err(
+                "the compositor's graph refused to take a latch's patch back out, though it had \
+                 accepted the node a statement earlier",
+            );
+        }
+        if signed(seen.board.latch_held_x) != COMMITTED_TX_X65536
+            || signed(seen.board.latch_held_y) != COMMITTED_TY_X65536
+        {
+            return Err(
+                "when the run ended the compositor's graph held a translation for the pointer's \
+                 node that is not the one this frame committed: a latch's patch was left in the \
+                 retained graph, whatever the compositor's own count of restores says",
             );
         }
         // And the tree, read back out of the page the component publishes into
@@ -1067,6 +1290,17 @@ impl Report {
                  something this client did not send",
             );
         }
+        match self.gesture {
+            Gesture::Turning => self.held_verdict(),
+            Gesture::Steady => self.seam_verdict(),
+        }
+    }
+
+    /// The turning gesture: `E3-B01i`'s *by exactly the motion*, which needs
+    /// the latch to hold.
+    fn held_verdict(&self) -> Result<(), &'static str> {
+        let driver = &self.produced.board;
+        let seen = &self.consumed.board;
         // Held and not extrapolated, and the reason is the motion the harness
         // injects rather than a preference: it reverses inside the predictor's
         // window, so the predictor holds the newest position rather than running
@@ -1075,7 +1309,7 @@ impl Report {
         // A held latch differs from the commit by exactly the motion that
         // arrived, which is the equality `cargo xtask input` checks; an
         // extrapolated one would differ by that plus a lead, which is
-        // `E3-B04e`'s arithmetic and not this line's.
+        // `E3-B04e`'s arithmetic and the steady gesture's.
         if seen.latch_extrapolated != 0 || seen.latch_lead_nanos != 0 {
             return Err(
                 "the latch extrapolated, so the transform it submitted is the motion plus a \
@@ -1093,6 +1327,88 @@ impl Report {
             return Err("the position the compositor latched is not where the driver says its \
                  accumulator ended: the newest report the latch held is not the newest report \
                  the driver sent");
+        }
+        // And the input path's own predictor held too, on its own window. The
+        // two agree — and that agreement is a copy of one sample on each side,
+        // which is why it is checked here and counted for nothing: `E3-B04e` is
+        // the steady gesture's.
+        if driver.predicted_extrapolated != 0
+            || signed(seen.latch_x) != driver.predicted_x_x65536
+            || signed(seen.latch_y) != driver.predicted_y_x65536
+        {
+            return Err(
+                "on a gesture that turns inside the window the driver's own predictor did not \
+                 hold where the compositor's did: two instances of one predictor, over one \
+                 sequence of reports, reached two different bases",
+            );
+        }
+        Ok(())
+    }
+
+    /// The steady gesture: `E3-B04e`. **The latched value is the predicted
+    /// one, asserted from both sides of the seam.**
+    ///
+    /// Two predictor instances, two states: the driver's, fed where each
+    /// report closed and before anything crossed; the compositor's, fed from
+    /// what it decoded off the ring. Neither number is copied from the other
+    /// and this frame computes neither — it compares. *How far it moved* is the
+    /// harness's to close, because it holds the one number neither side does:
+    /// the compositor moved the node by `latched - committed`, the input path
+    /// predicted `predicted - anchor` beyond its newest report, and the harness
+    /// requires the first to be its own injected sum plus the second.
+    fn seam_verdict(&self) -> Result<(), &'static str> {
+        let driver = &self.produced.board;
+        let seen = &self.consumed.board;
+        // One question, asked of both. The compositor minted its aim out of the
+        // period and its clock; this frame told the driver the display's first
+        // scanout; the driver says which it was asked. Three numbers, and a
+        // seam over two different instants would disagree for a reason that is
+        // not a defect — so it is refused before the values are compared.
+        if seen.latch_aim_nanos != FIRST_SCANOUT_NANOS
+            || driver.predicted_for != seen.latch_aim_nanos
+        {
+            return Err(
+                "the compositor aimed its latch at a different scanout from the one the input \
+                 path's predictor was asked about, so the two predictions answer two questions \
+                 and their agreement or disagreement means nothing",
+            );
+        }
+        // **The vacuity refusal the host test makes, made in the boot.** A held
+        // prediction on either side agrees with the other by copying one sample;
+        // an extrapolation that did not move the pointer is the same copy under
+        // another name. Both must have extrapolated, and the input path's must
+        // have run the pointer off its anchor on both axes.
+        if seen.latch_extrapolated != 1 || driver.predicted_extrapolated != 1 {
+            return Err(
+                "a steady gesture held on one side of the seam or both: a held prediction \
+                 agrees with the other side by copying one sample, so this boot would prove \
+                 nothing about the latched value being the predicted one",
+            );
+        }
+        if driver.predicted_x_x65536 == driver.anchor_x_x65536
+            || driver.predicted_y_x65536 == driver.anchor_y_x65536
+        {
+            return Err(
+                "the input path's prediction did not move the pointer off its newest report on \
+                 both axes, so an agreement over it is an agreement about that report and not \
+                 about a prediction",
+            );
+        }
+        // The value, from both sides.
+        if signed(seen.latch_x) != driver.predicted_x_x65536
+            || signed(seen.latch_y) != driver.predicted_y_x65536
+        {
+            return Err(
+                "the value the compositor latched is not the value the input path predicted for \
+                 the same scanout from the same reports: the latch submitted something other \
+                 than its predictor's answer, or its predictor was fed a different window",
+            );
+        }
+        // And the lead, which the host test also holds: two predictors that
+        // agreed on a value by different leads agreed by accident.
+        if seen.latch_lead_nanos != driver.predicted_lead_nanos || seen.latch_lead_nanos == 0 {
+            return Err("the compositor's latch and the input path's prediction extrapolated by \
+                 different leads, or by none");
         }
         Ok(())
     }
@@ -1129,8 +1445,9 @@ pub fn report_lines(report: &Report) {
     let seen = &report.produced;
     let board = &report.consumed.board;
     crate::kprintln!(
-        "  input         a fourth driver outside the frame, and the {} half: {}",
+        "  input         a fourth driver outside the frame, and the {} half over a {} gesture: {}",
         report.half.name(),
+        report.gesture.name(),
         match report.half {
             Half::Deliver =>
                 "the compositor holds the other end of the driver's ring and this frame holds \
@@ -1176,10 +1493,11 @@ pub fn report_lines(report: &Report) {
     // components is the number `E3-B04g` is: every entry the driver put there,
     // read off the ring's own cursors rather than asserted by this file.
     crate::kprintln!(
-        "  input ring    {} entr(y/ies) on the ring when the compositor was stood up, of the {} \
-         the driver submitted and {} attestation(s); the compositor was {} and took {} entr(y/ies) \
-         and {} attestation(s): {} decoded, {} refused, {} of them pointer motion",
-        seen.on_ring,
+        "  input ring    head {} tail {} when the compositor was stood up, for the {} \
+         entr(y/ies) the driver submitted and {} attestation(s); the compositor was {} and took \
+         {} entr(y/ies) and {} attestation(s): {} decoded, {} refused, {} of them pointer motion",
+        seen.head,
+        seen.tail,
         seen.board.submitted,
         seen.board.attested,
         if board.input_connected == 1 { "connected" } else { "not connected" },
@@ -1216,10 +1534,19 @@ pub fn report_lines(report: &Report) {
     // nothing outside the machine can derive - where the driver's accumulator
     // ended up, as the driver published it - and the harness holds the other
     // half: how far it asked the pointer to move, in whole device pixels.
+    //
+    // And where the accumulator started, which this frame told the driver: the
+    // harness subtracts it, so its equality is about how far the pointer moved
+    // and a driver that ignored the start is a difference. The words are read
+    // by position, so the first eleven are a format — `xtask`'s
+    // `input_pointer` checks the word before each number.
     crate::kprintln!(
-        "  input pointer x {} y {} in units of 1/65536 device pixel, after {} motion event(s)",
+        "  input pointer x {} y {} from x {} y {} in units of 1/65536 device pixel, after {} \
+         motion event(s)",
         seen.board.pointer_x_x65536,
         seen.board.pointer_y_x65536,
+        COMMITTED_TX_X65536,
+        COMMITTED_TY_X65536,
         seen.board.motions,
     );
     crate::kprintln!(
@@ -1283,6 +1610,57 @@ pub fn report_lines(report: &Report) {
             "nothing else moved"
         } else {
             "SOMETHING ELSE MOVED"
+        },
+    );
+    // The input path's own prediction, `E3-B04e`, and **the third line the
+    // harness reads**: the value and the anchor it stands on, both ends and not
+    // their difference, for the latch line's reason. The words are read by
+    // position, so the first thirteen are a format — `xtask`'s `input_path`
+    // checks the word before each number.
+    crate::kprintln!(
+        "  input path    predicted x {} y {} from anchor x {} y {} for the scanout at {} ns, lead \
+         {} ns: {} of {} position(s) taken by the driver's own predictor, {}",
+        seen.board.predicted_x_x65536,
+        seen.board.predicted_y_x65536,
+        seen.board.anchor_x_x65536,
+        seen.board.anchor_y_x65536,
+        seen.board.predicted_for,
+        seen.board.predicted_lead_nanos,
+        seen.board.predictor_reports,
+        seen.board.motions,
+        if seen.board.predicted_for == 0 {
+            "NOTHING PREDICTED"
+        } else if seen.board.predicted_extrapolated == 1 {
+            "extrapolated"
+        } else {
+            "held at the newest report"
+        },
+    );
+    crate::kprintln!(
+        "  input seam    the compositor aimed at {} ns and extrapolated {} ns; the input path was \
+         asked about {} ns and extrapolated {} ns; {}",
+        board.latch_aim_nanos,
+        board.latch_lead_nanos,
+        seen.board.predicted_for,
+        seen.board.predicted_lead_nanos,
+        // What the two sides actually did, and not what the gesture said they
+        // would: a steady gesture that held is the case this line has to be
+        // able to print, because it is the one the verdict refuses.
+        match (
+            report.half,
+            report.gesture,
+            board.latch_extrapolated == 1 && seen.board.predicted_extrapolated == 1,
+        ) {
+            (Half::Withheld, _, _) => "no latch on this half, so there is no seam to compare",
+            (Half::Deliver, Gesture::Turning, false) =>
+                "a turning gesture, and a held prediction agrees by copying one sample, so this \
+                 is not counted",
+            (Half::Deliver, Gesture::Steady, true) =>
+                "both extrapolated on a steady gesture, and the verdict compares the two",
+            (Half::Deliver, Gesture::Turning, true) =>
+                "BOTH EXTRAPOLATED on a gesture the harness says turns",
+            (Half::Deliver, Gesture::Steady, false) =>
+                "A SIDE HELD on a gesture the harness says is steady",
         },
     );
 }
@@ -1432,6 +1810,7 @@ pub unsafe fn demonstrate(
 
     Ok(Report {
         half,
+        gesture: Gesture::of(boot),
         declared,
         bdf: found.bdf,
         windows: found.pages,
@@ -1568,6 +1947,15 @@ unsafe fn produce(
         // are - and what they are not - is written down.
         (routing::at::STAMP_SEED, STAMP_SEED),
         (routing::at::STAMP_TICK_NANOS, STAMP_TICK_NANOS),
+        // Where the pointer starts, which is where `commit` puts it: one number,
+        // told to the driver and committed by the client, so the client has
+        // still never been told where the pointer *is*. RFC 0132.
+        (routing::at::ORIGIN_X_X65536, COMMITTED_TX_X65536.cast_unsigned()),
+        (routing::at::ORIGIN_Y_X65536, COMMITTED_TY_X65536.cast_unsigned()),
+        // The scanout the driver's own predictor is asked about, `E3-B04e`.
+        // A target this frame states about the display it declares, and never
+        // a reading; `FIRST_SCANOUT_NANOS` is the argument. RFC 0134.
+        (routing::at::SCANOUT_AT_NANOS, FIRST_SCANOUT_NANOS),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1693,27 +2081,26 @@ unsafe fn produce(
 
     let board = reported.ok_or(Trouble::BadReport)?;
 
-    // What is on the ring now, with the driver joined and reaped and the
-    // compositor not yet stood up: the one moment neither end is running. The
-    // ring's cursors are read and nothing is taken — `occupancy` is the
-    // producer's count of what it published and nobody has consumed.
+    // Where the ring's two cursors stand now, with the driver joined and reaped
+    // and the compositor not yet stood up: the one moment neither end is
+    // running. Both are read and nothing is taken — no `Producer` and no
+    // `Consumer` is bound, because neither has a call that answers a cursor
+    // without also being a handle that could move one.
     //
-    // A producer's handle and not a consumer's, because a producer's has no
-    // call that takes an entry off. `Producer::occupancy` is sound only for the
-    // ring's one producer — *only the owner may ask* — and it is sound here for
-    // that reason: the driver that owned the head is joined, the join is the
-    // edge that makes its last head store visible to this core, and nothing
-    // else holds either end until `consume` hands the far one out. The handle
-    // is dropped at the end of this expression and submits nothing.
+    // The raw reads are the diagnostic `Cursor::raw` exists for, and `Relaxed`
+    // is enough here for the reason `Producer::occupancy` gave when it stood
+    // here: the driver that owned the head is joined, the join is the edge
+    // that makes its last head store visible to this core, and nothing else
+    // holds either end until `consume` hands the far one out. The cursors and
+    // not their difference — `Produced::head`'s doc is the relay a difference
+    // cannot see.
     // SAFETY: `wire` is the frame the channel was laid out in above, allocated
     // by the caller and held by nothing that runs: the driver that held one end
     // is reaped. Every accessor hands out atomics rather than references.
     let ring = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
-    let on_ring = Producer::new(ring.channel())
-        .ok_or(Trouble::Channel(0))?
-        .occupancy()
-        .map_err(|_| Trouble::Channel(0))?;
-    Ok(Produced { board, exited, asked, acknowledged, on_ring: u64::from(on_ring) })
+    let cursors = ring.channel();
+    let (head, tail) = (u64::from(cursors.head.raw()), u64::from(cursors.tail.raw()));
+    Ok(Produced { board, exited, asked, acknowledged, head, tail })
 }
 
 /// The compositor stage: stand `user/compositor` up on the core the driver has
@@ -1750,6 +2137,10 @@ unsafe fn consume(
     if declared_heap != scene_routing::HEAP_BYTES {
         return Err(Trouble::HeapDisagrees);
     }
+    // The cap, `E3-B07e`, by the same finder `kernel/src/compositor.rs` uses:
+    // the component refuses a routing page without it, so this boot hands it
+    // the word its own manifest declares rather than one written here.
+    let cap = crate::compositor::frame_cap(&record).ok_or(Trouble::Unframed)?;
 
     // **The one line the two halves differ in.** The delivering half maps the
     // driver's data channel into the compositor and says where; the withholding
@@ -1850,6 +2241,7 @@ unsafe fn consume(
         (scene_routing::at::POINTER_NODE, u64::from(POINTER_NODE)),
         (scene_routing::at::INPUT_AT, input_at),
         (scene_routing::at::INPUT_LEN, input_len),
+        (scene_routing::at::DELTAS_PER_FRAME_MAX, cap),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1925,15 +2317,17 @@ struct Sent {
 /// Submit the three setup deltas, the two committed transforms, and one
 /// commit — the same six on both halves.
 ///
-/// # Why the committed transform is at the origin
+/// # Why the committed transform is where the accumulator starts
 ///
 /// Because this client has never been told where the pointer is, and that is
 /// the point of `E3-B04g`: the position goes from the driver to the compositor
 /// and not through here. The one place a client that knows nothing can honestly
-/// put the pointer is where the driver's accumulator starts, which is the
-/// origin. `E3-B01i`'s *by exactly the motion injected* is then a subtraction
-/// the harness can do against the list it injected: latched minus committed is
-/// the accumulator's end, and the accumulator's end is the sum of the motion.
+/// put the pointer is where the driver's accumulator starts — which this frame
+/// told the driver, on its routing page, before it ran. `E3-B01i`'s *by exactly
+/// the motion injected* is then a subtraction the harness can do against the
+/// list it injected: latched minus committed is the accumulator's end minus its
+/// start, and that is the sum of the motion. Why the start is not zero is
+/// [`COMMITTED_TX_X65536`]'s.
 ///
 /// # Why one at a time
 ///
@@ -2040,9 +2434,9 @@ fn commit(
         0,
     )?;
     // The transform the client commits for the pointer, which is the one the
-    // latch reads back out of the graph and patches: a shear at the origin —
-    // see this function's doc for why the origin, and `COMMITTED_A_X65536`
-    // for why a shear.
+    // latch reads back out of the graph and patches: a shear at the driver's
+    // start — see this function's doc for why there, `COMMITTED_TX_X65536` for
+    // why that is not zero, and `COMMITTED_A_X65536` for why a shear.
     send(
         &mut seen,
         SceneEntry::SetTransform(SetTransform {

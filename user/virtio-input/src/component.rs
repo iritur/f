@@ -142,9 +142,14 @@ fn serve() -> ! {
         end(stopped::NO_CLOCK)
     };
 
-    let Ok(mut driver) =
-        crate::driver::Driver::start(parts.windows, parts.queues, parts.data, clock, parts.class)
-    else {
+    let Ok(mut driver) = crate::driver::Driver::start(
+        parts.windows,
+        parts.queues,
+        parts.data,
+        clock,
+        parts.class,
+        parts.origin,
+    ) else {
         report(&board, None, stopped::NO_DEVICE);
         end(stopped::NO_DEVICE)
     };
@@ -201,7 +206,12 @@ fn serve() -> ! {
     // cross. A ring with no room is published as *not attested* rather than
     // retried — the consumer then says it found none, which is true.
     let _ = driver.attest();
-    report(&board, Some(&driver), outcome);
+    // The input path's half of `E3-B04e`'s seam, asked last: every report this
+    // run will ever see has been stamped, so the window is the one the
+    // compositor will rebuild from the ring. Published and never submitted —
+    // `crate::forecast` is why.
+    let foreseen = driver.foresee(parts.asked);
+    report(&board, Some((&driver, foreseen)), outcome);
     end(outcome)
 }
 
@@ -221,6 +231,14 @@ struct Parts {
     seed: u64,
     /// Unit: nanoseconds per report.
     tick_nanos: u64,
+    /// Where the pointer starts, `(x, y)`: the frame's word, and the reason is
+    /// [`routing::at::ORIGIN_X_X65536`]'s.
+    /// Unit: device pixels, scaled by 65 536.
+    origin: (i32, i32),
+    /// The scanout this component's own predictor is asked about — a target
+    /// the frame states about its display, and never a reading.
+    /// [`routing::at::SCANOUT_AT_NANOS`] is the argument. RFC 0134.
+    asked: crate::forecast::Asked,
 }
 
 /// Read the routing page and state everything it names.
@@ -300,6 +318,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
+    // A word back to the signed number it was written as, and refused unless
+    // it is one the accumulator can hold: a word past `i32` taken for a
+    // position would be a pointer that starts wrapped.
+    let origin = |offset: u32| -> Option<i32> {
+        i32::try_from(board.read64(offset).ok()?.cast_signed()).ok()
+    };
+
     Some(Parts {
         windows,
         queues,
@@ -309,6 +334,8 @@ fn laid_out(board: &Window) -> Option<Parts> {
         spins,
         seed: board.read64(at::STAMP_SEED).ok()?,
         tick_nanos: board.read64(at::STAMP_TICK_NANOS).ok()?,
+        origin: (origin(at::ORIGIN_X_X65536)?, origin(at::ORIGIN_Y_X65536)?),
+        asked: crate::forecast::Asked { scanout_nanos: board.read64(at::SCANOUT_AT_NANOS).ok()? },
     })
 }
 
@@ -319,8 +346,12 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// a page this function never finished finds a zero rather than a plausible
 /// tally. RFC 0013's *read, never delivered* — the frame takes these numbers out
 /// of memory it granted, and this component is never asked for them.
-fn report(board: &Window, driver: Option<&crate::driver::Driver>, outcome: u64) {
-    if let Some(driver) = driver {
+fn report(
+    board: &Window,
+    driver: Option<(&crate::driver::Driver, Option<crate::forecast::Foreseen>)>,
+    outcome: u64,
+) {
+    if let Some((driver, foreseen)) = driver {
         let counters = driver.counters();
         let _ = board.write64(reported::RECORDS, counters.records);
         let _ = board.write64(reported::REPORTS, counters.reports);
@@ -348,6 +379,21 @@ fn report(board: &Window, driver: Option<&crate::driver::Driver>, outcome: u64) 
         let (x_x65536, y_x65536) = driver.at();
         let _ = board.write64(reported::POINTER_X_X65536, i64::from(x_x65536) as u64);
         let _ = board.write64(reported::POINTER_Y_X65536, i64::from(y_x65536) as u64);
+        // The input path's prediction, `E3-B04e`. A run that predicted nothing
+        // leaves every word zero, and `PREDICTED_FOR_NANOS` zero is what says
+        // so — the one value no told scanout can take.
+        let _ = board.write64(reported::PREDICTOR_REPORTS, driver.predictor_reports());
+        if let Some(seen) = foreseen {
+            let _ = board.write64(reported::PREDICTED_FOR_NANOS, seen.for_nanos);
+            let _ = board.write64(reported::PREDICTED_X_X65536, i64::from(seen.x_x65536) as u64);
+            let _ = board.write64(reported::PREDICTED_Y_X65536, i64::from(seen.y_x65536) as u64);
+            let _ =
+                board.write64(reported::ANCHOR_X_X65536, i64::from(seen.anchor_x_x65536) as u64);
+            let _ =
+                board.write64(reported::ANCHOR_Y_X65536, i64::from(seen.anchor_y_x65536) as u64);
+            let _ = board.write64(reported::PREDICTED_LEAD_NANOS, seen.lead_nanos);
+            let _ = board.write64(reported::PREDICTED_EXTRAPOLATED, u64::from(seen.extrapolated));
+        }
     }
     let _ = board.write64(reported::OUTCOME, outcome);
     let _ = board.write64(reported::MAGIC, routing::MAGIC);

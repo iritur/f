@@ -35,6 +35,7 @@
     { "name": "theme-refusals", "status": "pending", "milestone": "E3", "file": "claims/0035-theme-refusals.toml" },
     { "name": "copies-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0036-copies-per-operation.toml" },
     { "name": "kernel-entries-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0037-kernel-entries-per-operation.toml" },
-    { "name": "ring-crossings-per-ui-frame", "status": "gating", "milestone": "E3", "file": "claims/0038-ring-crossings-per-ui-frame.toml" }
+    { "name": "ring-crossings-per-ui-frame", "status": "gating", "milestone": "E3", "file": "claims/0038-ring-crossings-per-ui-frame.toml" },
+    { "name": "ring-crossings-per-representative-frame", "status": "gating", "milestone": "E3", "file": "claims/0039-ring-crossings-per-representative-frame.toml" }
   ]
 }

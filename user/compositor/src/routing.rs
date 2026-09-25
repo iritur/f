@@ -310,6 +310,27 @@ pub mod at {
     pub const INPUT_AT: u32 = 160;
     /// How many bytes of it. Unit: bytes.
     pub const INPUT_LEN: u32 = 168;
+
+    /// The most scene deltas one frame may carry into this component, as the
+    /// compositor's own manifest declares it on its `scene` server ring.
+    ///
+    /// **`E3-B07e`'s enforcement, and RFC 0128's *Consequences* is the spec.**
+    /// The frame finds the ring by `f_abi::manifest::FRAMED_PROTOCOL` in the
+    /// record it spawned this component from, refuses to start a compositor
+    /// whose record has none — which is what turns a protocol renamed away from
+    /// `scene` into a red boot rather than an uncapped compositor — and writes
+    /// the ring's `deltas_per_frame_max` here. Written by the frame and not read
+    /// by this component out of its own image, because a component that decided
+    /// its own cap would be a component deciding how much of a client it will
+    /// take, and the manifest is where that is declared to somebody else.
+    ///
+    /// **Zero is refused as `BAD_ROUTING`**, not read as *no cap*: a frame that
+    /// never wrote this word is a frame that never found the framed ring, and a
+    /// compositor that served uncapped because a word was missing would be the
+    /// declaration a reader believes and nothing keeps — RFC 0128's own name for
+    /// the state this word ends. `crate::tree::Held::offer` is where it bites.
+    /// Unit: deltas per frame, commits not counted.
+    pub const DELTAS_PER_FRAME_MAX: u32 = 176;
 }
 
 /// What the frame says it will do when this component has nothing to do.
@@ -1051,6 +1072,123 @@ pub mod reported {
     /// to be the graph's own count — a fold of an empty walk agrees with itself
     /// about nothing. Unit: nodes.
     pub const LATCH_WALKED: u32 = super::REPORT + 520;
+
+    /// Which occupant of its place this instance is, as **this instance** read it
+    /// off the header of the control ring it adopted, plus one.
+    ///
+    /// `E3-B05e`, and the one word on this page that is about identity rather
+    /// than about work. The frame writes a channel's `epoch` into the header when
+    /// it builds the instance — `kernel/src/component.rs`'s `spawn` puts the
+    /// place's occupant count there — and the component reads it back through
+    /// `f_ring::adopt::Adopted::epoch` and never through anything the frame put
+    /// on this page. So a frame that copies a reading off one instance and stops
+    /// another has two numbers that disagree: the occupant it stopped, and the
+    /// one this word says published. `kernel/src/compositor.rs` requires them
+    /// equal, and `cargo xtask compositor` holds the log to the same equality
+    /// from outside.
+    ///
+    /// Plus one, because an epoch counts from zero and a zero here is what a
+    /// component that never adopted a control ring writes — a page that refused
+    /// its routing would otherwise read as *the first occupant*. `f_abi::swap`
+    /// makes the same choice for the same reason: *`generation` is an ordinal
+    /// counting from one*.
+    ///
+    /// *What would reverse this:* an identity the frame mints per instance and
+    /// no two instances share, at which point this word carries that rather than
+    /// an ordinal a second place could also be at. Unit: none — an epoch plus one.
+    pub const EPOCH: u32 = super::REPORT + 528;
+
+    /// Deltas refused because the frame they were offered to had already staged
+    /// [`super::at::DELTAS_PER_FRAME_MAX`] of them, `E3-B07e`.
+    ///
+    /// **Its own word and not folded into [`REFUSED`]**, because it is a
+    /// different fact: a refused entry is one the wire or the graph could not
+    /// take, and it poisons its frame; a capped one was well formed, was never
+    /// offered to the batch, and its frame still closes. A reader handed one
+    /// count could not tell a client that exceeded the cap from one that sent
+    /// garbage. Board only — the manifest's state tree is full, `node::WRITTEN`
+    /// says so — and the frame holds it against the capped completions its own
+    /// client reaped.
+    /// Unit: deltas.
+    pub const CAPPED: u32 = super::REPORT + 536;
+
+    // --- the counts at the last commit, `E3-B01` ------------------------------
+    //
+    // **The same three counters as `FRAMES`, `DRAINED` and `ANSWERED`, read at a
+    // different moment, and not a second count of anything.** Those three are
+    // written once, when the run ends, so a run that builds a scene in forty
+    // frames and then plays it for eight has one total over forty-eight frames
+    // of two different kinds — and `E3-B01`'s number is about the eight. What a
+    // per-frame figure needs is the counters as they stood *between* frames, and
+    // these are that: written every time a commit closes a frame, before that
+    // commit's own completion is posted.
+    //
+    // **Before the post, because the post is what orders them.** The component
+    // writes these, then publishes the completion with the ring's `Release`; the
+    // client reaps it with the ring's `Acquire`; so a client that has reaped a
+    // commit's completion reads the words that commit wrote, on either
+    // architecture, with no ordering of its own — the pair `ring/src/lib.rs`
+    // rests every payload byte on, and `at::TICK_NANOS`'s argument in the other
+    // direction. Written after the post they would be a race the client could
+    // only win by spinning, and the reading would rest on x86's store order.
+    //
+    // What *before the post* means for the numbers is exact and worth saying:
+    // `CUT_DRAINED` includes the commit, `CUT_ANSWERED` does not include its
+    // completion. So the crossings between two cuts are one frame's entries
+    // going out and, coming back, the previous commit's completion and this
+    // frame's other completions — a partition of the run in which every crossing
+    // lands in exactly one frame. The client takes its own cut at the same point
+    // — its count of completions reaped before the commit's — and the frame
+    // requires the two equal at every cut, not only at the end.
+    //
+    // *What would reverse this:* a per-frame count the component keeps itself,
+    // which is a second counter and the thing `E3-B01j`'s instrument was built
+    // to make unnecessary; or a client that pipelines frames, where the commit's
+    // completion is no longer the boundary between one frame's crossings and
+    // the next.
+
+    /// Frames closed, as of the last commit that closed one.
+    /// Unit: frames — UI frames.
+    pub const CUT_FRAMES: u32 = super::REPORT + 544;
+    /// Entries drained off the data ring as of that commit, the commit included.
+    /// Unit: entries.
+    pub const CUT_DRAINED: u32 = super::REPORT + 552;
+    /// Completions the ring accepted from this component as of that commit,
+    /// **not** including the commit's own. Unit: entries.
+    pub const CUT_ANSWERED: u32 = super::REPORT + 560;
+
+    // --- the restore, RFC 0131 ------------------------------------------------
+    //
+    // **What the latch's patch left behind, published so a boot can see it.**
+    // RFC 0131 takes the patch back out of the graph once the frame it was made
+    // for has been submitted, and until these words nothing outside this
+    // component could tell a restore that happened from one that did not: the
+    // count stayed in `crate::latch::LateLatch`, the answer was dropped, and
+    // the input boot closes one frame, so no second latch ever read the first
+    // one's leftovers as *committed*. The audit of `E3-B01i` found all three.
+    //
+    // Four words and two readings. [`RESTORES`] and [`UNRESTORED`] are this
+    // component's tally, and the frame requires the first equal to [`LATCHES`]
+    // and the second zero. [`LATCH_HELD_X`] and [`LATCH_HELD_Y`] are the graph's
+    // own answer for the pointer's node when the run ended, and the frame holds
+    // them against the transform its client committed — so a restore that
+    // counted itself and never wrote the graph, which keeps the tally perfect,
+    // is caught by the reading it cannot reach. *What would reverse this:* a
+    // latch that never enters the retained graph — RFC 0131's own reversal —
+    // at which point there is nothing to restore and these four go with it.
+
+    /// Latched frames whose patch was taken back out of the graph.
+    /// `crate::latch::LateLatch::restores`. Unit: frames — UI frames.
+    pub const RESTORES: u32 = super::REPORT + 568;
+    /// Latched frames whose restore the graph refused.
+    /// `crate::tree::Counters::unrestored`. Unit: frames — UI frames.
+    pub const UNRESTORED: u32 = super::REPORT + 576;
+    /// The translation along x the graph holds for the pointer's node when the
+    /// run ended, zero where no node was named or it carries no transform.
+    /// Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub const LATCH_HELD_X: u32 = super::REPORT + 584;
+    /// The same along y. Unit: as [`LATCH_HELD_X`].
+    pub const LATCH_HELD_Y: u32 = super::REPORT + 592;
 }
 
 /// Why the component's loop ended.

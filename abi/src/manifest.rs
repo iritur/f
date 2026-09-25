@@ -118,7 +118,21 @@ pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
 /// hundred-and-fourth byte was a reserved zero and reading that as *declares no
 /// face* would be a component acquiring a property nobody chose — the same
 /// argument [`Record::transfer`] and [`Record::binding`] were bumped for.
-pub const SCHEMA: u32 = 4;
+///
+/// **Five, and it spends bytes rather than growing anything.** RFC 0128. A
+/// data ring may now declare [`Ring::deltas_per_frame_max`]: the most scene
+/// deltas one frame may carry across it before each further one is refused
+/// rather than applied. The four bytes are four of what were five reserved
+/// bytes at the end of a [`Ring`], so a ring slot stays a hundred and four
+/// bytes, [`Record`] stays 2 696, and no reader that owns a record by value —
+/// `f_assembler::topology::Instance`, whose stack temporary is the reason
+/// schema 4 is a section — sees a width change. That is the whole of RFC
+/// 0101's check for this bump: every reader of the ring's width was found, and
+/// none of them moves. A schema-4 file is refused rather than read
+/// approximately, for the reason every earlier bump gives: its ring's
+/// hundredth byte was a reserved zero, and reading that zero as *declares no
+/// cap* would be a compositor acquiring an uncapped scene ring nobody chose.
+pub const SCHEMA: u32 = 5;
 
 /// The longest name, in bytes.
 ///
@@ -501,11 +515,61 @@ pub struct Ring {
     /// names nobody.
     pub connects_through: u8,
     /// Reserved. Must be zero — a non-zero value is refused rather than
-    /// ignored, per R04.
+    /// ignored, per R04. The last reserved byte in a ring slot: schema 5 spent
+    /// the other four.
     /// Unit: none; this is not a quantity and is not expected to become one
     /// without a schema bump.
-    pub _reserved: [u8; 5],
+    pub _reserved: u8,
+    /// The most scene deltas one frame may carry across this ring. RFC 0128.
+    ///
+    /// **A cap, and not a batch bound.** Past it, each further delta in the
+    /// frame is answered `RESOURCE/QUOTA_EXHAUSTED` and is not applied, and the
+    /// commit that closes the frame is never counted and never refused — so a
+    /// pathological frame costs its client the changes it could not afford this
+    /// frame and costs nobody the frame. That is `E3-B07`'s *miss quality rather
+    /// than the frame* at the ring, and it is why the bound is at most
+    /// [`FRAME_DELTAS_CAP_MAX`]: a cap above the batch a compositor sizes its
+    /// frame for is reached only after the batch's own refusal, which poisons
+    /// the frame, and would be a cap that only ever stops frames.
+    ///
+    /// Required on a server ring speaking [`FRAMED_PROTOCOL`] and refused
+    /// non-zero on every other ring, because no other protocol has a frame to
+    /// count in and a cap nothing counts against is R08. Deltas and not bytes,
+    /// because every scene payload is `crate::scene::PAYLOAD_BYTES` wide and the
+    /// two are one number; `docs/manifest.md` refuses a bandwidth demand stated
+    /// in a unit no two machines share, and a delta is not one of those.
+    ///
+    /// Four bytes at offset 100, which is where four of the five reserved bytes
+    /// were — aligned, so the slot keeps its width and the record its size.
+    /// Unit: deltas per frame. Zero on every ring that is not a framed server.
+    pub deltas_per_frame_max: u32,
 }
+
+/// The one protocol whose rings carry frames, and so the one a per-frame cap
+/// can be declared on.
+///
+/// `scene` is `docs/design/ring-scene-boot.html` part II's protocol and
+/// `crate::scene`'s opcode space; a commit closes a frame there and nowhere
+/// else. A name rather than a flag in the record, because a manifest names its
+/// protocol already and a second field saying *this one is framed* is a second
+/// field that can disagree with the first.
+///
+/// *What would reverse this:* a second protocol with a commit — at which point
+/// this is a list, and [`Ring::deltas_per_frame_max`] counts that protocol's
+/// entries as well.
+pub const FRAMED_PROTOCOL: &[u8] = b"scene";
+
+/// The largest per-frame cap a framed ring may declare.
+///
+/// `f_scene::commit::DELTAS_MAX`, mirrored because `abi` is what `f-scene`
+/// depends on rather than the other way round, and pinned to it by
+/// `xtask::manifest`'s `the_frame_cap_bound_is_the_batchs`, which reads the
+/// scene crate's constant out of its source. The argument is the one
+/// [`Ring::deltas_per_frame_max`] makes: the batch is sized for this many and
+/// refuses the next one by poisoning the frame, so a cap above it is a cap
+/// that is never reached before the frame is lost.
+/// Unit: deltas per frame.
+pub const FRAME_DELTAS_CAP_MAX: u32 = 64;
 
 /// What [`Ring::connects_through`] says when a ring connects through nothing.
 ///
@@ -1020,6 +1084,14 @@ const _: () = assert!(core::mem::offset_of!(Record, binding) == 120);
 const _: () = assert!(core::mem::offset_of!(Record, capability) == 136);
 const _: () = assert!(core::mem::offset_of!(Record, ring) == 1416);
 const _: () = assert!(core::mem::offset_of!(Record, state) == 2248);
+// And schema 5's field, inside a ring slot rather than in the record's head, so
+// neither the size assertion nor the five offsets above would notice it moving:
+// `xtask::manifest` stamps it at a literal 100 within each slot, and a field
+// inserted in front of it inside `Ring` would keep the slot's width and move the
+// cap into the reserved byte, where `Record::read` refuses it — a red boot, but
+// one naming *reserved* rather than the reordering. RFC 0128.
+const _: () = assert!(core::mem::offset_of!(Ring, _reserved) == 99);
+const _: () = assert!(core::mem::offset_of!(Ring, deltas_per_frame_max) == 100);
 
 /// Why a component file was refused.
 ///
@@ -1916,7 +1988,8 @@ impl Ring {
         role: 0,
         payload: 0,
         connects_through: 0,
-        _reserved: [0; 5],
+        _reserved: 0,
+        deltas_per_frame_max: 0,
     };
 
     /// The ring's name, without the padding.
@@ -1938,11 +2011,26 @@ impl Ring {
             && self.role == 0
             && self.payload == 0
             && self.connects_through == 0
-            && self._reserved == [0; 5]
+            && self._reserved == 0
+            && self.deltas_per_frame_max == 0
+    }
+
+    /// The protocol's name, without the padding.
+    #[must_use]
+    pub fn protocol_label(&self) -> &[u8] {
+        let end = self.protocol.iter().position(|b| *b == 0).unwrap_or(NAME_MAX);
+        self.protocol.get(..end).unwrap_or(&[])
+    }
+
+    /// Is this a server ring speaking [`FRAMED_PROTOCOL`] — the only ring a
+    /// per-frame cap means anything on?
+    #[must_use]
+    pub fn framed_server(&self) -> bool {
+        self.role == role::SERVER && self.protocol_label() == FRAMED_PROTOCOL
     }
 
     fn check(&self, record: &Record) -> Result<(), Refusal> {
-        if self._reserved != [0; 5] {
+        if self._reserved != 0 {
             return Err(Refusal::Reserved);
         }
         if !is_name(&self.name) || !is_protocol(&self.protocol) {
@@ -1972,6 +2060,7 @@ impl Ring {
         {
             return Err(Refusal::NotUnderThisPolicy);
         }
+        self.check_frame_cap(record)?;
         if self.role == role::SERVER {
             if self.clients == 0 || self.clients > 64 {
                 return Err(Refusal::Quantity);
@@ -2021,6 +2110,49 @@ fn is_name(bytes: &[u8; NAME_MAX]) -> bool {
         return false;
     }
     name.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+impl Ring {
+    /// RFC 0128's two rules about a framed server ring, judged where the frame
+    /// judges every other field of it.
+    ///
+    /// **The cap is declared, and it is declared only where it can be
+    /// counted.** A framed server with no cap is refused, so *capped* is a
+    /// property of every compositor file this frame will spawn rather than a
+    /// habit of the one manifest that has one; a cap on any other ring is
+    /// refused, because nothing counts against it; and the bound is
+    /// [`FRAME_DELTAS_CAP_MAX`], for the reason [`Ring::deltas_per_frame_max`]
+    /// gives.
+    ///
+    /// **And a framed server does not hold a hard-class reservation.**
+    /// `docs/design/ring-scene-boot.html` section 10 makes the compositor *the
+    /// lowest-ranked deadline task on the machine*, and in this tree's
+    /// admission vocabulary that is the soft class: `crate::class::SOFT` is the
+    /// less urgent of the two classes that carry a deadline at all, its own
+    /// definition is *missing it degrades quality*, and RFC 0025 makes the
+    /// declared class a ceiling, so nothing a soft component submits can
+    /// outrank a hard-class entry. A hard-class compositor would hold whole
+    /// physical cores and their exclusion domains — the scarcest thing
+    /// `crate::reserve::Table` hands out, first come first served — and could
+    /// be admitted *ahead of* the workload section 10 says it must never
+    /// perturb. RFC 0128 is the argument; `crate::reserve::Demand::displaces`
+    /// is the arithmetic.
+    fn check_frame_cap(&self, record: &Record) -> Result<(), Refusal> {
+        if !self.framed_server() {
+            return if self.deltas_per_frame_max == 0 {
+                Ok(())
+            } else {
+                Err(Refusal::NotUnderThisPolicy)
+            };
+        }
+        if self.deltas_per_frame_max == 0 || self.deltas_per_frame_max > FRAME_DELTAS_CAP_MAX {
+            return Err(Refusal::Quantity);
+        }
+        if record.class == class::HARD {
+            return Err(Refusal::NotUnderThisPolicy);
+        }
+        Ok(())
+    }
 }
 
 /// As [`is_name`], with `.` admitted: a protocol name is `[a-z0-9.-]`.
@@ -2219,6 +2351,115 @@ mod tests {
     /// should earn. A named type for [`Lie`]'s reason: a signature a reader has
     /// to parse before they can read the cases is a signature in the way.
     type FaceLie = (&'static str, fn(&mut [Face; 2]), Refusal);
+
+    /// [`well_formed`], turned into the compositor's shape: a server ring
+    /// speaking [`FRAMED_PROTOCOL`], one client, and the cap RFC 0128 requires
+    /// on it.
+    fn framed(cap: u32) -> Record {
+        let mut record = well_formed();
+        record.ring[0] = Ring {
+            name: name_bytes("scene").unwrap(),
+            protocol: protocol_bytes("scene").unwrap(),
+            version_min: 1,
+            version: 1,
+            entries: 16,
+            clients: 1,
+            role: role::SERVER,
+            payload: payload::INLINE,
+            connects_through: NO_CAPABILITY,
+            deltas_per_frame_max: cap,
+            ..Ring::EMPTY
+        };
+        record
+    }
+
+    #[test]
+    fn a_framed_server_carries_its_cap_to_the_reader() {
+        let bytes = module(&framed(50));
+        let back = read(&bytes.0).expect("a capped scene server was refused");
+        let ring = back.rings()[0];
+        assert!(ring.framed_server(), "a server speaking `scene` is not read as framed");
+        assert_eq!(ring.deltas_per_frame_max, 50, "the cap did not survive the round trip");
+        // Both ends of the bound are admissible: one is a cap, and the batch's
+        // own size is the largest cap that is still reached before the batch
+        // refuses.
+        for cap in [1, FRAME_DELTAS_CAP_MAX] {
+            assert!(read(&module(&framed(cap)).0).is_ok(), "a cap of {cap} was refused");
+        }
+    }
+
+    #[test]
+    fn a_framed_server_without_a_cap_or_past_the_batch_is_refused() {
+        // RFC 0128's point in one assertion: *capped* is a property of every
+        // compositor file the frame will spawn, not of the one manifest that
+        // happens to carry the line.
+        assert_eq!(read(&module(&framed(0)).0).err(), Some(Refusal::Quantity));
+        assert_eq!(
+            read(&module(&framed(FRAME_DELTAS_CAP_MAX + 1)).0).err(),
+            Some(Refusal::Quantity),
+            "a cap above the batch is reached only after the frame is poisoned"
+        );
+    }
+
+    #[test]
+    fn a_cap_on_a_ring_with_no_frame_is_refused() {
+        // `well_formed`'s own ring: a client speaking `f.store.v1`. Nothing
+        // counts a frame there, so a cap is a promise nothing keeps.
+        let mut record = well_formed();
+        record.ring[0].deltas_per_frame_max = 8;
+        assert_eq!(read(&module(&record).0).err(), Some(Refusal::NotUnderThisPolicy));
+
+        // And the spelling a reader would try first to walk round the rule:
+        // the right word on the wrong end. A *client* speaking `scene` submits
+        // deltas rather than counting them, so the cap is refused there too.
+        let mut client = framed(8);
+        client.ring[0].role = role::CLIENT;
+        client.ring[0].connects_through = 1;
+        client.ring[0].clients = 0;
+        assert_eq!(read(&module(&client).0).err(), Some(Refusal::NotUnderThisPolicy));
+        client.ring[0].deltas_per_frame_max = 0;
+        assert!(read(&module(&client).0).is_ok(), "the uncapped client control was refused");
+
+        // And a protocol that is `scene` with something after it is not
+        // `scene`: the comparison is the whole label, not a prefix.
+        let mut near = framed(8);
+        near.ring[0].protocol = protocol_bytes("scene.v2").unwrap();
+        assert_eq!(read(&module(&near).0).err(), Some(Refusal::NotUnderThisPolicy));
+        near.ring[0].deltas_per_frame_max = 0;
+        assert!(read(&module(&near).0).is_ok(), "the uncapped `scene.v2` control was refused");
+    }
+
+    #[test]
+    fn a_framed_server_holding_a_hard_reservation_is_refused() {
+        // The hard-class shape `check_reservation` accepts on its own — whole
+        // huge pages, a core, a period and a budget inside it — so the refusal
+        // below is about *which component* declared it and nothing else.
+        let mut record = framed(50);
+        record.class = class::HARD;
+        record.memory_bytes = HUGE_BYTES;
+        record.cores = 1;
+        record.cpu_period_ns = 16_666_666;
+        record.cpu_budget_ns = 4_000_000;
+        assert_eq!(read(&module(&record).0).err(), Some(Refusal::NotUnderThisPolicy));
+
+        // The control: the same reservation on a ring with no frame reads,
+        // which is what stops the assertion above passing because the hard
+        // shape was malformed.
+        let mut other = well_formed();
+        other.class = class::HARD;
+        other.memory_bytes = HUGE_BYTES;
+        other.cores = 1;
+        other.cpu_period_ns = 16_666_666;
+        other.cpu_budget_ns = 4_000_000;
+        assert!(read(&module(&other).0).is_ok(), "the hard-class control was refused");
+    }
+
+    #[test]
+    fn the_last_reserved_byte_in_a_ring_is_still_refused() {
+        let mut record = framed(50);
+        record.ring[0]._reserved = 1;
+        assert_eq!(read(&module(&record).0).err(), Some(Refusal::Reserved));
+    }
 
     #[test]
     fn a_well_formed_record_survives_the_round_trip() {

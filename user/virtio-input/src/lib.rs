@@ -107,6 +107,10 @@
 
 pub mod clock;
 pub mod driver;
+// The input path's own prediction for `E3-B04e`'s seam, published and never
+// sent. Outside the `image` gate because the frame reads the shape of what it
+// publishes, as it reads `routing`. RFC 0134.
+pub mod forecast;
 pub mod queue;
 // Outside the `image` gate, because it is the one module both sides read: the
 // frame writes the page this describes and the component reads it, and a set of

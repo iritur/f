@@ -8,9 +8,29 @@
 //! It is the **client's half** of `E3-B01f`. `user/compositor` is the component:
 //! the graph, the frame under construction, the serve loop and the tally, in a
 //! crate that forbids `unsafe`. What is here is everything a client does around
-//! one — allocate a ring, stand the component up on a core of its own, submit
-//! two frames' worth of scene deltas, reap the completions, and then read what
-//! the component published and judge it against what was asked for.
+//! one — tell it where its rings are, submit two frames' worth of scene deltas,
+//! reap the completions, and then read what the component published and judge
+//! it against what was asked for.
+//!
+//! # Where the component runs, since RFC 0129
+//!
+//! **In its place.** The three halves that stand a compositor up are served by
+//! `component::demonstrate` against the occupant of the compositor's own place,
+//! with [`Placed`] as the client, so the instance a supervisor stops for a
+//! timeout is the instance whose tree the reading came from. Until RFC 0129 this
+//! file stood a compositor up *beside* the place with `process::prepare_server`,
+//! and the reading on the supervisor's row was that instance's while the
+//! occupant stopped and restarted was the place's own, which had never run — RFC
+//! 0126's narrowing. The reason it ran beside was not the one the next section
+//! gave: the manifest declared no `board` and no `data` need, so a spawned
+//! occupant had nowhere to be told where its rings were. [`Placed`] says it at
+//! length; a manifest without them is refused by name in the lifecycle, and
+//! nothing falls back to a stand-up.
+//!
+//! What moved is who built the instance. The script, the board, the clock, the
+//! doorbell, the stop and every verdict below are unchanged; the place's account
+//! paid for every page, the frame's root mounts the tree, and two words say
+//! which instance ran — [`Report::served`].
 //!
 //! It is **not** a second scene graph. There is one arena, in `f-scene`, and
 //! nothing here holds a node: what this file knows about the scene is what its
@@ -21,12 +41,13 @@
 //!
 //! # Why the frame is the client, and what that costs the claim
 //!
-//! Because there is no other client. `E1-B05`'s ring-3 supervisor does not yet
-//! hand a place's occupant a core *and* a peer, so the only thing in this boot
-//! that can hold the far end of a channel is the frame — the arrangement every
-//! datapath boot in this tree has, recorded under the same reversal. `CHAOS_GAP`
-//! in xtask carries what is still owed, and a fourth component in the same
-//! position widens nothing.
+//! Because there is no other client. Nothing in this build holds the far end of
+//! a scene ring but the frame — the arrangement every datapath boot in this tree
+//! has. The sentence that stood here said the supervisor did not hand a place's
+//! occupant a core *and* a peer; `component::Datapath` has done that for the
+//! block place since `E1-B05`, and it is how this file's client now reaches the
+//! compositor's place. What is left of the sentence is the client: the peer is
+//! still the frame.
 //!
 //! What it costs is worth stating plainly. *Client* here means **the far end of
 //! a real channel across a real privilege boundary**: the deltas are real
@@ -115,8 +136,7 @@ use f_interface::token::{Resolved, Theme, Token, resolve};
 use f_ring::{Arena, Bell, Collector, Hardware, Mapping, Path, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
-use crate::paging;
-use crate::process::{self, ServerPlan};
+use crate::process;
 
 /// The frame's address for the board, and the component's, required to agree by
 /// the machine rather than by two comments.
@@ -359,6 +379,16 @@ const _: () = {
 /// so what the component refuses is the *size* rather than a region that was
 /// never described. A zero would have exercised a different refusal and called
 /// it this one.
+///
+/// **Described, and since RFC 0129 no longer mapped at this size.** A place maps
+/// the heap its manifest declares out of its own account, so the starved
+/// occupant has the whole of it mapped and two pages *described* — the prologue
+/// is the frame's to write and is what the component reads. That is a narrowing
+/// and it is named: this half now proves the component refuses on the size it is
+/// told, not on the size it could touch. *What would reverse this:* a place that
+/// maps a heap smaller than its manifest declares, which is a spawn taking a
+/// quantity from somewhere other than the record — or a second component file
+/// whose manifest declares two pages.
 /// Unit: bytes.
 const STARVED_HEAP_BYTES: u64 = 8192;
 
@@ -418,6 +448,39 @@ pub enum Half {
     /// one ring. A client that charged per entry would report four here and
     /// would be measuring batching while calling it suppression.
     Wake,
+    /// Send one frame past the cap the compositor's manifest declares, and one
+    /// frame under it.
+    ///
+    /// **`E3-B07e`'s boot, and RFC 0128's *Consequences* is what it shows.** The
+    /// frame found the cap on the compositor's `scene` server ring and wrote it
+    /// onto the routing page; the client sends [`CAPPED_DELTAS`] creations and a
+    /// commit, and requires the cap's worth applied, the rest answered
+    /// `RESOURCE/QUOTA_EXHAUSTED` with the cap as the detail, the commit accepted
+    /// and the frame closed on the rung it started on. Then [`UNCAPPED_DELTAS`]
+    /// creations and a commit, every one applied — which is the clause that says
+    /// the count is the frame's and not the run's.
+    ///
+    /// **Its own half rather than frames added to the serving one**, because the
+    /// serving half's script is `claims/0038`'s workload and its bounds are
+    /// exact: two frames and sixteen crossings. Seventy more entries there would
+    /// be a claim re-declared to make room for a different subject.
+    Capped,
+    /// Build the representative scene through the reconciler, then play it:
+    /// `E3-B01`'s own count.
+    ///
+    /// **The parent's exit, and the one half whose frames were not written for
+    /// the test they are in.** `claims/0033-scene/scene.toml` — an audio
+    /// timeline, 995 nodes, three of them dirty when the playhead moves — is
+    /// rebuilt whole every frame by `f_compositor::timeline`, `f_scene`'s
+    /// reconciler turns each rebuild into the deltas that differ, and [`drive`]
+    /// puts every one of them on the ring. Forty frames build the scene under
+    /// the manifest's cap; eight more move the playhead, and those eight are
+    /// the UI frames RFC 0133 says `E3-B01`'s sentence is about.
+    ///
+    /// **Its own half rather than frames added to the serving one**, for the
+    /// capped half's reason: the serving half's script is `claims/0038`'s
+    /// workload and its bounds are exact.
+    Timeline,
 }
 
 impl Half {
@@ -430,6 +493,8 @@ impl Half {
             Self::Mute => "mute",
             Self::Floorless => "floorless",
             Self::Wake => "wake",
+            Self::Capped => "capped",
+            Self::Timeline => "timeline",
         }
     }
 
@@ -443,7 +508,12 @@ impl Half {
     const fn reported(self) -> u64 {
         match self {
             Self::Floorless => FLOORLESS_CAPABILITIES,
-            Self::Serve | Self::Starved | Self::Mute | Self::Wake => BACKEND_CAPABILITIES,
+            Self::Serve
+            | Self::Starved
+            | Self::Mute
+            | Self::Wake
+            | Self::Capped
+            | Self::Timeline => BACKEND_CAPABILITIES,
         }
     }
 }
@@ -523,6 +593,42 @@ pub enum Trouble {
     /// A verdict that folded the two would report a missing wakeup as a broken
     /// compositor.
     NotParked,
+    /// A half that stands a compositor up was asked of the path that stands none
+    /// up, or the other way round.
+    ///
+    /// **Its own variant because there is no second path, and a fallback is the
+    /// defect.** Since RFC 0129 the serving halves are served from the
+    /// compositor's place by the component lifecycle, and nothing in this file
+    /// stands one up beside the place — so a boot that reached here for one had
+    /// its halves routed wrong, and a stand-up here would put RFC 0126's gap
+    /// back green.
+    Placed,
+    /// The lifecycle never served the place this client was built for, so there
+    /// is nothing to judge.
+    ///
+    /// A red line and not an empty report: a boot that asked for a compositor
+    /// half and never ran it would otherwise print a verdict over zeroes.
+    NotServed,
+    /// The compositor's record serves no ring speaking
+    /// `f_abi::manifest::FRAMED_PROTOCOL`, so there is no cap to hand it.
+    ///
+    /// **RFC 0128's *a protocol renamed walks past both rules*, closed here.**
+    /// The manifest checker and the frame's reader both key on a server ring
+    /// whose protocol is exactly `scene`, so a manifest saying `scenes` is
+    /// uncapped and refused by neither. The frame is where the cap is read, so
+    /// the frame is where its absence is refused — before a page is spent,
+    /// beside the heap check — and the rename is a red boot rather than a
+    /// compositor serving without a quota.
+    Unframed,
+    /// The timeline half's client could not have the frames its reconciler and
+    /// its tree live in. `E3-B01`.
+    NoClientMemory,
+    /// The timeline half's reconciler refused one of its own frames, or the cap
+    /// the manifest declares is too small to build the scene in the frames this
+    /// client records. The client's own tree being wrong, and red rather than
+    /// skipped: a frame the reconciler refused is a frame whose crossings were
+    /// never counted. `E3-B01`.
+    Reconciled,
 }
 
 impl Trouble {
@@ -544,29 +650,28 @@ impl Trouble {
             Self::Refused => "the ring refused a submission the client had room for",
             Self::Admission => "the admission probe could not stake an account",
             Self::NotParked => "the component never stopped its core, so nothing was asleep",
+            Self::Placed => {
+                "a serving half is served from the compositor's place and there is no second \
+                 path that stands one up beside it"
+            }
+            Self::NotServed => {
+                "the compositor's place was never served, so there is no run to judge — the \
+                 component lifecycle did not reach it"
+            }
+            Self::Unframed => {
+                "the compositor's record serves no `scene` ring, so the frame has no \
+                 deltas_per_frame_max to hand it and will not start it uncapped (RFC 0128)"
+            }
+            Self::NoClientMemory => {
+                "the timeline client could not have the frames its reconciler and its tree \
+                 live in"
+            }
+            Self::Reconciled => {
+                "the timeline client's reconciler refused one of its own frames, or the cap is \
+                 too small to build the scene in the frames this client records"
+            }
         }
     }
-}
-
-/// Where and for how long the component runs.
-///
-/// A struct because the five travel together and always will: they are one
-/// decision — *which core, on what clock, for how long* — and threading them as
-/// five arguments is what made `objects::demonstrate`'s signature wider than
-/// clippy's bound and a reader's patience.
-pub struct Scheduling {
-    /// The physical address of the frame the **frame's** state tree is published
-    /// in, which every shape maps read-only. The component's own tree is a
-    /// different page and this file publishes it. Unit: bytes, physical.
-    pub tree: u64,
-    /// Which core the component is allocated. Unit: none — a core index.
-    pub cpu: usize,
-    /// The rate that core arms its own timer at. Unit: hertz.
-    pub hz: u32,
-    /// How many ticks it asks for. Unit: timer ticks.
-    pub target: u64,
-    /// The timestamp counter's rate, for bounding the waits. Unit: kilohertz.
-    pub tsc_khz: u64,
 }
 
 /// What the boot saw, from both sides.
@@ -664,6 +769,92 @@ pub struct Report {
     pub heap: u64,
     /// What the doorbell did, on the half that has one.
     pub bells: Bells,
+    /// Which occupant of the compositor's place was served, and the physical
+    /// page its tree is — `None` on the two halves that stand nothing up.
+    ///
+    /// `E3-B05e`'s identity, from the client's side. The component reports the
+    /// epoch it read off its own control ring (`Board::epoch`) and the verdict
+    /// requires the two to agree; the page is printed so `cargo xtask
+    /// compositor` can hold it equal to the page the lifecycle copied the
+    /// supervisor's reading from and the page it unmounted when it stopped the
+    /// occupant. RFC 0129.
+    ///
+    /// **The page is walked, not remembered** — `Wired::tree_mapped`, the
+    /// translation the occupant's own page tables give its tree address — while
+    /// the lifecycle's two lines print its bookkeeping and its root's mount word.
+    /// So the harness's page comparison is two readings of where the tree is.
+    /// What it is not is an instance identity: a refill is spawned out of the
+    /// account its predecessor's frames were refunded to and can land on the
+    /// same page, which is why [`Report::refilled`] rests on the epoch.
+    /// Unit: instances, and bytes, physical.
+    pub served: Option<(u32, u64)>,
+    /// The place's next occupant, served after the supervisor restarted it —
+    /// on the serving half, which is the one half whose place is restarted, and
+    /// `None` on every other.
+    ///
+    /// **What makes [`Report::served`]'s identity able to fail.** That one is
+    /// epoch zero against epoch zero, which agree whether or not the component
+    /// reads its ring; this one is epoch one, so a component reporting a
+    /// constant says the wrong occupant here. [`Refill`] is the argument.
+    pub refilled: Option<Refilled>,
+    /// The cap the frame read off the compositor's `scene` server ring and wrote
+    /// onto its routing page, `E3-B07e`. Zero on the two halves that stand
+    /// nothing up. Unit: deltas per frame.
+    pub cap: u64,
+    /// The cap the compositor's record declares as compiled: [`Report::cap`]
+    /// on every run but the recapped one, where the frame wrote [`RECAPPED`]
+    /// and this says what it was moved from. Zero on the two halves that stand
+    /// nothing up. Unit: deltas per frame.
+    pub declared: u64,
+    /// Completions the client reaped that said `RESOURCE/QUOTA_EXHAUSTED` with
+    /// [`Report::cap`] as the detail, by the frame they were sent in — the
+    /// first commit this client submitted closes index zero, and anything past
+    /// the last index is counted in it.
+    ///
+    /// **Per frame, because the clause is per frame.** A total of ten would be
+    /// satisfied by a compositor that refused five of the sixty and five of the
+    /// eight, and only the split says the count went back to zero at the commit.
+    /// Unit: completions.
+    pub capped: [u64; CAPPED_FRAMES],
+    /// What the timeline half recorded at every commit, `E3-B01`; nothing on
+    /// every other half.
+    pub timeline: Timeline,
+}
+
+impl Report {
+    /// A report of nothing having been stood up: every count zero, no board, no
+    /// tree, no bells, nothing admitted — what a half that asked nothing is
+    /// entitled to, which each half then overrides for what it did ask.
+    fn nothing(half: Half, image: u64) -> Self {
+        Self {
+            half,
+            submitted: 0,
+            completed: 0,
+            refused: 0,
+            board: Board::default(),
+            tree_nodes: 0,
+            tree_blank: 0,
+            tree_before: [0; WORDS],
+            tree_after: 0,
+            tree: [0; WORDS],
+            submitted_deadline: 0,
+            last_tick: 0,
+            admitted: false,
+            muted: 0,
+            backend_admitted: false,
+            floorless: 0,
+            reported: 0,
+            image,
+            heap: 0,
+            bells: Bells::default(),
+            served: None,
+            refilled: None,
+            cap: 0,
+            declared: 0,
+            capped: [0; CAPPED_FRAMES],
+            timeline: Timeline::NOTHING,
+        }
+    }
 }
 
 /// What the doorbell did, from both ends of it.
@@ -956,6 +1147,24 @@ pub struct Board {
     pub latch_unmoved_after: u64,
     /// How many nodes that fold walked. Unit: nodes.
     pub latch_walked: u64,
+    /// Which occupant of its place the component is, as it read the epoch off
+    /// its own control ring's header, plus one — zero for a run that adopted no
+    /// control ring. `reported::EPOCH` argues the word. Unit: none — an epoch
+    /// plus one.
+    pub epoch: u64,
+    /// Deltas it refused because their frame had staged its cap, `E3-B07e`.
+    /// Unit: deltas.
+    pub capped: u64,
+    /// Latched frames whose patch it took back out of the graph, RFC 0131.
+    /// Unit: frames — UI frames.
+    pub restores: u64,
+    /// Latched frames whose restore the graph refused. Unit: frames — UI frames.
+    pub unrestored: u64,
+    /// The pointer node's translation along x as the graph held it when the run
+    /// ended. Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub latch_held_x: u64,
+    /// The same along y. Unit: as [`Board::latch_held_x`].
+    pub latch_held_y: u64,
 }
 
 impl Board {
@@ -1037,6 +1246,12 @@ impl Board {
             latch_unmoved_before: board.read64(reported::LATCH_UNMOVED_BEFORE).ok()?,
             latch_unmoved_after: board.read64(reported::LATCH_UNMOVED_AFTER).ok()?,
             latch_walked: board.read64(reported::LATCH_WALKED).ok()?,
+            epoch: board.read64(reported::EPOCH).ok()?,
+            capped: board.read64(reported::CAPPED).ok()?,
+            restores: board.read64(reported::RESTORES).ok()?,
+            unrestored: board.read64(reported::UNRESTORED).ok()?,
+            latch_held_x: board.read64(reported::LATCH_HELD_X).ok()?,
+            latch_held_y: board.read64(reported::LATCH_HELD_Y).ok()?,
         })
     }
 }
@@ -1202,6 +1417,86 @@ fn batch_script() -> [Delta; BATCH_DELTAS] {
     ]
 }
 
+/// How many creations the capped half's first frame carries. Unit: deltas.
+///
+/// **Sixty, which is RFC 0128's own number** — *a boot sends one frame of sixty
+/// deltas and reads fifty applied, ten refused* — and it has to sit between the
+/// cap and the batch: above the compositor's declared fifty so the cap is
+/// reached, and at or below `f_scene::commit::DELTAS_MAX`, sixty-four, so that
+/// a compositor with **no** cap takes the whole frame rather than having the
+/// batch poison it. That second bound is what makes the cap's deletion a
+/// visible sixty applied instead of a frame lost for another reason.
+const CAPPED_DELTAS: u32 = 60;
+
+/// How many creations the capped half's second frame carries. Unit: deltas.
+///
+/// Eight, under the cap by a margin and over zero by one that a count carried
+/// across the commit cannot hide: fifty already taken in the run would refuse
+/// all eight.
+const UNCAPPED_DELTAS: u32 = 8;
+
+/// The capped half's two frames, as the client names them. See [`FRAME_ONE`].
+/// Unit: none — frame identifiers.
+const FRAME_CAPPED: u64 = 4;
+
+/// See [`FRAME_CAPPED`]. Unit: none — a frame identifier.
+const FRAME_UNCAPPED: u64 = 5;
+
+/// Entries in the capped half's script: two frames of creations and their two
+/// commits. Unit: entries.
+const CAPPED_SCRIPT: usize = (CAPPED_DELTAS + UNCAPPED_DELTAS) as usize + 2;
+
+/// How many frames [`Report::capped`] keeps apart. Unit: frames.
+///
+/// Four, which is more than any half here closes before the frame whose count
+/// matters: the capped half's two, the wake half's three.
+const CAPPED_FRAMES: usize = 4;
+
+/// The capped half's script: [`CAPPED_DELTAS`] creations and a commit, then
+/// [`UNCAPPED_DELTAS`] creations and a commit.
+///
+/// Creations rather than paints, because a creation leaves a node behind and
+/// the arena counts its own nodes: `live` at the end is the graph's account of
+/// how many of the sixty reached it, taken by nothing that also counted the
+/// completions. Node 1 is the root and every other node hangs under it, so the
+/// ten a correct compositor refuses are ten leaves whose absence disturbs
+/// nothing else, and the second frame's parent is a node the first frame's
+/// first delta made. Both commits have a whole scanout of room: this half is
+/// not about pacing, and a late frame would move words its verdict does not
+/// read for a reason it does not test.
+fn capped_script() -> [Delta; CAPPED_SCRIPT] {
+    let first = CAPPED_DELTAS as usize;
+    let second = first + 1 + UNCAPPED_DELTAS as usize;
+    core::array::from_fn(|at| {
+        let commit = |named: u64| Delta {
+            user_data: at as u64 + 1,
+            class: 0,
+            deadline: SCANOUT_PERIOD_NANOS,
+            payload_offset: 0,
+            flags: 0,
+            body: Entry::Commit(Commit { frame_token: named }),
+        };
+        if at == first {
+            return commit(FRAME_CAPPED);
+        }
+        if at == second {
+            return commit(FRAME_UNCAPPED);
+        }
+        // Node identifiers one past the index, skipping the commit's slot, so
+        // the first frame makes 1..=60 and the second 61..=68.
+        let node = if at < first { at as u32 + 1 } else { at as u32 };
+        let (parent, kind) = if node == 1 { (NO_NODE, kind::LAYER) } else { (1, kind::TRANSFORM) };
+        Delta {
+            user_data: at as u64 + 1,
+            class: 0,
+            deadline: 0,
+            payload_offset: 0,
+            flags: 0,
+            body: Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind }),
+        }
+    })
+}
+
 /// What the script implies, counted from the script rather than written down
 /// beside it.
 ///
@@ -1219,17 +1514,30 @@ struct Expected {
     created: u64,
     /// Nodes it removes, subtrees included. Unit: nodes.
     removed: u64,
+    /// Deltas the cap should refuse, `E3-B07e`. Unit: deltas.
+    capped: u64,
+    /// Deltas staged into the frame the walk is in, which goes back to zero at
+    /// each commit exactly as the component's does. Unit: deltas.
+    staged: u64,
 }
 
 impl Expected {
-    /// Walk the script and count.
+    /// Walk the script and count, under the cap the frame read off the
+    /// compositor's record.
     ///
     /// The `match` has one arm per opcode and no wildcard, so a seventh scene
     /// opcode stops this build and asks what a boot should expect of it.
-    fn of(script: &[Delta]) -> Self {
-        let mut expected = Self { frames: 0, edits: 0, created: 0, removed: REMOVED_NODES };
-        expected.count(script);
+    fn of(script: &[Delta], cap: u64) -> Self {
+        let mut expected = Self::seeded(REMOVED_NODES);
+        expected.count(script, cap);
         expected
+    }
+
+    /// Nothing counted yet, with `removed` nodes the script's removals take —
+    /// which is a fact about a subtree the walk cannot see, and is why it is
+    /// seeded rather than counted. Unit of `removed`: nodes.
+    const fn seeded(removed: u64) -> Self {
+        Self { frames: 0, edits: 0, created: 0, removed, capped: 0, staged: 0 }
     }
 
     /// Add one run of deltas to what is expected.
@@ -1242,10 +1550,25 @@ impl Expected {
     ///
     /// The `match` has one arm per opcode and no wildcard, so a seventh scene
     /// opcode stops this build and asks what a boot should expect of it.
-    fn count(&mut self, script: &[Delta]) {
+    fn count(&mut self, script: &[Delta], cap: u64) {
         for delta in script {
+            // The cap, as RFC 0128 states it and not as the component codes it:
+            // a delta that is not a commit, arriving when its frame already
+            // holds `cap`, is refused and reaches nothing. Written here from the
+            // sentence, so a component that counted differently disagrees with
+            // this walk rather than with a copy of itself.
+            if !matches!(delta.body, Entry::Commit(_)) {
+                if self.staged >= cap {
+                    self.capped += 1;
+                    continue;
+                }
+                self.staged += 1;
+            }
             match delta.body {
-                Entry::Commit(_) => self.frames += 1,
+                Entry::Commit(_) => {
+                    self.frames += 1;
+                    self.staged = 0;
+                }
                 Entry::CreateNode(_) => {
                     self.created += 1;
                     self.edits += 1;
@@ -1272,13 +1595,99 @@ impl Report {
     ///
     /// A sentence for the boot log, naming the clause that did not hold.
     pub fn verdict(&self) -> Result<(), &'static str> {
+        self.served_held()?;
         match self.half {
             Half::Mute => self.mute_verdict(),
             Half::Starved => self.starved_verdict(),
             Half::Serve => self.serve_verdict(),
             Half::Floorless => self.floorless_verdict(),
             Half::Wake => self.wake_verdict(),
+            Half::Capped => self.capped_verdict(),
+            Half::Timeline => self.timeline_verdict(),
         }
+    }
+
+    /// Which instance ran, for the three halves that stand one up. RFC 0129.
+    ///
+    /// **The component's own account of which occupant it is, against the
+    /// occupant the lifecycle served.** The frame wrote the place's occupant
+    /// count into the control ring's header when it spawned the instance; the
+    /// component read it back through the adoption and reported it plus one.
+    /// Neither number is derived from the other: one is the `Instance` the
+    /// lifecycle handed a core, the other is what that core found in the ring it
+    /// was given. A compositor stood up by any other builder describes its rings
+    /// with whatever epoch *that* builder chose, and this is where the two part.
+    ///
+    /// Required on every serving half, the starved one included — a supervisor
+    /// judges the starved reading exactly as it judges a serving one's, so it
+    /// owes the same answer to *which instance published this*. The two halves
+    /// that stand nothing up are required to report no instance at all.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the boot log.
+    fn served_held(&self) -> Result<(), &'static str> {
+        match (self.half, self.served) {
+            (Half::Mute | Half::Floorless, None) => Ok(()),
+            (Half::Mute | Half::Floorless, Some(_)) => {
+                Err("a half that stands no compositor up reports an instance it served")
+            }
+            (Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline, None) => {
+                Err("a serving half reports no instance, so nothing says it ran in its place")
+            }
+            (
+                Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline,
+                Some((epoch, _)),
+            ) => {
+                if self.board.epoch != u64::from(epoch) + 1 {
+                    return Err("the component's own control ring names a different occupant \
+                                than the one the lifecycle served, so the instance that published \
+                                is not the instance in the place");
+                }
+                self.refill_held(epoch)
+            }
+        }
+    }
+
+    /// The place's next occupant, which is where [`Report::served_held`]'s
+    /// comparison can fail. `E3-B05e`'s audit, and [`Refill`] is the argument.
+    ///
+    /// **Required only where it was served, and refused where it could not have
+    /// been.** Whether the serving half's place is restarted at all is the
+    /// supervisor's judgement, which RFC 0123 keeps out of the frame — so a
+    /// serving half with no refill is left to `cargo xtask compositor`, which
+    /// requires the restart and then this occupant's line. What the frame holds
+    /// is identity, which is transport: the refill is the occupant after the one
+    /// served, its component read *that* number off its own ring, and it served
+    /// the script its predecessor did. A refill on any other half is a place
+    /// restarted that nothing asked to restart.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the boot log.
+    fn refill_held(&self, epoch: u32) -> Result<(), &'static str> {
+        let Some(refilled) = self.refilled else { return Ok(()) };
+        if self.half != Half::Serve {
+            return Err("a half whose place is never restarted served a refilled occupant");
+        }
+        if u64::from(refilled.epoch) != u64::from(epoch) + 1 {
+            return Err("the occupant served after the restart is not the place's next one: its \
+                        epoch is not one past the occupant that timed out");
+        }
+        if refilled.reported != u64::from(refilled.epoch) + 1 {
+            return Err("the refilled occupant's component says it is a different occupant than \
+                        the one the lifecycle served — the epoch it reports is not the one the \
+                        frame wrote into its control ring, so it did not read its ring, or read \
+                        somebody else's");
+        }
+        if refilled.frames != self.board.frames
+            || refilled.submitted != self.submitted
+            || refilled.drained != refilled.submitted
+        {
+            return Err("the refilled occupant did not serve the script its predecessor served, \
+                        so what identified it is a component that never ran the client's frames");
+        }
+        Ok(())
     }
 
     /// What both serving halves owe about crossings and about the chain.
@@ -1379,6 +1788,16 @@ impl Report {
                  the wrong defect",
             );
         }
+        // The cap's refusals, counted on both sides of the boundary, `E3-B07e`.
+        // The component counts what it refused for the cap and the client counts
+        // the completions that said so with the cap in them; on a half that
+        // never reaches the cap both are zero, and that is the same relation
+        // holding rather than a clause about nothing.
+        if self.board.capped != self.capped.iter().sum::<u64>() {
+            return Err("the deltas the component says it refused for the cap are not the capped \
+                 completions the client reaped, so one side is counting something that is \
+                 not the cap — or a refusal went out without the cap as its detail");
+        }
         if self.board.chain_refusals != 0 {
             return Err(
                 "the component's own timeline chain refused one of its own frame ordinals, \
@@ -1429,8 +1848,8 @@ impl Report {
     /// halves of the exit, each with the control that stops it passing for the
     /// wrong reason.
     fn wake_verdict(&self) -> Result<(), &'static str> {
-        let mut expected = Expected::of(&script());
-        expected.count(&batch_script());
+        let mut expected = Expected::of(&script(), self.cap);
+        expected.count(&batch_script(), self.cap);
 
         if self.board.outcome != stopped::TOLD {
             return Err(
@@ -1632,6 +2051,235 @@ impl Report {
         self.crossings_and_chain_held()
     }
 
+    /// The half that is capped, `E3-B07e`.
+    ///
+    /// **The order is RFC 0128's sentence.** The cap is the manifest's and not
+    /// this file's, so it is checked to sit where the script can test it; then
+    /// the excess refused and nothing else; then the commit accepted and the
+    /// frame closed; then the rung held; then the second frame whole. The
+    /// counts are walked out of the script under the cap the frame read, so a
+    /// manifest declaring another cap moves the expectation with it — and the
+    /// straddle clause is what stops that from quietly turning the boot into a
+    /// run in which nothing was refused.
+    fn capped_verdict(&self) -> Result<(), &'static str> {
+        let expected = {
+            let mut expected = Expected::seeded(0);
+            expected.count(&capped_script(), self.cap);
+            expected
+        };
+        if self.cap <= u64::from(UNCAPPED_DELTAS) || self.cap >= u64::from(CAPPED_DELTAS) {
+            return Err(
+                "the cap the compositor's manifest declares does not sit between this half's two \
+                 frames, so one of them proves nothing: the first has to reach the cap and the \
+                 second has to stay under it",
+            );
+        }
+        if self.board.outcome != stopped::TOLD {
+            return Err(
+                "the component did not end on the frame's stop notice: its outcome word says it \
+                 fell out of its loop for a reason of its own",
+            );
+        }
+        if self.completed != self.submitted || self.board.drained != self.submitted {
+            return Err(
+                "the client did not get one completion per entry it submitted, or the component \
+                 took a different number off the ring — a capped delta is still answered",
+            );
+        }
+        // Nothing refused but the excess: no delta under the cap, and neither
+        // commit. The commit is the clause RFC 0128 is most careful about — the
+        // one that closes the frame is never counted and never refused.
+        if self.refused != 0 || self.board.refused != 0 {
+            return Err(
+                "an entry was refused for something other than the cap: a delta under it, or a \
+                 commit, which RFC 0128 never counts and never refuses because it is what \
+                 closes the frame",
+            );
+        }
+        let excess = u64::from(CAPPED_DELTAS) - self.cap;
+        if self.capped[0] != excess {
+            return Err(
+                "the frame past the cap was not refused exactly its excess: the cap's worth of \
+                 sixty applied and the rest answered RESOURCE/QUOTA_EXHAUSTED with the cap as the \
+                 detail. Sixty applied is a cap nobody enforces; another count refused is a cap \
+                 counted from somewhere other than the frame's first delta, or against a number \
+                 other than the one on the routing page",
+            );
+        }
+        if self.capped[1..] != [0; CAPPED_FRAMES - 1] {
+            return Err(
+                "the frame after the capped one was refused something, though it carried eight \
+                 deltas against a larger cap — the count did not go back to zero at the commit, \
+                 so it is a quota over the run rather than over a frame",
+            );
+        }
+        if self.board.capped != expected.capped {
+            return Err("the component's own count of capped deltas is not the script's excess");
+        }
+        // The batch was never offered the excess, so the frame closed with the
+        // cap's worth in it: two frames, the cap plus the second frame's eight
+        // applied, and the arena holding exactly those nodes.
+        if self.board.staged != 0
+            || self.board.frames != expected.frames
+            || self.board.edits != expected.edits
+            || self.board.created != expected.created
+            || self.board.live != expected.live()
+        {
+            return Err(
+                "the frames did not close with the cap's worth of the first and all of the \
+                 second: an excess offered to the batch and refused there poisons the frame, \
+                 and an excess applied leaves more nodes in the graph than the cap allows",
+            );
+        }
+        if self.board.named != FRAME_UNCAPPED {
+            return Err("the last frame the component closed is not the second one submitted");
+        }
+        if self.board.rung != HYBRID_RUNG {
+            return Err(
+                "the component is not on the rung this machine's report selects after a frame \
+                 was capped: a quota is a refusal of submissions, and nothing about it is a \
+                 reason to change how the compositor draws",
+            );
+        }
+        if self.board.late != 0 || self.board.waits != 0 || self.board.timeouts != 0 {
+            return Err(
+                "a frame of this half was late or abandoned, though both had a whole scanout \
+                 of room — so the cap cost the frame it refused into, which it must not",
+            );
+        }
+        let published = [
+            self.board.frames,
+            self.board.edits,
+            self.board.live,
+            self.board.refused,
+            self.board.rung,
+            self.board.named,
+        ];
+        if self.tree[..published.len()] != published {
+            return Err(
+                "the component's published tree does not say what its board says about the \
+                 frames it closed under the cap",
+            );
+        }
+        self.crossings_and_chain_held()
+    }
+
+    /// The timeline half, `E3-B01`.
+    ///
+    /// **Every clause here is about whether the count can be believed, and none
+    /// of them is the count.** The number — crossings per representative frame —
+    /// is `claims/0039`'s to bound, and a verdict that also bounded it would be
+    /// two places holding one threshold, which is how they come to disagree. What
+    /// the boot owes is that the rows it prints are over the frames it says,
+    /// counted on both sides, at every boundary, with nothing refused.
+    ///
+    /// The order is the argument. The run first: every frame closed, nothing
+    /// refused, the compositor holding the whole scene. Then each cut, both
+    /// sides — the component's words at every commit against the client's own
+    /// counts at the same moment, which is where a side that counted something
+    /// correlated with a crossing goes red frame by frame rather than in a total
+    /// that could balance two wrongs. Then each frame against the reconciler: the
+    /// entries a frame put on the ring are what the reconciler emitted plus a
+    /// commit, so a client that sent more than it was told cannot be what the
+    /// count measured. Then the cuts against the end-of-run totals, which are the
+    /// same counters read a second time. Then `E3-B01j`'s own relations.
+    fn timeline_verdict(&self) -> Result<(), &'static str> {
+        let timeline = &self.timeline;
+        if self.board.outcome != stopped::TOLD {
+            return Err(
+                "the component did not end on the frame's stop notice: its outcome word says it \
+                 fell out of its loop for a reason of its own — between two frames of a client \
+                 that reconciles 995 nodes, the idle backstop is the likeliest",
+            );
+        }
+        if self.refused != 0
+            || self.board.refused != 0
+            || self.board.capped != 0
+            || self.capped.iter().sum::<u64>() != 0
+        {
+            return Err(
+                "an entry of the timeline was refused or capped: every frame the reconciler \
+                 emits is under the cap and names nodes the compositor holds, so a refusal is \
+                 a frame whose crossings were counted and whose edit never landed",
+            );
+        }
+        if timeline.step == 0
+            || timeline.build == 0
+            || timeline.closed != timeline.build + WARM_FRAMES
+        {
+            return Err("the timeline did not close every frame it was built to: the build and \
+                 the eight warm frames");
+        }
+        let nodes = f_compositor::timeline::NODES as u64;
+        if timeline.nodes != nodes
+            || self.board.created != nodes
+            || self.board.live != nodes
+            || self.board.removed != 0
+        {
+            return Err(
+                "the compositor does not hold the scene the client built: claims/0033's census \
+                 is 995 nodes, created once each and none removed, and a warm frame over a \
+                 smaller graph is a frame of a different scene",
+            );
+        }
+        for (k, cut) in timeline.cuts[..timeline.closed].iter().enumerate() {
+            if cut.frames != k as u64 + 1 {
+                return Err("a cut the client read is not the commit it had just reaped: the \
+                     component's frame count at that moment names a different frame, so the \
+                     words beside it are another frame's");
+            }
+            if cut.drained != cut.client_out || cut.answered != cut.client_back {
+                return Err(
+                    "at a frame boundary the component and the client disagree about how many \
+                     entries had crossed in one direction or the other. Both are read at the \
+                     same commit and neither derives from the other, so one side is counting \
+                     something correlated with a crossing rather than a crossing",
+                );
+            }
+            if cut.deltas > self.cap {
+                return Err("a frame of the timeline carried more deltas than the cap it was \
+                     built under");
+            }
+            let (out, _, _, _) = timeline.window(k);
+            if out != cut.deltas + 1 {
+                return Err(
+                    "a frame put a different number of entries on the ring than the reconciler \
+                     emitted and a commit, so what was counted is not the reconciler's frame",
+                );
+            }
+        }
+        if timeline.warm().any(|k| timeline.cuts[k].deltas == 0) {
+            return Err(
+                "a warm frame emitted nothing: the playhead did not move, so the frame counted \
+                 is an idle one and not the frame claims/0033 describes",
+            );
+        }
+        let last = timeline.cuts[timeline.closed - 1];
+        if self.submitted != last.client_out
+            || self.board.drained != last.drained
+            || self.board.answered != last.answered + 1
+            || self.completed != last.client_back + 1
+        {
+            return Err(
+                "the last cut and the run's own totals are not the same counters read twice: \
+                 the run ends on that commit, so its totals are the cut plus the one \
+                 completion the cut is taken before",
+            );
+        }
+        if self.board.frames != timeline.closed as u64
+            || self.board.named != TIMELINE_FRAME_BASE + (timeline.closed as u64 - 1)
+        {
+            return Err("the component did not close the timeline's frames, ending on its last");
+        }
+        if self.board.late != 0 || self.board.waits != 0 || self.board.timeouts != 0 {
+            return Err(
+                "a frame of the timeline was late or abandoned, though every commit had a \
+                 whole scanout of room",
+            );
+        }
+        self.crossings_and_chain_held()
+    }
+
     /// The half that is refused a compositor.
     ///
     /// Five clauses, and the order is the argument. The control first, because
@@ -1751,7 +2399,7 @@ impl Report {
 
     /// The serving half.
     fn serve_verdict(&self) -> Result<(), &'static str> {
-        let expected = Expected::of(&script());
+        let expected = Expected::of(&script(), self.cap);
         if self.board.outcome != stopped::TOLD {
             return Err(
                 "the component did not end on the frame's stop notice: its outcome word says it \
@@ -2164,6 +2812,36 @@ fn rules_owed(resolved: &Resolved) -> u64 {
 
 /// Print what happened, one subject per line.
 pub fn report_lines(report: &Report) {
+    // Which instance, first, because every number below is that instance's.
+    // `cargo xtask compositor` reads this line and holds its epoch and page
+    // against the lifecycle's `liveness` and `timeout` lines — the harness half
+    // of RFC 0129's identity, and the kernel half is `Report::served_held`.
+    if let Some((epoch, tree_at)) = report.served {
+        crate::kprintln!(
+            "  compositor    served in its place: occupant epoch {}, whose own control ring says \
+             epoch {} (reported plus one: {}); its tree is the page at {:#x}",
+            epoch,
+            report.board.epoch.saturating_sub(1),
+            report.board.epoch,
+            tree_at,
+        );
+    }
+    // And the place's next occupant, on the half that restarts it — the line
+    // whose epochs can disagree. `cargo xtask compositor` holds its epoch
+    // against the lifecycle's spawn line after the restart.
+    if let Some(refilled) = report.refilled {
+        crate::kprintln!(
+            "  compositor    served its place's next occupant: occupant epoch {}, whose own \
+             control ring says epoch {} (reported plus one: {}); its tree is the page at {:#x}; \
+             {} frame(s) closed over {} entr(y/ies)",
+            refilled.epoch,
+            refilled.reported.saturating_sub(1),
+            refilled.reported,
+            refilled.tree_at,
+            refilled.frames,
+            refilled.drained,
+        );
+    }
     crate::kprintln!(
         "  compositor    a component holding the scene graph at ring 3, and the {} half: {}",
         report.half.name(),
@@ -2182,6 +2860,12 @@ pub fn report_lines(report: &Report) {
             Half::Wake =>
                 "the component stops its own core between frames and the client on another \
                  core rings it awake",
+            Half::Capped =>
+                "the client sends one frame past the cap the compositor's manifest declares \
+                 and one under it",
+            Half::Timeline =>
+                "the client builds claims/0033's scene through the reconciler and moves its \
+                 playhead, every frame rebuilt whole and counted at every commit",
         }
     );
     match report.half {
@@ -2211,7 +2895,7 @@ pub fn report_lines(report: &Report) {
                 error::pack(error::ADMISSION, error::admission::NO_STATE_TREE),
             );
         }
-        Half::Serve | Half::Starved | Half::Wake => {
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline => {
             crate::kprintln!(
                 "  compositor    {} entr(y/ies) submitted, {} answered, {} refused, {} drained \
                  by the component",
@@ -2220,6 +2904,29 @@ pub fn report_lines(report: &Report) {
                 report.refused,
                 report.board.drained,
             );
+            // The cap, `E3-B07e`, on every serving half: the word the frame read
+            // off the manifest's `scene` ring, and both sides' counts of what it
+            // refused. Zero refused on the halves that never reach it is part of
+            // the reading, not an absence of one.
+            crate::kprintln!(
+                "  compositor    cap {} delta(s) per frame from the manifest's scene ring; the \
+                 component capped {}, the client reaped {} capped per frame (first four)",
+                report.cap,
+                report.board.capped,
+                FramesCapped(report.capped),
+            );
+            // The recapped run says what it moved, on its own line so the one
+            // above reads the same on every run. `cargo xtask compositor
+            // recapped` requires this line and the two numbers in it to differ,
+            // so a frame that ignored the parameter is not a second cap.
+            if report.cap != report.declared {
+                crate::kprintln!(
+                    "  compositor    recapped: the record declares {} and the frame wrote {} — \
+                     the same record with its scene ring's cap moved and nothing else changed",
+                    report.declared,
+                    report.cap,
+                );
+            }
             crate::kprintln!(
                 "  compositor    {} frame(s) closed, {} delta(s) applied, {} node(s) created, {} \
                  removed, {} live, last frame {}",
@@ -2417,8 +3124,82 @@ pub fn report_lines(report: &Report) {
                 );
                 crate::kprintln!("    ui_frames_closed    {}", report.board.frames);
             }
+            // `E3-B01`'s rows, on the timeline half alone and for the serving
+            // half's reason: one half owns a row name.
+            if report.half == Half::Timeline {
+                timeline_lines(report);
+            }
         }
     }
+}
+
+/// The timeline half's frames, each one, and the rows `claims/0039` reads.
+///
+/// **Every warm frame on its own line, with both sides' counts**, for
+/// `claims/README.md`'s rule 3: a worst and a best are what the claim bounds,
+/// and the line per frame is the distribution they were taken from. The build
+/// frames are summarised rather than listed — forty lines of a number the claim
+/// does not bound would bury the eight it does — and their worst is a row,
+/// because a reader deciding whether *the first frame* is a UI frame needs it.
+fn timeline_lines(report: &Report) {
+    let timeline = &report.timeline;
+    crate::kprintln!(
+        "  compositor    the scene: {} node(s) built in {} frame(s) of {} under a cap of {}; \
+         the compositor holds {}",
+        timeline.nodes,
+        timeline.build,
+        timeline.step,
+        report.cap,
+        report.board.live,
+    );
+    let mut worst = 0;
+    let mut best = u64::MAX;
+    let mut sum = 0;
+    let mut out_worst = 0;
+    let mut back_worst = 0;
+    for k in timeline.warm() {
+        let (client_out, client_back, out, back) = timeline.window(k);
+        crate::kprintln!(
+            "  compositor    warm frame {}: {} delta(s) from the reconciler; {} out, {} back by \
+             the component, {} out, {} back by the client",
+            k - timeline.build + 1,
+            timeline.cuts[k].deltas,
+            out,
+            back,
+            client_out,
+            client_back,
+        );
+        let crossings = timeline.crossings(k);
+        worst = worst.max(crossings);
+        best = best.min(crossings);
+        sum += crossings;
+        out_worst = out_worst.max(out);
+        back_worst = back_worst.max(back);
+    }
+    let warm = timeline.warm().len() as u64;
+    let cold_worst = (0..timeline.build).map(|k| timeline.crossings(k)).max().unwrap_or(0);
+    let cold_sum: u64 = (0..timeline.build).map(|k| timeline.crossings(k)).sum();
+    crate::kprintln!(
+        "  compositor    the build: {} crossing(s) over {} frame(s), the worst {}",
+        cold_sum,
+        timeline.build,
+        cold_worst,
+    );
+    crate::kprintln!("    ring_crossings_per_representative_frame_worst    {}", worst);
+    crate::kprintln!(
+        "    ring_crossings_per_representative_frame_best    {}",
+        if warm == 0 { 0 } else { best }
+    );
+    crate::kprintln!(
+        "    ring_crossings_per_representative_frame_x1000    {}",
+        sum.saturating_mul(1000).checked_div(warm).unwrap_or(0),
+    );
+    crate::kprintln!("    ring_entries_out_per_representative_frame_worst    {}", out_worst);
+    crate::kprintln!("    ring_entries_back_per_representative_frame_worst    {}", back_worst);
+    crate::kprintln!("    representative_frames_closed    {}", warm);
+    crate::kprintln!("    representative_scene_nodes_held    {}", report.board.live);
+    crate::kprintln!("    build_frames_closed    {}", timeline.build);
+    crate::kprintln!("    ring_crossings_per_build_frame_worst    {}", cold_worst);
 }
 
 /// Find the component file this boot is about, by the name its manifest
@@ -2471,25 +3252,111 @@ pub(crate) fn heap_declared(record: &Record) -> Option<u64> {
     None
 }
 
-/// Stand `user/compositor` up as a server and be its client, or put its record
-/// past the admission a spawn performs.
+/// The cap the compositor's record declares on the ring it serves scene deltas
+/// on, `E3-B07e`.
+///
+/// **Found by `f_abi::manifest::FRAMED_PROTOCOL` and not by position or label**,
+/// which is RFC 0128's defence against a rename: the checker and
+/// `Record::read` refuse a `scene` server with no cap, and neither can see a
+/// ring that stopped being called `scene`. This is the third reader and the one
+/// that turns *not called `scene`* into a refusal — `None` here is
+/// [`Trouble::Unframed`] and no compositor is started.
+///
+/// `None` also for a framed ring whose cap reads zero, which the reader refuses
+/// already; it is answered here as well rather than trusted, because a zero
+/// written onto the routing page is the one value the component refuses as a
+/// page nobody finished.
+///
+/// Visible to the rest of the frame for [`found`]'s reason: `kernel/src/input.rs`
+/// stands the same component up and must hand it the same word.
+/// Unit: deltas per frame.
+pub(crate) fn frame_cap(record: &Record) -> Option<u64> {
+    let ring = record.rings().iter().find(|ring| ring.framed_server())?;
+    (ring.deltas_per_frame_max != 0).then_some(u64::from(ring.deltas_per_frame_max))
+}
+
+/// The boot parameter that runs the capped half at [`RECAPPED`] rather than at
+/// the manifest's own cap. `cargo xtask compositor recapped` passes it beside
+/// `compositor=capped`, so the half, its script and its verdict are the capped
+/// half's and the cap is the only thing that moves.
+const RECAPPED_PARAMETER: &[u8] = b"compositor.recapped";
+
+/// The second cap the capped half runs at, `E3-B07e`'s audit.
+///
+/// Thirty, the auditor's suggestion, and the constraints are what make it a
+/// number rather than a preference: inside the range the batch allows
+/// (`f_abi::manifest::FRAME_DELTAS_CAP_MAX`), strictly between the capped
+/// half's two frames so the first reaches it and the second stays under it —
+/// the straddle clause in [`Report::capped_verdict`] — and far enough from the
+/// manifest's fifty that a compositor counting against a constant is off by
+/// twenty rather than by one. Unit: deltas per frame.
+const RECAPPED: u32 = 30;
+const _: () = assert!(
+    RECAPPED != 0
+        && RECAPPED <= f_abi::manifest::FRAME_DELTAS_CAP_MAX
+        && RECAPPED > UNCAPPED_DELTAS
+        && RECAPPED < CAPPED_DELTAS
+);
+
+/// The compositor's record with its framed ring's cap moved to `cap`, and
+/// nothing else changed.
+///
+/// # Why derived here and not compiled from a second manifest
+///
+/// **A second manifest is a second copy of three hundred lines that must stay
+/// identical but for one number**, and nothing in this tree checks that two
+/// manifests agree — `cargo xtask lint-manifests` judges each one alone. The
+/// day the heap or the class moved in one and not the other, the second capped
+/// run would be a run of a different component and would still be green. A
+/// record derived here from the one the place was filled from cannot drift:
+/// the difference is one field by construction, which is `mute`'s argument for
+/// its own variant.
+///
+/// What it costs, said rather than hidden: the occupant the lifecycle spawned
+/// was spawned from the record as compiled, and only the word on its routing
+/// page comes from this one. That is honest today because the cap is read in
+/// exactly one place — [`frame_cap`], onto the page — and nothing at spawn or
+/// admission reads it. *What would reverse this:* a spawn or an admission that
+/// sizes anything from the cap, at which point the variant must be a compiled
+/// record the place is filled from, and the way to produce it without a second
+/// file is `xtask` compiling the one manifest twice with the field overridden.
+fn recapped(record: &Record, cap: u32) -> Record {
+    let mut varied = *record;
+    for ring in &mut varied.ring {
+        if ring.framed_server() {
+            ring.deltas_per_frame_max = cap;
+        }
+    }
+    varied
+}
+
+/// Put the compositor's record past the admission a spawn performs, or describe a
+/// machine below the bottom of the ladder and be refused — the two halves that
+/// stand no component up.
+///
+/// **The three halves that do stand one up are not here any more**, and that is
+/// RFC 0129. They are served from the compositor's own place by
+/// `component::demonstrate`, with [`Placed`] as the client, so the occupant a
+/// supervisor judges and restarts is the one whose tree it judged. This
+/// function used to stand a compositor up beside the place with
+/// `process::prepare_server` for all five, and the reading that crossed onto the
+/// supervisor's row was that instance's — RFC 0126's narrowing, now reversed.
 ///
 /// # Errors
 ///
-/// [`Trouble`], every variant of which fails the boot.
+/// [`Trouble`], every variant of which fails the boot. A serving half handed to
+/// this function is [`Trouble::Placed`], by name: there is no second path that
+/// stands one up beside the place.
 ///
 /// # Safety
 ///
-/// As [`process::prepare_server`]: `kernel` must be the live kernel space,
-/// `frames` its allocator, and `on.cpu` a started, idle core that is not this
-/// one. The direct map must be live and cover every boot module.
+/// `frames` must be the kernel's allocator on its direct map, called on the boot
+/// processor with nothing running. The direct map must be live and cover every
+/// boot module.
 pub unsafe fn demonstrate(
     frames: &mut FrameAllocator,
-    kernel: &paging::AddressSpace,
-    features: paging::Features,
     half: Half,
     boot: &crate::BootInfo,
-    on: Scheduling,
 ) -> Result<Report, Trouble> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -2505,14 +3372,15 @@ pub unsafe fn demonstrate(
         return Err(Trouble::HeapDisagrees);
     }
 
-    if half == Half::Mute {
+    match half {
         // SAFETY: the caller's guarantee about the boot processor and the
         // allocator, passed down; nothing is running.
-        return unsafe { mute(frames, &record, image) };
+        Half::Mute => unsafe { mute(frames, &record, image) },
+        Half::Floorless => Ok(floorless(image)),
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline => {
+            Err(Trouble::Placed)
+        }
     }
-
-    // SAFETY: the caller's guarantee, passed down unchanged.
-    unsafe { serve(frames, kernel, features, half, &record, image, on) }
 }
 
 /// The refusal half: one record, twice, through the admission a spawn performs.
@@ -2543,412 +3411,714 @@ unsafe fn mute(
         .map_err(|_| Trouble::Admission)?;
 
     Ok(Report {
-        half: Half::Mute,
-        submitted: 0,
-        completed: 0,
-        refused: 0,
-        board: Board::default(),
-        tree_nodes: 0,
-        tree_blank: 0,
-        tree_before: [0; WORDS],
-        tree_after: 0,
-        tree: [0; WORDS],
-        submitted_deadline: 0,
-        last_tick: 0,
         admitted: declared.is_ok(),
         muted: refused.err().unwrap_or(0),
-        // Not this half's question either way round: no machine was described
-        // here and no compositor was stood up, so both words are the ones a
-        // half that asked nothing is entitled to.
-        backend_admitted: false,
-        floorless: 0,
-        reported: 0,
-        image: image.len() as u64,
-        heap: 0,
-        // No core, no ring, no doorbell: this half probes a record.
-        bells: Bells::default(),
+        ..Report::nothing(Half::Mute, image.len() as u64)
     })
 }
 
-/// The serving half.
+/// RFC 0080's refusal, before a page is spent.
 ///
-/// # Safety
+/// What this half says the machine reports, and whether a machine reporting it
+/// may be given a compositor at all. The control goes first and is the same
+/// function over this boot's own machine, for `mute`'s reason: a refusal that
+/// refused everything would look exactly like this one.
 ///
-/// As [`demonstrate`].
-unsafe fn serve(
-    frames: &mut FrameAllocator,
-    kernel: &paging::AddressSpace,
-    features: paging::Features,
+/// **Nothing is stood up whatever the answer**, and that is the clause rather
+/// than a shortcut: *refused a compositor* means nothing was stood up, so the
+/// verdict requires every page to be absent. Before RFC 0129 an admitted
+/// floorless machine would have gone on to the stand-up below the refusal and
+/// the verdict would have caught a compositor that existed; now it catches a
+/// `floorless` word of zero, which is the same failure read one step earlier.
+fn floorless(image: &[u8]) -> Report {
+    let reported = Half::Floorless.reported();
+    Report {
+        backend_admitted: admit_backend(BACKEND_CAPABILITIES).is_ok(),
+        floorless: admit_backend(reported).err().unwrap_or(0),
+        ..Report::nothing(Half::Floorless, image.len() as u64)
+    }
+}
+
+/// The client of a compositor served **from its place**: the three halves that
+/// stand one up, driven by `component::demonstrate` against the place's own
+/// occupant. RFC 0129.
+///
+/// # Why this is a client and not a stand-up
+///
+/// Because a stand-up is what made the reading a supervisor judged somebody
+/// else's. RFC 0126 recorded it: this file used to build a compositor beside its
+/// place with `process::prepare_server`, read two words off its tree, and hand
+/// them to the lifecycle, which put them on the row of the place's own occupant
+/// — an instance that had never run — and then stopped and restarted *that*
+/// one. Every link was real and the subject was two compositors.
+///
+/// # Why it ran beside its place, and what answers it
+///
+/// **Its manifest declared no `board` and no `data` need.** A spawn maps a
+/// routing page and ring memory only for a manifest that declares them, so the
+/// place's occupant had nowhere to learn where its rings were and its serving
+/// life would have ended `NO_ROUTING` before it looked. The file header's reason
+/// — *there is no other client* — had stopped being the reason when
+/// `component::Datapath` gave a place's occupant a client inside the lifecycle;
+/// the missing declaration was what was left, and it is the wall `E1-B05` found
+/// for `user/virtio-blk` and answered by declaring both. So is this one. A
+/// manifest that declares neither is refused by name in
+/// `component::demonstrate` — `Failure::Unserved` — and nothing falls back to a
+/// stand-up beside the place.
+///
+/// # What is the same, and what is not
+///
+/// The script, the rings' shape, the board, the clock, the doorbell, the stop
+/// and the verdict are this file's and unchanged: [`drive`] and [`drive_batch`]
+/// are called exactly as they were. What moved is who built the instance — the
+/// place's account paid for every page, the frame's root mounts its tree, and a
+/// supervisor can end it — and two words: the occupant's `epoch`, which the
+/// component reads off its own control ring and reports, and the physical page
+/// its tree is, which the lifecycle prints at the copy and at the teardown.
+pub struct Placed {
+    /// Which half.
     half: Half,
-    record: &Record,
-    image: &'static [u8],
-    on: Scheduling,
-) -> Result<Report, Trouble> {
-    let Scheduling { tree, cpu, hz, target, tsc_khz } = on;
+    /// How long the image is. Unit: bytes.
+    image: u64,
+    /// How much heap this half describes to the component. Unit: bytes.
+    described: u64,
+    /// Whether this boot's own machine was admitted a compositor.
+    backend_admitted: bool,
+    /// What was taken before the core ran, `None` until [`Self::prepare`].
+    before: Option<Before>,
+    /// What the client saw while the occupant ran, `None` until `drive`.
+    seen: Option<Result<Seen, Trouble>>,
+    /// The one batch the waking half publishes.
+    batch: Batched,
+    /// The doorbell's own accounting, and the path it chose.
+    rung: (&'static str, u64, u64),
+    /// Which core the client drove from. Unit: none — a core index.
+    client: usize,
+    /// What was taken after the core came back, `None` until [`Self::ended`].
+    after: Option<After>,
+    /// The cap [`frame_cap`] read out of the compositor's record, written onto
+    /// the routing page and carried back on every capped completion.
+    /// Unit: deltas per frame.
+    cap: u64,
+    /// The cap the compositor's record declares as compiled — [`Placed::cap`]
+    /// except on the recapped run, where the two must differ.
+    /// Unit: deltas per frame.
+    declared: u64,
+    /// What the timeline half recorded, `E3-B01`.
+    timeline: Timeline,
+    /// The place's next occupant, served after the restart, `E3-B05e`.
+    refill: Refill,
+}
 
-    // --- RFC 0080's refusal, before a page is spent -------------------------
-    //
-    // What this half says the machine reports, and whether a machine reporting
-    // it may be given a compositor at all. The control goes first and is the
-    // same function over this boot's own machine, for `mute`'s reason: a
-    // refusal that refused everything would look exactly like this one.
-    //
-    // **Here rather than after the rings, and the position is the clause.**
-    // *Refused a compositor* means nothing was stood up, so the refusal has to
-    // come before the frame the channel lives in, before the address space,
-    // before the tree — and the verdict below says so by requiring every one of
-    // those to be absent. A check further down would refuse a compositor that
-    // already existed, which is a compositor that exited.
-    let reported = half.reported();
-    let backend_admitted = admit_backend(BACKEND_CAPABILITIES).is_ok();
-    if let Err(code) = admit_backend(reported) {
-        return Ok(Report {
+/// The same three readings as [`Placed`]'s own, of the occupant the lifecycle
+/// spawned into the place after it stopped the one that timed out.
+///
+/// # Why a second occupant is served at all
+///
+/// **Because the identity check could not fail on one.** Every place's first
+/// occupant is epoch zero, so the served occupant's epoch and the epoch its
+/// component reads off its own control ring agree whether or not the component
+/// reads anything: the audit of `E3-B05e` made the component report *zero*
+/// without looking and `cargo xtask compositor serve` stayed green. The refill
+/// is epoch one, so the same comparison over it is a comparison between two
+/// numbers that can differ, and a component that does not read its ring now
+/// says one where the frame wrote two.
+///
+/// Its readings are kept apart from the first occupant's, and never replace
+/// them, because the verdict, the rows and `claims/0038`'s crossing count are
+/// the first occupant's and the reading a supervisor judged was that one's.
+/// What is taken from this one is identity and that it served.
+#[derive(Clone, Copy)]
+struct Refill {
+    /// What was taken before its core ran.
+    before: Option<Before>,
+    /// What the client saw while it ran.
+    seen: Option<Result<Seen, Trouble>>,
+    /// What was taken after its core came back.
+    after: Option<After>,
+}
+
+impl Refill {
+    /// Nothing served yet.
+    const NOTHING: Self = Self { before: None, seen: None, after: None };
+}
+
+/// What a [`Placed`] reads off the occupant before its first instruction.
+#[derive(Clone, Copy)]
+struct Before {
+    /// Nodes the schema carries. Unit: nodes.
+    nodes: u32,
+    /// The blank tree's fold. Unit: none — a fold.
+    blank: u64,
+    /// The fifteen words, read while nothing had written them. Unit: as
+    /// [`Report::tree`].
+    words: [u64; WORDS],
+    /// The worker core's four doorbell counts, which are the core's and not the
+    /// run's: a place's occupant runs on a core the supervisor has already run
+    /// on, so what this run caused is the difference.
+    ///
+    /// **A guard this boot does not exercise, said rather than implied.** Nothing
+    /// that runs on the worker core before the compositor — the supervisor's
+    /// consultations — halts it, so these read zero today, and a mutation that
+    /// took the counts whole left the wake half green. The subtraction is here
+    /// for the first earlier occupant that parks on that core, which would
+    /// otherwise have its halts charged to this run. Unit: as [`Bells`].
+    counts: [u64; 4],
+    /// Which occupant of the place this is. Unit: instances.
+    epoch: u32,
+    /// The physical page its tree is. Unit: bytes, physical.
+    tree_at: u64,
+    /// Which core it runs on. Unit: none — a core index.
+    cpu: usize,
+}
+
+/// What a [`Placed`] reads off the occupant after its core came back.
+#[derive(Clone, Copy)]
+struct After {
+    /// Its board, or `None` where it never finished writing it.
+    board: Option<Board>,
+    /// What the routing page carried at `at::BACKEND_CAPABILITIES` at the end.
+    reported: u64,
+    /// The tree's fold at the end. Unit: none — a fold.
+    fold: u64,
+    /// The fifteen words at the end. Unit: as [`Report::tree`].
+    words: [u64; WORDS],
+    /// The worker core's four doorbell counts at the end. Unit: as [`Bells`].
+    counts: [u64; 4],
+}
+
+impl Placed {
+    /// A client for `half`, which must be one of the three that stand a
+    /// compositor up.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NoComponent`], [`Trouble::NoHeap`] and
+    /// [`Trouble::HeapDisagrees`] exactly as [`demonstrate`] refuses them, before
+    /// the lifecycle is asked to build anything; [`Trouble::Unframed`] for a
+    /// record serving no `scene` ring, which is RFC 0128's rename made red;
+    /// [`Trouble::Placed`] for a half that stands nothing up, said rather than
+    /// served.
+    ///
+    /// # Safety
+    ///
+    /// The direct map must be live and cover every boot module.
+    pub unsafe fn new(half: Half, boot: &crate::BootInfo) -> Result<Self, Trouble> {
+        // SAFETY: the caller's guarantee.
+        let (image, record) = unsafe { found(boot) }.ok_or(Trouble::NoComponent)?;
+        let declared = heap_declared(&record).ok_or(Trouble::NoHeap)?;
+        if declared != routing::HEAP_BYTES {
+            return Err(Trouble::HeapDisagrees);
+        }
+        // Before the lifecycle builds anything, beside the heap check and for
+        // its reason: a compositor with no cap to hand it is refused while
+        // nothing has been spent, rather than started and told zero.
+        let declared = frame_cap(&record).ok_or(Trouble::Unframed)?;
+        // **The capped half at a second cap, `E3-B07e`'s audit.** Every boot and
+        // every test held the cap at the manifest's fifty, so a compositor that
+        // ignored the word on its page and wrote fifty in passed all of them. On
+        // `compositor.recapped` the record is taken again with its framed ring's
+        // cap moved to [`RECAPPED`] and **nothing else changed**, and the cap is
+        // read out of that record by the same [`frame_cap`] — `mute`'s device for
+        // its declaration, for its reason: the only difference between the two
+        // runs is the thing under test, and there is no second manifest to drift
+        // from the first. [`recapped`] argues why a derived record and not a
+        // compiled one.
+        let cap = if half == Half::Capped && boot.has_parameter(RECAPPED_PARAMETER) {
+            let cap = frame_cap(&recapped(&record, RECAPPED)).ok_or(Trouble::Unframed)?;
+            // A variant that lands on the declared cap tests nothing the declared
+            // run did not, and would read as the second value it is not.
+            if cap == declared {
+                return Err(Trouble::Unframed);
+            }
+            cap
+        } else {
+            declared
+        };
+        let described = match half {
+            // What the manifest declares, or — on the starved half — two pages,
+            // which is the one number in this plan the component is asked to
+            // disbelieve.
+            Half::Starved => STARVED_HEAP_BYTES,
+            Half::Serve | Half::Wake | Half::Capped | Half::Timeline => routing::HEAP_BYTES,
+            Half::Mute | Half::Floorless => return Err(Trouble::Placed),
+        };
+        Ok(Self {
             half,
-            submitted: 0,
-            completed: 0,
-            refused: 0,
-            board: Board::default(),
-            tree_nodes: 0,
-            tree_blank: 0,
-            tree_before: [0; WORDS],
-            tree_after: 0,
-            tree: [0; WORDS],
-            submitted_deadline: 0,
-            last_tick: 0,
-            // Not this half's question: no record was put past the admission a
-            // spawn performs, and saying otherwise would put a true-looking
-            // word in a report that had not earned it.
-            admitted: false,
-            muted: 0,
-            backend_admitted,
-            floorless: code,
-            // No page was ever written, so there is nothing to report having
-            // carried. The verdict requires this to be zero, which is the same
-            // clause as *nothing was spent* read from the page's side.
-            reported: 0,
             image: image.len() as u64,
-            heap: 0,
-            // Nothing was stood up, so nothing could be rung.
-            bells: Bells::default(),
-        });
+            described,
+            backend_admitted: false,
+            before: None,
+            seen: None,
+            batch: Batched::default(),
+            rung: ("Polling", 0, 0),
+            client: 0,
+            after: None,
+            cap,
+            declared,
+            timeline: Timeline::NOTHING,
+            refill: Refill::NOTHING,
+        })
     }
 
-    // What the manifest declares, or — on the starved half — two pages, which is
-    // the one number in this plan the component is asked to disbelieve.
-    let described = match half {
-        Half::Starved => STARVED_HEAP_BYTES,
-        Half::Serve | Half::Mute | Half::Floorless | Half::Wake => routing::HEAP_BYTES,
-    };
-    let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0))?;
+    /// Which place this client serves, by its manifest's label.
+    #[must_use]
+    pub const fn label() -> &'static [u8] {
+        b"compositor"
+    }
 
-    // The data ring. The frame writes the header and takes the *client's* end;
-    // the server's end is the component's, at ring 3. Two ends of one region on
-    // two sides of a privilege boundary, which is the whole shape.
-    //
-    // Allocated here rather than inside `prepare_server` for `ServerPlan::data`'s
-    // reason: the frame holds the far end, so this page must not be handed to
-    // `reap`.
-    let wire = frames.alloc_zeroed(crate::mem::Order::FRAME).ok_or(Trouble::Channel(0))?;
-    let at = frames.virt(wire);
-    // SAFETY: `wire` was allocated zeroed just above, is frame-aligned — stronger
-    // than the cache line the layout asks for — and is `FRAME_SIZE` bytes with no
-    // pointer into it held anywhere else.
-    let _ = unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
-    // SAFETY: as above; two ends over one region is what a channel is, and every
-    // accessor hands out atomics and `UnsafeCell`s rather than references.
-    let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
+    /// Which life the occupant is entered at.
+    #[must_use]
+    pub const fn life() -> u32 {
+        life::SERVE
+    }
 
-    // SAFETY: the caller's guarantee about `kernel`, `frames` and `cpu`, plus
-    // `wire` being a frame this function allocated and holds the far end of.
-    let (prepared, pages) = unsafe {
-        process::prepare_server(
-            frames,
-            kernel,
-            features,
-            ServerPlan {
-                image,
-                selector: life::SERVE,
-                tree,
-                hz,
-                target,
-                cpu,
-                data: wire.addr(),
-                // No client buffer region, and the zero is the manifest's
-                // declaration made real: this component's ring carries its
-                // payloads `inline`, in the channel's own arena, so a registered
-                // region would be a page nobody ever addresses.
-                buffers: 0,
-                buffer_bytes: 0,
-                // What the manifest declares, or — on the starved half — two
-                // pages, which is the one number in this plan the component is
-                // asked to disbelieve.
-                heap_bytes: described,
-                // The page this task is about. RFC 0065: the schema is the
-                // frame's and the words are the component's.
-                own_tree: true,
+    /// Which two nodes go onto the supervisor's row, in its order: waits
+    /// outstanding, then frames abandoned. The component's own ids, so the frame
+    /// copies by id and never by position.
+    #[must_use]
+    pub const fn liveness() -> [u32; 2] {
+        [node::WAITS, node::TIMEOUTS]
+    }
+
+    /// What the boot saw, once the lifecycle has served the occupant.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NotServed`] for a client the lifecycle never ran — which is a
+    /// boot whose compositor half was asked for and never happened, and is red
+    /// rather than an empty report; the client's own trouble where it had one;
+    /// [`Trouble::BadReport`] for a board the component never finished.
+    pub fn report(&self) -> Result<Report, Trouble> {
+        let (Some(before), Some(seen), Some(after)) = (self.before, self.seen, self.after) else {
+            return Err(Trouble::NotServed);
+        };
+        let seen = seen?;
+        let board = after.board.ok_or(Trouble::BadReport)?;
+        let [delivered, parks, woken, spared] = after.counts;
+        let [was_delivered, was_parks, was_woken, was_spared] = before.counts;
+        let (path, operations, rings) = self.rung;
+        Ok(Report {
+            submitted: seen.submitted,
+            completed: seen.completed,
+            refused: seen.refused,
+            board,
+            tree_nodes: before.nodes,
+            tree_blank: before.blank,
+            tree_before: before.words,
+            tree_after: after.fold,
+            tree: after.words,
+            submitted_deadline: seen.deadline,
+            last_tick: seen.last_tick,
+            // The machine this half described was admitted a compositor, which
+            // is what makes this the positive half of the pair the floorless
+            // half completes: the same function, in the same build, over one
+            // word.
+            backend_admitted: self.backend_admitted,
+            reported: after.reported,
+            heap: self.described,
+            bells: Bells {
+                path,
+                worker: before.cpu,
+                client: self.client,
+                operations,
+                rings,
+                batch_entries: self.batch.entries,
+                batch_operations: self.batch.operations,
+                batch_rings: self.batch.rings,
+                delivered: delivered.saturating_sub(was_delivered),
+                parks: parks.saturating_sub(was_parks),
+                woken: woken.saturating_sub(was_woken),
+                spared: spared.saturating_sub(was_spared),
             },
-        )
-    }
-    .map_err(Trouble::Process)?;
-
-    // The component's own tree, written before its first instruction, out of its
-    // own manifest and through the same function the spawn path uses. A
-    // component that is prepared and never scheduled still reads as *this
-    // component has done nothing* rather than as *this component cannot be read*,
-    // which is RFC 0065's distinction and the reason the blank snapshot below is
-    // worth taking.
-    let tree_nodes = crate::component::publish_tree(pages.own_tree as *mut u8, record)
-        .map_err(|_| Trouble::StateTree(0))?;
-    let blank = state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
-    let tree_blank = blank.snapshot();
-    let mut tree_before = [0u64; WORDS];
-    for (slot, id) in tree_before.iter_mut().zip(node::WRITTEN) {
-        // `u64::MAX` for an id the schema does not carry, so a manifest and
-        // `routing::node` that disagree fail this half's *blank* clause rather
-        // than passing it with a zero nobody wrote.
-        *slot = blank.value(id).unwrap_or(u64::MAX);
+            served: Some((before.epoch, before.tree_at)),
+            refilled: self.refilled(),
+            cap: self.cap,
+            declared: self.declared,
+            capped: seen.capped,
+            timeline: self.timeline,
+            ..Report::nothing(self.half, self.image)
+        })
     }
 
-    // SAFETY: `pages.control` is the kernel address of a frame `prepare_server`
-    // allocated zeroed for this run and handed to nobody else.
-    let control = unsafe {
-        Mapping::describe(
-            pages.control as *mut u8,
-            bytes,
-            ENTRIES,
-            0,
-            feature::CONTROL_EVENTS,
-            feature::CONTROL_EVENTS,
-        )
+    /// Whether the occupant the lifecycle is serving now is the place's refill.
+    ///
+    /// Read off the first run's last reading rather than counted, because the
+    /// lifecycle calls this client's three hooks in one order per occupant and
+    /// the first occupant's `ended` is what closes its run. So everything after
+    /// it is the next occupant's, and nothing before it can be.
+    const fn refilling(&self) -> bool {
+        self.after.is_some()
     }
-    .map_err(Trouble::Channel)?;
 
-    // --- what the component is told -----------------------------------------
-    let board = Window::at(pages.board, routing::BYTES).map_err(Trouble::Channel)?;
-    for (offset, value) in [
-        (at::CONTROL_AT, crate::process::SPAWN_CONTROL),
-        (at::CONTROL_LEN, u64::from(bytes)),
-        (at::DATA_AT, crate::process::BLK_DATA),
-        (at::DATA_LEN, u64::from(bytes)),
-        (at::TREE_AT, crate::process::SPAWN_TREE),
-        (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
-        (at::NEGOTIATED_FEATURES, 0),
-        (at::IDLE_SPINS, IDLE_SPINS),
-        // What the component needs to pace a frame, and none of it is something
-        // a component could have found out for itself: RFC 0004 gives it no
-        // clock, nothing tells it about a display, and the margin is a policy.
-        // The clock reading below is a placeholder the client overwrites before
-        // every entry — it is written here so that a component whose first entry
-        // somehow arrived before the first tick reads a number rather than
-        // whatever the page held.
-        (at::TICK_NANOS, 0),
-        (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
-        (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
-        // What this half says the machine reports, and the same word
-        // `admit_backend` was given above — one function, so a boot cannot
-        // admit one machine and describe another.
-        (at::BACKEND_CAPABILITIES, reported),
-        // **Whether this frame will ring, which is a statement about the frame
-        // and not a mode of the component.** On every half but one it says
-        // *nobody rings*, which is what every boot before `E3-B01g` did and is
-        // what keeps those halves' numbers comparable with the runs that
-        // produced them. On the wake half it says the frame rings, and the
-        // component may then stop its core.
+    /// The refill's identity and what it served, or `None` where no refill was
+    /// served — whole, or not at all, so a refill whose core never came back is
+    /// the absence the verdict refuses rather than a half-filled row.
+    fn refilled(&self) -> Option<Refilled> {
+        let (Some(before), Some(Ok(seen)), Some(after)) =
+            (self.refill.before, self.refill.seen, self.refill.after)
+        else {
+            return None;
+        };
+        let board = after.board.unwrap_or_default();
+        Some(Refilled {
+            epoch: before.epoch,
+            tree_at: before.tree_at,
+            reported: board.epoch,
+            frames: board.frames,
+            submitted: seen.submitted,
+            drained: board.drained,
+        })
+    }
+}
+
+/// The place's next occupant, as the client that served it saw it. `E3-B05e`.
+#[derive(Clone, Copy)]
+pub struct Refilled {
+    /// Which occupant the lifecycle handed a core: the epoch `spawn` wrote into
+    /// its control ring's header. Unit: instances.
+    pub epoch: u32,
+    /// The page its own page tables put its tree on. Unit: bytes, physical.
+    pub tree_at: u64,
+    /// The epoch its component read off that control ring, plus one — zero for
+    /// a component that never finished its board. Unit: none — an epoch plus one.
+    pub reported: u64,
+    /// Frames it closed. Unit: frames — UI frames.
+    pub frames: u64,
+    /// Entries the client put on its ring. Unit: entries.
+    pub submitted: u64,
+    /// Entries it took off that ring. Unit: entries.
+    pub drained: u64,
+}
+
+/// The worker core's four doorbell counts, in [`Bells`]' order.
+fn counts(cpu: usize) -> [u64; 4] {
+    [
+        crate::doorbell::delivered_at(cpu),
+        crate::doorbell::parks_at(cpu),
+        crate::doorbell::woken_at(cpu),
+        crate::doorbell::spared_at(cpu),
+    ]
+}
+
+impl crate::component::Datapath for Placed {
+    fn prepare(
+        &mut self,
+        wired: crate::component::Wired,
+        _frames: &FrameAllocator,
+    ) -> Result<(), &'static str> {
+        // RFC 0080's admission, over this boot's own machine. The positive half
+        // of the pair `floorless` completes, and asked before anything is told
+        // to the occupant: a machine refused here is a compositor that must not
+        // be started, and nothing below this line would be true of it.
+        self.backend_admitted = admit_backend(BACKEND_CAPABILITIES).is_ok();
+        let reported = self.half.reported();
+        if admit_backend(reported).is_err() {
+            return Err("RFC 0080 refused this machine a compositor on a half that serves one");
+        }
+        let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0).why())?;
+        if wired.board == 0 || wired.data == 0 || wired.tree == 0 || wired.heap == 0 {
+            return Err("the compositor's occupant has no board, data ring, tree or heap");
+        }
+
+        // The data ring's header, written by the *grantor* and adopted by the
+        // occupant — `f_ring::adopt`, RFC 0037. Here rather than in the
+        // lifecycle, because the entry count is the client's business, and at
+        // the occupant's own epoch, because a channel to this instance carries
+        // which instance it is.
+        // SAFETY: `wired.data` is the kernel address of a frame the occupant's
+        // account paid for, `FRAME_SIZE` long, frame-aligned and reachable
+        // through the direct map, with no core inside the occupant yet and no
+        // reference into it held anywhere.
+        let described =
+            unsafe { Mapping::describe(wired.data as *mut u8, bytes, ENTRIES, wired.epoch, 0, 0) };
+        described.map_err(|_| Trouble::Channel(0).why())?;
+
+        // **The starved half's one difference, and it is a description.** The
+        // account paid for the heap the manifest declares and `spawn` mapped all
+        // of it; what the component reads is the prologue, and the prologue is
+        // the frame's to write. Two pages here is the number the component is
+        // asked to disbelieve — exactly what `process::prepare_server` described
+        // on this half before RFC 0129, and the component's check is against
+        // what it reads rather than what is mapped, which is the point of it.
+        if self.half == Half::Starved {
+            let starved = u32::try_from(STARVED_HEAP_BYTES).map_err(|_| Trouble::NoHeap.why())?;
+            // SAFETY: `wired.heap` is the direct-map address of the run `spawn`
+            // carved for this occupant's heap and described a moment after; it
+            // is frame-aligned and longer than the prologue, and no core is
+            // inside the occupant yet, so nothing is reading the prologue.
+            unsafe { f_ring::heap::describe(wired.heap, starved) };
+        }
+
+        // The blank tree, read while it is blank. `spawn` wrote the schema out
+        // of the manifest before the first instruction, so a component that is
+        // served and does nothing still reads as *this component has done
+        // nothing* — RFC 0065's distinction, and the reason this snapshot is
+        // worth taking.
+        let blank = state::Reader::at(wired.tree, FRAME_SIZE as u32)
+            .map_err(|_| Trouble::StateTree(0).why())?;
+        let mut words = [0u64; WORDS];
+        for (slot, id) in words.iter_mut().zip(node::WRITTEN) {
+            // `u64::MAX` for an id the schema does not carry, so a manifest and
+            // `routing::node` that disagree fail this half's *blank* clause
+            // rather than passing it with a zero nobody wrote.
+            *slot = blank.value(id).unwrap_or(u64::MAX);
+        }
+
+        // --- what the component is told ---------------------------------------
+        let board =
+            Window::at(wired.board, routing::BYTES).map_err(|_| Trouble::Channel(0).why())?;
+        for (offset, value) in [
+            (at::CONTROL_AT, crate::process::SPAWN_CONTROL),
+            (at::CONTROL_LEN, u64::from(bytes)),
+            (at::DATA_AT, crate::process::BLK_DATA),
+            (at::DATA_LEN, u64::from(bytes)),
+            (at::TREE_AT, crate::process::SPAWN_TREE),
+            (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
+            (at::NEGOTIATED_FEATURES, 0),
+            // The timeline half's client reconciles 995 nodes between frames, and
+            // [`TIMELINE_IDLE_SPINS`] says why its backstop is wider.
+            (
+                at::IDLE_SPINS,
+                if self.half == Half::Timeline { TIMELINE_IDLE_SPINS } else { IDLE_SPINS },
+            ),
+            // What the component needs to pace a frame, and none of it is
+            // something a component could have found out for itself: RFC 0004
+            // gives it no clock, nothing tells it about a display, and the
+            // margin is a policy. The clock reading is a placeholder the client
+            // overwrites before every entry.
+            (at::TICK_NANOS, 0),
+            (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
+            (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
+            // What this half says the machine reports, and the same word
+            // `admit_backend` was given above — one function, so a boot cannot
+            // admit one machine and describe another.
+            (at::BACKEND_CAPABILITIES, reported),
+            // **Whether this frame will ring, which is a statement about the
+            // frame and not a mode of the component.** Only the wake half
+            // rings; whether an interrupt reaches that core is a fact about a
+            // vector, an interrupt controller and a second core, and all three
+            // are on this side of the boundary.
+            (at::DOORBELL, if self.half == Half::Wake { bell::RING } else { bell::POLL }),
+            // **The cap, `E3-B07e`**, out of the record by `FRAMED_PROTOCOL` in
+            // `Placed::new` and written on every half, because it is a fact about
+            // the component's manifest and not about what this half tests: the
+            // component refuses a page without it, so a half that left it off
+            // would be testing that refusal instead.
+            (at::DELTAS_PER_FRAME_MAX, self.cap),
+        ] {
+            board.write64(offset, value).map_err(|_| Trouble::Channel(0).why())?;
+        }
+        // The magic last, which is the whole of the discipline: a component that
+        // reads a page this loop never finished finds a zero rather than a
+        // plausible address.
+        board.write64(at::MAGIC, routing::MAGIC).map_err(|_| Trouble::Channel(0).why())?;
+
+        let before = Before {
+            nodes: blank.nodes(),
+            blank: blank.snapshot(),
+            words,
+            counts: counts(wired.cpu),
+            epoch: wired.epoch,
+            // The page the occupant's **own page tables** put its tree address
+            // on, and not the page the lifecycle's bookkeeping says it gave it:
+            // the liveness and timeout lines print that one, so the served line
+            // printing the walk is what makes the harness's page comparison two
+            // readings rather than one field three times. `Wired::tree_mapped`.
+            tree_at: wired.tree_mapped,
+            cpu: wired.cpu,
+        };
+        if self.refilling() {
+            self.refill.before = Some(before);
+        } else {
+            self.before = Some(before);
+        }
+        Ok(())
+    }
+
+    fn drive(
+        &mut self,
+        frames: &mut FrameAllocator,
+        wired: crate::component::Wired,
+        _killer: &mut dyn crate::component::Killer,
+    ) -> Result<crate::component::Drove, &'static str> {
+        let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0).why())?;
+        // The refill's run changes nothing the first run published: the path,
+        // the doorbell's accounting and the client's core are the first
+        // occupant's story, and [`Refill`] keeps only what the second one said.
+        let refilling = self.refilling();
+        if !refilling {
+            self.client = crate::arch::x86_64::current_cpu();
+        }
+        // Both ends adopted rather than described, because this client is not
+        // the grantor of either: `spawn` wrote the control ring's header out of
+        // the occupant's own account, and `prepare` wrote the data ring's before
+        // the core was told anything. A second `describe` would reset a ring the
+        // occupant has already adopted.
         //
-        // A component that believed this on a frame that did not ring would
-        // hang, which is why it is written here rather than assumed at ring 3:
-        // whether an interrupt reaches that core is a fact about a vector, an
-        // interrupt controller and a second core, and all three are on this side
-        // of the boundary.
-        (at::DOORBELL, if half == Half::Wake { bell::RING } else { bell::POLL }),
-    ] {
-        board.write64(offset, value).map_err(Trouble::Channel)?;
-    }
-    // The magic last, which is the whole of the discipline: a component that
-    // reads a page this loop never finished finds a zero rather than a plausible
-    // address.
-    board.write64(at::MAGIC, routing::MAGIC).map_err(Trouble::Channel)?;
+        // SAFETY: `wired.control` and `wired.data` are kernel addresses of two
+        // frames the occupant's account paid for, each `FRAME_SIZE` long,
+        // frame-aligned and reachable through the direct map; each has exactly
+        // one other end and it is the occupant's. Every accessor hands out
+        // atomics and `UnsafeCell`s rather than references.
+        let control = unsafe {
+            Mapping::adopt(
+                wired.control as *mut u8,
+                bytes,
+                feature::CONTROL_EVENTS,
+                feature::CONTROL_EVENTS,
+            )
+        };
+        let Ok(control) = control else { return Err(Trouble::Channel(0).why()) };
+        // SAFETY: as above.
+        let client_end = unsafe { Mapping::adopt(wired.data as *mut u8, bytes, 0, 0) };
+        let Ok(client_end) = client_end else { return Err(Trouble::Channel(0).why()) };
+        let Ok(board) = Window::at(wired.board, routing::BYTES) else {
+            return Err(Trouble::Channel(0).why());
+        };
+        let (Some(reaper), Some(mut producer), Some(notices)) = (
+            Collector::new(client_end.completions()),
+            Producer::new(client_end.channel()),
+            Poster::new(control.completions()),
+        ) else {
+            return Err(Trouble::Channel(0).why());
+        };
+        let arena = client_end.arena();
 
-    // SAFETY: the caller vouched `cpu` is started and idle, and `prepare_server`
-    // has written its job. Interrupts are enabled on it, which `run_on`'s
-    // contract requires so that a shootdown can be answered.
-    unsafe { crate::smp::start_on(cpu) }.map_err(Trouble::Scheduled)?;
+        // --- the doorbell -----------------------------------------------------
+        //
+        // Selected the way `f_ring::doorbell::Path` says and not by this half's
+        // name: what this half varies is the *hardware* half — whether one core
+        // may interrupt another — because that is the honest description of the
+        // difference between a boot that rings and one that does not.
+        let hardware =
+            Hardware { user_interrupts: false, cross_core_interrupts: self.half == Half::Wake };
+        let path = Path::select(client_end.negotiated(), hardware);
+        let Ok(mut doorbell) = Bell::new(path, hardware, crate::doorbell::Ipi::to(wired.cpu))
+        else {
+            return Err(Trouble::Channel(0).why());
+        };
 
-    let reaper = Collector::new(client_end.completions()).ok_or(Trouble::Channel(0))?;
-    let mut producer = Producer::new(client_end.channel()).ok_or(Trouble::Channel(0))?;
-    let notices = Poster::new(control.completions()).ok_or(Trouble::Channel(0))?;
-    let arena = client_end.arena();
+        // This boot's own clock, and the only one the component will ever see.
+        // `PACING_SEED` is the whole of what decides the readings below, which
+        // is what lets a pacing estimate be printed in a boot log at all.
+        let mut env = SeededEnv::new(PACING_SEED, 0);
+        let ends = Wire { reaper: &reaper, arena: &arena, board: &board, cap: self.cap };
+        let tsc_khz = wired.tsc_khz;
+        let driven = match self.half {
+            Half::Serve => {
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false, &script())
+            }
+            Half::Capped => {
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false, &capped_script())
+            }
+            // `E3-B01`: the representative scene, built and then played, every
+            // frame reconciled from a whole tree. Its working memory is frames
+            // this client takes and gives back inside the call.
+            Half::Timeline => drive_timeline(
+                frames,
+                &producer,
+                ends,
+                (&mut env, tsc_khz, &mut doorbell),
+                &mut self.timeline,
+            ),
+            Half::Wake => {
+                // The script first, one entry at a time and each one waited for,
+                // so that every submission lands on a core this client has
+                // watched stop. Then the third frame, whole, as the one batch the
+                // second clause is about.
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true, &script()).and_then(
+                    |mut seen| {
+                        self.batch = drive_batch(
+                            &mut producer,
+                            ends,
+                            &mut env,
+                            tsc_khz,
+                            &mut doorbell,
+                            &mut seen,
+                        )?;
+                        Ok(seen)
+                    },
+                )
+            }
+            // A starved component ends before it adopts anything, so a client
+            // that submitted would be waiting for a completion from a component
+            // that has already exited.
+            Half::Starved | Half::Mute | Half::Floorless => Ok(Seen::NOTHING),
+        };
 
-    // --- the doorbell -------------------------------------------------------
-    //
-    // **The path is selected the way `f_ring::doorbell::Path` says and not by
-    // this half's name.** A feature bit is a statement about the protocol and
-    // the hardware is a statement about the silicon; conflating them is how a
-    // channel gets negotiated into an instruction that faults. What this half
-    // varies is the *hardware* half — whether one core may interrupt another —
-    // because that is the honest description of the difference between a boot
-    // that rings and one that does not: the polling halves are the same code
-    // over a machine that cannot ring, which is `Path::Polling`'s own sentence.
-    //
-    // The ringer carries the core, which is why `f_ring` takes an implementor
-    // rather than a function: that crate has no idea what an APIC identifier is
-    // and should not acquire one.
-    let hardware = Hardware { user_interrupts: false, cross_core_interrupts: half == Half::Wake };
-    let path = Path::select(client_end.negotiated(), hardware);
-    let mut doorbell = Bell::new(path, hardware, crate::doorbell::Ipi::to(cpu))
-        .map_err(|_| Trouble::Channel(0))?;
-
-    // The client, on the half that has one. A starved component ends before it
-    // adopts anything, so a client that submitted would be waiting for a
-    // completion from a component that has already exited — which is this
-    // harness measuring its own bound rather than the refusal it came for.
-    // This boot's own clock, and the only one the component will ever see.
-    // `PACING_SEED` is the whole of what decides the readings below, which is
-    // what lets a pacing estimate be printed in a boot log at all.
-    let mut env = SeededEnv::new(PACING_SEED, 0);
-    // Named `ends` rather than `wire`, which in this function is already the
-    // page the channel lives in. Two things called the same thing one scope
-    // apart is how a frame gets freed instead of a struct.
-    let ends = Wire { reaper: &reaper, arena: &arena, board: &board };
-    let mut batch_seen = Batched::default();
-    let driven = match half {
-        Half::Serve | Half::Mute => drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false),
-        Half::Wake => {
-            // The script first, one entry at a time and each one waited for, so
-            // that every submission lands on a core this client has watched stop.
-            // Then the third frame, whole, as the one batch the second clause is
-            // about.
-            drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true).and_then(|mut seen| {
-                batch_seen =
-                    drive_batch(&mut producer, ends, &mut env, tsc_khz, &mut doorbell, &mut seen)?;
-                Ok(seen)
-            })
+        // Told to stop whatever happened above, because a component left serving
+        // a client that has gone is a core this boot never gets back — and rung
+        // for, on the half where it may be asleep: a stop notice goes on the
+        // control ring, which has no wakeup flag of its own, and a doorbell says
+        // only *stop halting*.
+        let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
+        if self.half == Half::Wake {
+            doorbell.submitted(true);
         }
-        Half::Starved | Half::Floorless => {
-            Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
+        if refilling {
+            self.refill.seen = Some(driven);
+        } else {
+            self.rung = (
+                match doorbell.path() {
+                    Path::Polling => "Polling",
+                    Path::KernelIpi => "KernelIpi",
+                    Path::UserInterrupt => "UserInterrupt",
+                },
+                doorbell.operations(),
+                doorbell.rings(),
+            );
+            self.seen = Some(driven);
         }
-    };
-
-    // Told to stop whatever happened above, because a component left serving a
-    // client that has gone is a core this boot never gets back.
-    let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
-    // **And rung for, on the half where the component may be asleep.** A stop
-    // notice goes on the *control* ring, which has no wakeup flag of its own and
-    // needs none: a doorbell says only *stop halting*, and which ring had
-    // something on it is a question the component answers by looking. A frame
-    // that posted the notice and did not ring would leave a parked component
-    // holding a core nobody ever gets back — which is the one hang this half can
-    // produce, and it would be reported as `Trouble::Overdue` three hundred
-    // lines further down with nothing naming the cause.
-    //
-    // Unconditionally rather than on a `wanted`: there is nothing to suppress,
-    // because this is the last thing the client says and the component is
-    // required to have ended before the join returns.
-    if half == Half::Wake {
-        doorbell.submitted(true);
-    }
-    // SAFETY: `start_on` was called for this core and nothing else has joined it.
-    // The closure serves nothing: a compositor reaches no device, so there is
-    // nothing it can ask the frame for while it runs.
-    let joined = unsafe { crate::smp::join_serviced(cpu, tsc_khz, EXIT_MICROS, &mut || {}) };
-
-    // --- what the other core saw, read once it has stopped running ----------
-    //
-    // **After the join and not before it, and that is what makes reading another
-    // core's counters legal rather than lucky.** `crate::doorbell::delivered_at`
-    // is the long form: the mailbox word the join waits on is stored with
-    // `Release` by the worker and loaded with `Acquire` here, so everything that
-    // core wrote before it reported finished — these four counts included — is
-    // visible to this one. No new cross-core word was needed; the rendezvous
-    // RFC 0016 already pays for is the rendezvous this reads behind.
-    let bells = Bells {
-        path: match doorbell.path() {
-            Path::Polling => "Polling",
-            Path::KernelIpi => "KernelIpi",
-            Path::UserInterrupt => "UserInterrupt",
-        },
-        worker: cpu,
-        client: crate::arch::x86_64::current_cpu(),
-        operations: doorbell.operations(),
-        rings: doorbell.rings(),
-        batch_entries: batch_seen.entries,
-        batch_operations: batch_seen.operations,
-        batch_rings: batch_seen.rings,
-        delivered: crate::doorbell::delivered_at(cpu),
-        parks: crate::doorbell::parks_at(cpu),
-        woken: crate::doorbell::woken_at(cpu),
-        spared: crate::doorbell::spared_at(cpu),
-    };
-
-    // What the page carries now, which is not what this function wrote into it:
-    // `drive` promotes the report after the first frame closes. Read before the
-    // address space goes back to the allocator, for the tree's reason.
-    let page_reported = board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0);
-    let reported_board = Board::of(&board);
-    // The tree, read before `reap` gives the page back. RFC 0013's *read, never
-    // delivered*, with the frame on the reading end.
-    let reader =
-        state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
-    let tree_after = reader.snapshot();
-    let mut tree = [0u64; WORDS];
-    for (slot, id) in tree.iter_mut().zip(node::WRITTEN) {
-        *slot = reader.value(id).unwrap_or(0);
+        if told.is_err() {
+            return Err(Trouble::Channel(0).why());
+        }
+        match driven {
+            Ok(_) => Ok(crate::component::Drove::Finished),
+            Err(why) => Err(why.why()),
+        }
     }
 
-    if told.is_err() {
-        return Err(Trouble::Channel(0));
+    /// Nothing: a compositor reaches no device, so there is nothing it can ask
+    /// the frame for while it runs.
+    fn serve(&mut self, _frames: &mut FrameAllocator) {}
+
+    /// Nothing: every page this client touched is the occupant's account's, and
+    /// it allocates none of its own.
+    fn retained(&mut self, _frames: &mut FrameAllocator) -> u64 {
+        0
     }
-    // **Checked before anything is torn down, and that is the order rather than a
-    // preference.** A join that did not return is a core still inside this
-    // component, and `reap` would give its address space back to the allocator
-    // while an instruction pointer was in it. So a boot whose component did not
-    // stop leaks one instance and says `Overdue`; the alternative is a frame that
-    // frees memory a core is executing in, which is a worse failure and a much
-    // quieter one.
-    joined.map_err(|_| Trouble::Overdue)?;
 
-    // SAFETY: on the core that prepared it, after the core that ran it reported
-    // finished — which is what the join above returning `Ok` means.
-    let _ended = unsafe { process::reap(frames, prepared) }.map_err(Trouble::Process)?;
-    // SAFETY: allocated by this function, the component that was lent it has
-    // exited — the join is what says so — and nothing else holds a pointer into
-    // it.
-    unsafe { frames.free(wire) };
-
-    let seen = driven?;
-    let board = reported_board.ok_or(Trouble::BadReport)?;
-
-    Ok(Report {
-        half,
-        submitted: seen.submitted,
-        completed: seen.completed,
-        refused: seen.refused,
-        board,
-        tree_nodes,
-        tree_blank,
-        tree_before,
-        tree_after,
-        tree,
-        submitted_deadline: seen.deadline,
-        last_tick: seen.last_tick,
-        // Not this half's question. Nothing here admitted anything —
-        // `prepare_server` is not a spawn — and claiming otherwise would put a
-        // true-looking word in a report that had not earned it.
-        admitted: false,
-        muted: 0,
-        // The machine this half described was admitted a compositor, which is
-        // what makes this the positive half of the pair the floorless half
-        // completes: the same function, in the same build, over one word.
-        backend_admitted,
-        floorless: 0,
-        reported: page_reported,
-        image: image.len() as u64,
-        heap: described,
-        bells,
-    })
+    fn ended(&mut self, wired: crate::component::Wired) {
+        // **After the join and not before it, and that is what makes reading
+        // another core's counters legal rather than lucky.** The mailbox word
+        // the join waits on is stored with `Release` by the worker and loaded
+        // with `Acquire` here, so everything that core wrote before it reported
+        // finished is visible to this one.
+        let counts = counts(wired.cpu);
+        let Ok(board) = Window::at(wired.board, routing::BYTES) else { return };
+        let Ok(reader) = state::Reader::at(wired.tree, FRAME_SIZE as u32) else { return };
+        let mut words = [0u64; WORDS];
+        for (slot, id) in words.iter_mut().zip(node::WRITTEN) {
+            *slot = reader.value(id).unwrap_or(0);
+        }
+        let after = After {
+            board: Board::of(&board),
+            reported: board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0),
+            fold: reader.snapshot(),
+            words,
+            counts,
+        };
+        if self.refilling() {
+            self.refill.after = Some(after);
+        } else {
+            self.after = Some(after);
+        }
+    }
 }
 
 /// What the client itself saw.
+#[derive(Clone, Copy)]
 struct Seen {
     /// Entries it put on the ring. Unit: entries.
     submitted: u64,
@@ -2966,6 +4136,33 @@ struct Seen {
     /// The last clock reading it wrote into the routing page.
     /// Unit: nanoseconds, in this boot's seeded epoch.
     last_tick: u64,
+    /// Completions that said `RESOURCE/QUOTA_EXHAUSTED` with the cap as the
+    /// detail, by frame — [`Report::capped`]. Counted apart from
+    /// [`Seen::refused`], so a capped half's clean clause stays *nothing else
+    /// was refused*. Unit: completions.
+    capped: [u64; CAPPED_FRAMES],
+    /// Completions reaped before the last commit's own, `E3-B01`.
+    ///
+    /// **[`Seen::completed`] read at a moment, not a second count.** It is the
+    /// client's half of the cut `reported::CUT_ANSWERED` is the component's
+    /// half of: both are taken with the commit gone out and its completion not
+    /// yet back, so the timeline half can require the two sides equal at every
+    /// frame boundary rather than only at the end of the run.
+    /// Unit: completions.
+    at_commit: u64,
+}
+
+impl Seen {
+    /// A client that submitted nothing.
+    const NOTHING: Self = Self {
+        submitted: 0,
+        completed: 0,
+        refused: 0,
+        deadline: 0,
+        last_tick: 0,
+        capped: [0; CAPPED_FRAMES],
+        at_commit: 0,
+    };
 }
 
 /// Submit the script, one delta at a time, and reap every completion.
@@ -2994,11 +4191,17 @@ fn drive(
     tsc_khz: u64,
     doorbell: &mut Bell<crate::doorbell::Ipi>,
     waited: bool,
+    script: &[Delta],
 ) -> Result<Seen, Trouble> {
-    let Wire { reaper, arena, board } = wire;
-    let mut seen = Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 };
+    let Wire { reaper, arena, board, cap } = wire;
+    let mut seen = Seen::NOTHING;
     let mut parked = 0;
-    for mut delta in script() {
+    // Which frame an answer belongs to, by the commits already submitted, for
+    // `Report::capped`'s split. The last index takes everything past it.
+    let mut frame = 0;
+    let quota = error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED);
+    for &delta in script {
+        let mut delta = delta;
         // **On the half that sleeps, wait for it to be asleep.** Without this
         // the boot would still be correct — the ring's arm-look-sleep and the
         // frame's latch between them mean nothing is ever lost — and it would
@@ -3043,6 +4246,9 @@ fn drive(
         if matches!(delta.body, Entry::Commit(_)) {
             delta.deadline = now.saturating_add(delta.deadline);
             seen.deadline = delta.deadline;
+            // The client's cut, `E3-B01`: what it had reaped before this
+            // commit's own completion comes back.
+            seen.at_commit = seen.completed;
         }
 
         let (entry, payload) = delta.encode();
@@ -3069,7 +4275,16 @@ fn drive(
             match reaper.take() {
                 Ok(Some(answer)) => {
                     seen.completed += 1;
-                    if answered_badly(&answer, entry.user_data) {
+                    // The cap's answer, and only the cap's: the right entry,
+                    // the quota, and the cap the frame wrote as the detail. A
+                    // quota refusal carrying any other detail is a refusal this
+                    // client cannot account for and is counted as one.
+                    if answer.user_data == entry.user_data
+                        && answer.result == quota
+                        && answer.ext == cap
+                    {
+                        seen.capped[frame] += 1;
+                    } else if answered_badly(&answer, entry.user_data) {
                         seen.refused += 1;
                     }
                     break;
@@ -3112,6 +4327,9 @@ fn drive(
         {
             return Err(Trouble::Refused);
         }
+        if matches!(delta.body, Entry::Commit(_)) {
+            frame = (frame + 1).min(CAPPED_FRAMES - 1);
+        }
     }
     Ok(seen)
 }
@@ -3138,6 +4356,9 @@ struct Wire<'a, 'm> {
     /// The page the client writes its clock into and reads the component's
     /// park count out of.
     board: &'a Window,
+    /// The cap the frame wrote on that page, which is what a capped completion
+    /// must carry back as its detail. Unit: deltas per frame.
+    cap: u64,
 }
 
 /// What one published batch cost.
@@ -3208,7 +4429,7 @@ fn drive_batch(
     doorbell: &mut Bell<crate::doorbell::Ipi>,
     seen: &mut Seen,
 ) -> Result<Batched, Trouble> {
-    let Wire { reaper, arena, board } = wire;
+    let Wire { reaper, arena, board, cap: _ } = wire;
     // Asleep first, as [`drive`]'s own submissions are, and for the same reason.
     // The count is read fresh rather than carried in, because every entry above
     // moved it and what this needs is one more park after the last of them.
@@ -3289,6 +4510,355 @@ fn drive_batch(
         }
     }
     Ok(batched)
+}
+
+// --- `E3-B01`: the representative frame, through the reconciler ------------
+//
+// `f_compositor::timeline`'s header is the argument for the scene and for why
+// the client's application lives in that crate; RFC 0133 is the argument for
+// which frame is *the* UI frame. What is here is the client driving it: the
+// whole tree rebuilt every frame, `f_scene`'s reconciler deciding what differs,
+// and every delta it emits put on the real ring by [`drive`] — the same
+// function, one entry at a time and each one answered, that `claims/0038`'s
+// workload goes through. Nothing here counts a crossing. The client's counts
+// are [`Seen`]'s and the component's are `E3-B01j`'s own, read at every commit
+// off `reported::CUT_*`.
+
+/// How many warm frames the timeline half plays after the scene is built.
+///
+/// Eight, and more than one for `claims/README.md`'s rule 3 — a distribution and
+/// not a summary: one frame is one observation, and a count that was four on
+/// the first warm frame and nine on the fourth would be a claim a single frame
+/// could not make. Eight rather than eighty because every one of them is a full
+/// reconciliation of 995 nodes by a quadratic search on the boot processor, and
+/// the frames are identical in shape; the number to watch is the worst, and a
+/// longer run does not move it.
+/// Unit: frames — UI frames.
+const WARM_FRAMES: usize = 8;
+
+/// The most build frames this half will take before it refuses.
+///
+/// Forty is what the manifest's cap of fifty gives — twenty-five nodes a frame,
+/// `f_compositor::timeline::build_step` — and this is room above that for a
+/// manifest declaring a smaller cap, bounded so the per-cut record is a fixed
+/// array. A cap small enough to need more is refused by name rather than run.
+/// Unit: frames.
+const BUILD_FRAMES_MAX: usize = 56;
+
+/// Every cut the timeline half can record: the build and the warm frames.
+/// Unit: frames.
+const TIMELINE_CUTS: usize = BUILD_FRAMES_MAX + WARM_FRAMES;
+
+/// The identifier of the timeline half's first frame.
+///
+/// Not [`FRAME_ONE`], and that is load-bearing rather than tidy: [`drive`]
+/// writes a better backend report onto the page after a commit naming frame one,
+/// which is `E3-B02b`'s probe on the serving half and nothing this half asks.
+/// Unit: none — a frame identifier.
+const TIMELINE_FRAME_BASE: u64 = 256;
+
+/// Idle turns the component may spend between two of this half's frames.
+///
+/// **Fifty times [`IDLE_SPINS`], because this client does work between frames
+/// that the others do not.** Every frame is a whole tree rebuilt and reconciled
+/// on the boot processor while the component spins on the other core with
+/// nothing on its ring, and the reconciler's search is quadratic in 995 nodes.
+/// The bound is still a backstop — the stop notice ends the run — and one sized
+/// for a client that reconciles nothing would end this run between frames with
+/// `stopped::IDLE`, which is a harness choosing its own failure.
+/// Unit: turns.
+const TIMELINE_IDLE_SPINS: u64 = 50 * IDLE_SPINS;
+
+/// The largest frame script: the reconciler's buffer and a commit. Unit: entries.
+const TIMELINE_SCRIPT_MAX: usize = f_compositor::tree::FRAME_DELTAS_MAX + 1;
+
+/// One cut of the timeline run, taken at a commit on both sides.
+#[derive(Clone, Copy)]
+struct Cut {
+    /// Non-commit deltas the reconciler emitted for this frame. Unit: deltas.
+    deltas: u64,
+    /// The client's entries submitted, the commit included — cumulative.
+    /// Unit: entries.
+    client_out: u64,
+    /// The client's completions reaped before the commit's own — cumulative.
+    /// Unit: entries.
+    client_back: u64,
+    /// `reported::CUT_FRAMES` as the client read it after the commit's
+    /// completion. Unit: frames.
+    frames: u64,
+    /// `reported::CUT_DRAINED`. Unit: entries.
+    drained: u64,
+    /// `reported::CUT_ANSWERED`. Unit: entries.
+    answered: u64,
+}
+
+impl Cut {
+    /// A cut before anything was sent.
+    const ZERO: Self =
+        Self { deltas: 0, client_out: 0, client_back: 0, frames: 0, drained: 0, answered: 0 };
+}
+
+/// What the timeline half recorded: every cut, and the build's shape.
+#[derive(Clone, Copy)]
+pub struct Timeline {
+    /// One per frame, build frames first. Unit: as [`Cut`].
+    cuts: [Cut; TIMELINE_CUTS],
+    /// How many of `cuts` are meaningful. Unit: frames.
+    closed: usize,
+    /// How many of them were build frames. Unit: frames.
+    build: usize,
+    /// Nodes the build grew the tree by per frame. Unit: nodes per frame.
+    step: usize,
+    /// Nodes the scene has, as the client built it. Unit: nodes.
+    nodes: u64,
+}
+
+impl Timeline {
+    /// Nothing recorded, which every half but one reports.
+    const NOTHING: Self =
+        Self { cuts: [Cut::ZERO; TIMELINE_CUTS], closed: 0, build: 0, step: 0, nodes: 0 };
+
+    /// Frame `k`'s crossings as each side counted them, between cut `k - 1` and
+    /// cut `k`: `(client out, client back, component out, component back)`.
+    /// Unit: entries.
+    fn window(&self, k: usize) -> (u64, u64, u64, u64) {
+        let now = self.cuts[k];
+        let was = if k == 0 { Cut::ZERO } else { self.cuts[k - 1] };
+        (
+            now.client_out.saturating_sub(was.client_out),
+            now.client_back.saturating_sub(was.client_back),
+            now.drained.saturating_sub(was.drained),
+            now.answered.saturating_sub(was.answered),
+        )
+    }
+
+    /// Frame `k`'s crossings by the component's count. Unit: entries.
+    fn crossings(&self, k: usize) -> u64 {
+        let (_, _, out, back) = self.window(k);
+        out + back
+    }
+
+    /// The warm frames, as indices into `cuts`.
+    const fn warm(&self) -> core::ops::Range<usize> {
+        self.build..self.closed
+    }
+}
+
+/// A block of frames big enough for `bytes`, as an order.
+const fn order_for(bytes: usize) -> u8 {
+    let mut order = 0u8;
+    while (FRAME_SIZE as usize) << order < bytes {
+        order += 1;
+    }
+    order
+}
+
+/// The reconciler, which holds the tree the compositor holds: 995 nodes and
+/// the scratch its search needs. Unit: bytes.
+const RECONCILER_BYTES: usize =
+    core::mem::size_of::<f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }>>();
+
+/// An empty reconciler, made once by its own constructor and copied from here.
+///
+/// **Why a copy out of the image and not a `write` of `Reconciler::new()`**:
+/// the kernel is built without optimisation, so a value that is written is a
+/// value that is first built on the stack — and this one is larger than half
+/// the boot processor's. The first boot of this half took a double fault in
+/// [`drive_timeline`] doing exactly that, with `rbp - rsp` the size of the
+/// value. The price is the value's bytes in the frame's constants, which is
+/// what `f_scene::reconcile`'s private fields hold empty and nothing this file
+/// could spell more cheaply without reasoning about another crate's fields:
+/// zeroed memory would do on today's field types and would stop being sound
+/// the day one of them gained a niche. Measured by the boot's own `frame` line:
+/// 1 773 568 bytes of text and rodata before this half, 1 904 640 with it.
+///
+/// *What would reverse this:* an in-place constructor in `f_scene` — one taking
+/// `&mut MaybeUninit<Self>` — or the frame being built optimised, where the
+/// write is built in place; either way this goes.
+static EMPTY_RECONCILER: f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }> =
+    f_compositor::timeline::Reconciler::new();
+
+/// The tree the application rebuilds every frame. Unit: bytes.
+const TREE_BYTES: usize =
+    core::mem::size_of::<[f_compositor::timeline::Node; f_compositor::timeline::NODES]>();
+
+/// Build the representative scene through the reconciler, then play it.
+///
+/// **The two working sets are in frames this function allocates and gives
+/// back**, because they are a quarter of a mebibyte between them and a kernel
+/// stack is not: the boot processor's is 256 KiB, and `kernel/linker.ld`'s
+/// comment on it records what the places added to that stack have already cost.
+/// The reconciler is copied in from [`EMPTY_RECONCILER`], which its own
+/// constructor made, and the tree is written a slot at a time — so no value
+/// larger than one node is ever built on the stack, and the frame never holds a
+/// reconciler that its constructor did not make.
+///
+/// # Errors
+///
+/// [`Trouble::NoClientMemory`] where the blocks cannot be had,
+/// [`Trouble::Reconciled`] where the reconciler refuses a frame — which is the
+/// client's own tree being wrong, and red rather than skipped — and whatever
+/// [`drive`] answers.
+fn drive_timeline(
+    frames: &mut FrameAllocator,
+    producer: &Producer<'_>,
+    wire: Wire<'_, '_>,
+    clock: (&mut SeededEnv, u64, &mut Bell<crate::doorbell::Ipi>),
+    record: &mut Timeline,
+) -> Result<Seen, Trouble> {
+    use f_compositor::timeline::{NODES, Node, Reconciler};
+
+    let reconciler_order =
+        crate::mem::Order::new(order_for(RECONCILER_BYTES)).ok_or(Trouble::NoClientMemory)?;
+    let tree_order =
+        crate::mem::Order::new(order_for(TREE_BYTES)).ok_or(Trouble::NoClientMemory)?;
+    let reconciler_block = frames.alloc_zeroed(reconciler_order).ok_or(Trouble::NoClientMemory)?;
+    let Some(tree_block) = frames.alloc_zeroed(tree_order) else {
+        // SAFETY: the block was handed out two lines up and nothing references
+        // it — no pointer into it has been made.
+        unsafe { frames.free(reconciler_block) };
+        return Err(Trouble::NoClientMemory);
+    };
+    let reconciler = frames.virt(reconciler_block).cast::<Reconciler<NODES>>();
+    let tree = frames.virt(tree_block).cast::<[Node; NODES]>();
+    // SAFETY: `reconciler` is the direct-map address of a block this function
+    // was just handed, frame-aligned — stronger than the reconciler's alignment,
+    // which is a `u64`'s — and at least `RECONCILER_BYTES` long by
+    // `order_for`'s construction; nothing else holds a pointer into it, and it
+    // does not overlap `EMPTY_RECONCILER`, which is in the image's constants.
+    // The bytes copied are the reconciler's own constructor's, evaluated at
+    // compile time, so every invariant its private fields carry is one
+    // `Reconciler::new` established.
+    unsafe { core::ptr::copy_nonoverlapping(&raw const EMPTY_RECONCILER, reconciler, 1) };
+    // **Slot by slot, and the first boot of this half is why.** Written as one
+    // `[Node::UNUSED; NODES]` the array was built in a 95 520-byte temporary on
+    // the boot processor's stack and copied, and the stack's guard page took a
+    // double fault — `rbp - rsp` was the array's size to the byte. The
+    // reconciler's own constructor above is written whole and was built in
+    // place; if a toolchain ever stops doing that, the same guard page is what
+    // says so, loudly, rather than a corruption.
+    let slots = tree.cast::<Node>();
+    for slot in 0..NODES {
+        // SAFETY: `slots` is the start of the second block, frame-aligned —
+        // stronger than `Node`'s alignment — and at least `TREE_BYTES` long,
+        // so `slot < NODES` is inside it; nothing else holds a pointer into it.
+        // The value is `Node::UNUSED`, which `f_scene::reconcile` names as a
+        // slot holding no node.
+        unsafe { slots.wrapping_add(slot).write(Node::UNUSED) };
+    }
+    // SAFETY: initialised above, in a block of its own, and this is the only
+    // reference ever made over it. It is handed to `play` and cannot outlive
+    // that call, which returns before the block is freed below.
+    let reconciler = unsafe { &mut *reconciler };
+    // SAFETY: as above, for the tree's block, every slot of which the loop
+    // above wrote.
+    let tree = unsafe { &mut *tree };
+
+    let run = play(reconciler, tree, producer, wire, clock, record);
+
+    // SAFETY: the block was handed out above, the one reference into it was
+    // consumed by `play`, which has returned, and nothing else was made over it.
+    unsafe { frames.free(tree_block) };
+    // SAFETY: as above, for the other block.
+    unsafe { frames.free(reconciler_block) };
+    run
+}
+
+/// The frames themselves: build, then play. [`drive_timeline`] owns the memory
+/// and this owns nothing, which is what lets the memory's lifetime be one call.
+///
+/// # Errors
+///
+/// As [`drive_timeline`].
+fn play(
+    reconciler: &mut f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }>,
+    tree: &mut [f_compositor::timeline::Node; f_compositor::timeline::NODES],
+    producer: &Producer<'_>,
+    wire: Wire<'_, '_>,
+    clock: (&mut SeededEnv, u64, &mut Bell<crate::doorbell::Ipi>),
+    record: &mut Timeline,
+) -> Result<Seen, Trouble> {
+    use f_compositor::timeline::{self, Deltas, NODES};
+    let (env, tsc_khz, doorbell) = clock;
+
+    let cap = usize::try_from(wire.cap).unwrap_or(0);
+    let step = timeline::build_step(cap);
+    let build = timeline::build_frames(step);
+    if step == 0 || build > BUILD_FRAMES_MAX {
+        return Err(Trouble::Reconciled);
+    }
+    *record = Timeline { step, build, ..Timeline::NOTHING };
+    let mut total = Seen::NOTHING;
+    let mut deltas = Deltas::<{ f_compositor::tree::FRAME_DELTAS_MAX }>::new();
+    let first = TIMELINE_FRAME_BASE;
+    let filler = Delta {
+        user_data: 0,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        flags: 0,
+        body: Entry::Commit(Commit { frame_token: first }),
+    };
+    let mut script = [filler; TIMELINE_SCRIPT_MAX];
+    let mut sequence = 0u64;
+    for k in 0..build + WARM_FRAMES {
+        // Immediate mode: the whole scene, every frame. During the build the
+        // application presents the prefix it has; once built, the playhead
+        // moves one step a frame and nothing else does.
+        let moved = if k < build { 0 } else { (k - build) as u64 + 1 };
+        let built = timeline::build(tree, timeline::playhead_x65536(moved));
+        record.nodes = built.written as u64;
+        let upto = if k < build { ((k + 1) * step).min(NODES) } else { NODES };
+        reconciler.frame(&tree[..upto], &mut deltas).map_err(|_| Trouble::Reconciled)?;
+        let emitted = deltas.as_slice();
+        for (slot, entry) in script.iter_mut().zip(emitted) {
+            sequence += 1;
+            *slot = Delta { user_data: sequence, body: *entry, ..filler };
+        }
+        sequence += 1;
+        let named = first + k as u64;
+        script[emitted.len()] = Delta {
+            user_data: sequence,
+            deadline: SCANOUT_PERIOD_NANOS,
+            body: Entry::Commit(Commit { frame_token: named }),
+            ..filler
+        };
+        let seen = drive(producer, wire, env, tsc_khz, doorbell, false, &script[..=emitted.len()])?;
+
+        // The client's cut and the component's, at the same commit. The
+        // component's words were written before that commit's completion was
+        // posted and this side has reaped it, so they are this commit's —
+        // `reported::CUT_FRAMES` is the argument.
+        let board = wire.board;
+        record.cuts[k] = Cut {
+            deltas: emitted.len() as u64,
+            client_out: total.submitted + seen.submitted,
+            client_back: total.completed + seen.at_commit,
+            frames: board.read64(reported::CUT_FRAMES).unwrap_or(0),
+            drained: board.read64(reported::CUT_DRAINED).unwrap_or(0),
+            answered: board.read64(reported::CUT_ANSWERED).unwrap_or(0),
+        };
+        record.closed = k + 1;
+        total.submitted += seen.submitted;
+        total.completed += seen.completed;
+        total.refused += seen.refused;
+        total.deadline = seen.deadline;
+        total.last_tick = seen.last_tick;
+        for (sum, one) in total.capped.iter_mut().zip(seen.capped) {
+            *sum += one;
+        }
+    }
+    Ok(total)
+}
+
+/// [`Report::capped`] as the log prints it: four counts, oldest frame first.
+struct FramesCapped([u64; CAPPED_FRAMES]);
+
+impl core::fmt::Display for FramesCapped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [a, b, c, d] = self.0;
+        write!(f, "{a} {b} {c} {d}")
+    }
 }
 
 /// Is this completion anything other than *the entry it names was accepted*?

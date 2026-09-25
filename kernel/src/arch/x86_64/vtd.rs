@@ -1364,6 +1364,14 @@ impl Unit {
         // entries per unmap — the same trade `mem::coalesce` makes and refuses
         // to make on the hot path. They are freed when the domain is released,
         // which is the point at which the whole answer is known.
+        //
+        // **And a leak check elsewhere depends on it.** `process::reap_holding`
+        // subtracts a domain's table count before a driver's run from the count
+        // after it, and that is exact only because nothing here gives a table
+        // back mid-run. A pass that did would make the count shrink; the reap
+        // refuses that as `process::Error::HeldShrank` rather than let a freed
+        // table cancel a leaked frame — so whoever adds the pass meets that
+        // refusal, and owes the reap a signed difference.
         Ok(())
     }
 

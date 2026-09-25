@@ -485,6 +485,7 @@ that can start behind work that cannot.
   *needs:* E3-B05c, E0-D10, E0-P18
 - [ ] **E3-B05e** `M` What happens when a wait does not arrive.
   *exit:* a timeout is a named fate, the supervisor decides it, and a boot shows a compositor restarted for one — RFC 0008 is paid, so the policy that decides is above the frame rather than inside it.
+  *narrowed:* **in its meaning, not its words, by RFC 0129 on 2026-09-25**, and recorded here because RFC 0084 puts a narrowing in this file rather than in the evidence under a closed line: *restarted for one* is met by an occupant whose core had already returned when the supervisor stopped it, as the store's restart is. No boot shows a stop interrupting a compositor that is still stuck, and a stuck one is what *what happens when a wait does not arrive* most naturally describes. The reversal is an occupant that holds its core across a consultation, which is RFC 0129's first reversal condition.
   *needs:* E3-B05b, E1-B05
 - [ ] **E3-B05f** `S` The synchronisation state is in the compositor's own tree.
   *exit:* waits outstanding, last value signalled and timeouts are read back at boot out of the component's subtree.
@@ -522,15 +523,22 @@ one response guaranteed to miss the next frame too.
 - [ ] **E3-B07d** `M` The choice recorded per frame in the component's own tree — moved here from the parent's exit, because it is a boot and the parent's half is a measurement.
   *exit:* under 2x overload every frame carries the reduction it chose, read out of the component's subtree rather than the serial log; `E1-B15` closed, so the tree this is written into already exists.
   *needs:* E3-B07c, E1-B15
-- [ ] **E3-B07e** `M` The compositor is the lowest-ranked deadline task on the machine and its submissions are bandwidth-capped.
+- [ ] **E3-B07e** `M` The compositor's submissions are bandwidth-capped.
   *exit:* an explicit cap, declared in the manifest and enforced rather than advisory, and a frame that tries to exceed it and is stopped.
+  *needs:* E3-B07c, E1-B07
+- [ ] **E3-B07i** `S` The compositor is the lowest-ranked deadline task on the machine.
+  *exit:* the compositor's manifest declares the lowest-ranked class that carries a deadline, argued in this tree's admission vocabulary; admission honours it at the compositor's spawn and refuses the hard-class variant of the same record, and a class that could displace a deadline workload is refused wherever a manifest is read.
   *needs:* E3-B07c, E1-B07
 - [ ] **E3-B07f** `M` Section 10's measurable form: a deadline workload's p99.9 must not move.
   *exit:* published either way, with the workload named and its baseline distribution established before the compositor is overloaded; a move says the isolation is decorative and is reported as that rather than re-scoped.
-  *needs:* E3-B07e, E0-D10, E0-P18
+  *needs:* E3-B07e, E3-B07i, E0-D10, E0-P18
 - [ ] **E3-B07g** `S` A missed frame never changes the rung.
   *exit:* an overloaded compositor degrades effects and holds the rung it started at, asserted in a test — the two mechanisms that share the word *fallback*, kept apart by something other than a paragraph.
   *needs:* E3-B07d, E3-B02b
+- [ ] **E3-B07h** `M` The wire carries an effect's declaration.
+  **Added on 2026-09-25, four days after `TODO.md` gained it, and `cargo xtask lint-exits` is what found it missing.** `E3-B07a`'s fourth adversarial round filed this line on 2026-09-21: RFC 0084 narrowed `E3-B07a` and named a seventh opcode as the reversal, and nothing owned that condition. It reached the tracker and not this decomposition, which is the drift `E3-B04f` and `E3-B04g` had three days later. The count in *Behaviour* is left as it stands, as it was for those two, because it is the arithmetic of the day the decomposition was pasted. The exit below is the one the line was filed with, from `80eb15c`, word for word. RFC 0127.
+  *exit:* a `SET_EFFECT` delta carrying an estimate without a saving is refused by the decoder in `abi/src/scene.rs` — `E3-B07a`'s pre-narrowing sentence, restored where it was always meant to live, because the boundary it names is a decoder's and not a constructor's. The opcode carries a node, an estimate and a saving; it has a byte image in the per-opcode table; `the_vocabulary_is_the_one_the_design_names` moves from six opcodes to seven; and each of the five consumers that decide per opcode carries an arm — `commit::section_of`, `commit::admit`, `dirty::REACH`, `kind::Change::of` and `Arena::apply`. It widens a wire vocabulary RFC 0010 makes stable, so it is an ABI change and wants its own RFC.
+  *needs:* E3-B07a
 ```
 
 ## E3-P01 — the photodiode rig
