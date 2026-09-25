@@ -695,18 +695,23 @@ pub mod reported {
     //
     // **Written as they happen and not at the end**, which every other word in
     // this module is. The frame reads them while the component is still running
-    // — it waits for [`PARKED`] to move before it submits the entry whose
+    // — it waits for [`PARKED_TAKEN`] to say this component asked to stop with
+    // every entry it was sent already taken, before it submits the entry whose
     // doorbell is supposed to wake this component, so that *a client's commit
     // woke a parked compositor* is a sentence about a run rather than about a
     // likely interleaving.
     //
-    // **Nothing rests on that read.** It is a timing observation and a racy one:
-    // the word is written volatilely on one core and read volatilely on another,
+    // **The protocol does not rest on that read; the boot's patience does.** The
+    // words are written volatilely on one core and read volatilely on another,
     // exactly as `at::TICK_NANOS` already is in the other direction, and a frame
-    // that read a stale value would ring early or late and the protocol would
-    // absorb it either way. What makes the doorbell correct is the ring's own
+    // that read a stale value would ring early or late and the ring would absorb
+    // it either way — what makes the doorbell correct is the ring's own
     // arm-look-sleep and the frame's wakeup latch, neither of which consults
-    // this.
+    // these. What *does* rest on them is when the frame stops waiting, and RFC
+    // 0137 is why that is a word naming an event rather than a count moving:
+    // *wait for [`PARKED`] to move* asked for a park that had not happened yet,
+    // and on a core that had already parked for the last time nothing but a
+    // timer could produce one.
 
     /// Times this component asked the frame to stop its core. Unit: waits.
     pub const PARKED: u32 = super::REPORT + 168;
@@ -717,6 +722,25 @@ pub mod reported {
     /// which is the race the frame latches, and a count of it is the only
     /// evidence that the latch is doing anything. Unit: waits.
     pub const HALTED: u32 = super::REPORT + 176;
+    /// How many entries this component had taken off the scene ring the last
+    /// time it asked the frame to stop its core.
+    ///
+    /// **The event the wake half waits on, named so that it cannot be stale.**
+    /// A client that has submitted `n` entries and reads `n` here knows this
+    /// component asked to sleep *after* taking the last of them, whatever order
+    /// the two cores' reads and writes landed in — the value is only ever
+    /// written at an ask, and it reaches `n` only after the `n`th entry was
+    /// popped. [`PARKED`] cannot say that: a count read fresh may already
+    /// include the ask the client wanted to wait for, and waiting for *one more*
+    /// then waits for a park that only a timer can cause (RFC 0137). Before
+    /// the first entry the word is the page's zero, which is why the frame
+    /// also requires [`PARKED`] to be past zero for that one wait, and why the
+    /// order the two are written in carries nothing.
+    ///
+    /// Its offset is past [`LATCH_HELD_Y`] rather than beside [`HALTED`]
+    /// because every offset between them is taken; the grouping is by meaning.
+    /// Unit: entries.
+    pub const PARKED_TAKEN: u32 = super::REPORT + 600;
 
     // --- the resolved theme, `E3-B06d` --------------------------------------
     //

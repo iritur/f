@@ -277,6 +277,28 @@ pub(crate) unsafe fn wait() -> i64 {
     if load(&DELIVERED, me) != before {
         store(&WOKEN, me, load(&WOKEN, me).wrapping_add(1));
     }
+
+    // **And the latch cleared again, because this wait has consumed whatever
+    // set it.** A doorbell that ended the halt ran [`answer`], which latched —
+    // and until RFC 0137 that latch outlived the halt it had already ended, so
+    // the component's *next* wait found it set and was spared a halt nobody had
+    // rung for. Every doorbell-ended halt was followed by one false spare: the
+    // boot printed eight or nine spares against ten deliveries on every passing
+    // run, which is `E3-B01g`'s *the latch fires nine times* read as the race
+    // when it was mostly this. Cleared, the count fell to between none and four. It also made the ask the wake half's
+    // client waits on a spared one most of the time, so the next submission
+    // landed on a running core rather than a stopped one.
+    //
+    // Clearing it here loses nothing, and the argument is the component's loop
+    // rather than this function: every doorbell counted before this line — the
+    // one that ended the halt, or one that arrived before `cli` — precedes the
+    // component's return from this call, and the component looks at its ring
+    // after every return. A doorbell arriving after `cli` is held by the local
+    // APIC until the return to ring 3 re-enables interrupts, latches then, and
+    // spares the next wait, which is the latch doing its job. *What would
+    // reverse this:* a waiter that does not look at its ring after every wait,
+    // for which a consumed doorbell and a pending one would differ.
+    store(&PENDING, me, 0);
     f_abi::door::HALTED
 }
 

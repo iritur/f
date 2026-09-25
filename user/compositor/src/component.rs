@@ -210,6 +210,12 @@ fn serve() -> ! {
     let mut armed = false;
     let mut parked: u64 = 0;
     let mut halted: u64 = 0;
+    // Entries taken off the scene ring, counted here at the pop rather than
+    // borrowed from `Held`'s counters, because what it is published for is a
+    // fact about the *ring* — how many of the client's submissions this loop
+    // has in hand when it asks to sleep — and not about what the batch made of
+    // them. `crate::routing::reported::PARKED_TAKEN` says who reads it.
+    let mut popped: u64 = 0;
     // The last reading this component believed. Zero until the frame writes one,
     // which is *the epoch* and not *unknown*: a compositor whose first entry
     // arrives before the frame has ticked charges that frame from the origin,
@@ -305,8 +311,12 @@ fn serve() -> ! {
                 armed = true;
                 continue;
             }
-            // Armed, and the turn after the arm found nothing. Stop the core.
+            // Armed, and the turn after the arm found nothing. Stop the core —
+            // and say how many entries this ask comes after, which is the one
+            // thing a client watching from another core can wait on without
+            // racing it (RFC 0137).
             parked += 1;
+            let _ = board.write64(reported::PARKED_TAKEN, popped);
             let _ = board.write64(reported::PARKED, parked);
             if door::call0(door::WAIT) == door::HALTED {
                 halted += 1;
@@ -315,6 +325,7 @@ fn serve() -> ! {
             continue;
         };
         idle = 0;
+        popped += 1;
         if armed {
             // Work arrived, so the client must stop ringing for it. Before the
             // entry is answered rather than after, because the answer is what

@@ -440,8 +440,9 @@ pub enum Half {
     /// is about: the routing page says the frame will ring, so the component's
     /// idle turn arms the ring's wakeup flag, looks once more, and asks the
     /// frame to halt its core. The client waits for that to happen — it reads
-    /// the component's own park count off the board — and only then submits, so
-    /// the doorbell it sends lands on a core that is stopped.
+    /// off the board how many of its entries the component had taken when it
+    /// last asked, and waits for all of them (RFC 0137) — and only then submits,
+    /// so the doorbell it sends lands on a core that has decided to stop.
     ///
     /// The last frame arrives as **one batch**, which is the second clause: four
     /// entries, one publish, one operation charged to the doorbell and at most
@@ -583,15 +584,19 @@ pub enum Trouble {
     Refused,
     /// The admission probe could not stake the account it needs.
     Admission,
-    /// The component never parked inside the bound, so there was nothing asleep
-    /// to ring.
+    /// The component left its loop without asking to stop its core after the
+    /// entries it was sent, so there was nothing asleep to ring.
     ///
-    /// Its own variant rather than [`Trouble::Refused`], because it is the one
-    /// failure of this boot that is about the *harness* and not about the
-    /// component: a client that gave up waiting for a park has not observed a
-    /// compositor that refused to sleep, it has observed itself being impatient.
-    /// A verdict that folded the two would report a missing wakeup as a broken
-    /// compositor.
+    /// Its own variant rather than [`Trouble::Refused`], because it is about
+    /// sleeping and not about answering: a compositor that served every entry
+    /// and never parked is a different defect from one that stopped answering.
+    ///
+    /// **Until RFC 0137 this was the harness's impatience, and it said so** — a
+    /// wall-clock bound on a park count moving. It fired nine runs in twenty,
+    /// every time about a component that *had* stopped its core: the client had
+    /// read the count after the last ask and was waiting for one only a timer
+    /// could cause. It is now reached only on the component's own outcome word,
+    /// so it is a finding about the component and never about the host.
     NotParked,
     /// A half that stands a compositor up was asked of the path that stands none
     /// up, or the other way round.
@@ -649,7 +654,10 @@ impl Trouble {
             Self::BadReport => "the component published a board this build cannot read",
             Self::Refused => "the ring refused a submission the client had room for",
             Self::Admission => "the admission probe could not stake an account",
-            Self::NotParked => "the component never stopped its core, so nothing was asleep",
+            Self::NotParked => {
+                "the component left its loop without asking to stop its core after the \
+                 entries it was sent, so nothing was asleep"
+            }
             Self::Placed => {
                 "a serving half is served from the compositor's place and there is no second \
                  path that stands one up beside it"
@@ -1943,6 +1951,20 @@ impl Report {
             return Err(
                 "the waits the component asked for are not the halts plus the waits a latched \
                  doorbell spared, so a wait went somewhere this boot cannot account for",
+            );
+        }
+        // **A spare consumes a doorbell that no halt consumed**, so there cannot
+        // be more of them than deliveries that ended no halt. RFC 0137: until the
+        // wait cleared the latch on its way out of a halt, the doorbell that had
+        // just ended one was still latched, the next wait was spared for it, and
+        // every run printed nine spares beside ten deliveries of which eight or
+        // nine had ended a halt — a count of the latch outliving its doorbell,
+        // read as the race it exists for. Holds of a latch that is consumed and
+        // of no other, which is what gives the clearing a run behind it.
+        if self.bells.spared > self.bells.delivered.saturating_sub(self.bells.woken) {
+            return Err(
+                "more waits were spared by a latched doorbell than there were doorbells that \
+                 ended no halt, so the latch outlived a halt its doorbell had already ended",
             );
         }
         if self.bells.rings == 0 || self.bells.rings > self.bells.operations {
@@ -4195,7 +4217,6 @@ fn drive(
 ) -> Result<Seen, Trouble> {
     let Wire { reaper, arena, board, cap } = wire;
     let mut seen = Seen::NOTHING;
-    let mut parked = 0;
     // Which frame an answer belongs to, by the commits already submitted, for
     // `Report::capped`'s split. The last index takes everything past it.
     let mut frame = 0;
@@ -4210,7 +4231,7 @@ fn drive(
         // thing that happened. [`waited_for_park`] says what it costs and what
         // it does not buy.
         if waited {
-            parked = waited_for_park(board, tsc_khz, parked)?;
+            waited_for_park(board, seen.submitted)?;
         }
 
         // --- the clock, written before the entry it belongs to --------------
@@ -4377,29 +4398,56 @@ struct Batched {
     rings: u64,
 }
 
-/// Wait until the component's own park count has moved past `was`.
+/// Wait until the component has asked to stop its core with every entry this
+/// client has submitted already taken.
 ///
-/// **A timing observation, and nothing rests on it.** The word is written
-/// volatilely by the component on one core and read volatilely here on another,
-/// exactly as `at::TICK_NANOS` already is in the other direction; a reading that
-/// was stale would make this client ring early, and the ring's arm-look-sleep
-/// and the frame's wakeup latch would absorb that without losing an entry. What
-/// it buys is that the boot's own sentence is about a run: the submission that
-/// follows lands on a core this client has watched stop.
+/// **An event, and not a count moving.** What the half needs before a
+/// submission is *the component answered the last one and then decided to
+/// sleep*, and `routing::reported::PARKED_TAKEN` says exactly that: it is
+/// written only at an ask, and it equals `submitted` only for an ask made after
+/// the last submission was popped. The earlier version waited for
+/// `reported::PARKED` to move past a value it had read, which is a question
+/// about when the read happened — and a read that landed after the ask it
+/// wanted made it wait for a park only a timer could cause. RFC 0137.
+///
+/// **No clock, and that is the repair rather than an omission.** The earlier
+/// bound was [`EXIT_MICROS`] of wall time, which on software emulation is a
+/// fact about the host. What bounds this instead is a failure: the component
+/// either asks, or leaves its loop — its own idle backstop is a count of its
+/// own turns, [`IDLE_SPINS`], not a time — and a component that has left its loop
+/// has written `reported::OUTCOME`, which is where this stops looking. A
+/// component that does neither is holding a core and never giving it back, and
+/// the harness's boot timeout is the bound on *never* that `xtask` already
+/// keeps and says is not a performance bound. *What would reverse this:* a
+/// non-blocking read of the worker's mailbox in `smp`, which would let a
+/// component that died without writing its outcome be a red line here rather
+/// than a timeout there.
+///
+/// The words are read volatilely off another core's writes, as
+/// `at::TICK_NANOS` is in the other direction. A stale read makes this wait
+/// longer and never shorter: the word it waits on never goes down, and holds
+/// the value waited for only once the ask has been made.
 ///
 /// # Errors
 ///
-/// [`Trouble::NotParked`] where the count did not move inside the bound, which
-/// is its own variant because it is a failure of this harness's patience and not
-/// of the component — the two would otherwise be one red line.
-fn waited_for_park(board: &Window, tsc_khz: u64, was: u64) -> Result<u64, Trouble> {
-    let deadline = crate::smp::deadline_after(tsc_khz, EXIT_MICROS);
+/// [`Trouble::NotParked`] where the component left its loop without making the
+/// ask, and [`Trouble::BadReport`] where the board cannot be read at all.
+fn waited_for_park(board: &Window, submitted: u64) -> Result<(), Trouble> {
     loop {
-        let now = board.read64(reported::PARKED).unwrap_or(was);
-        if now > was {
-            return Ok(now);
+        let (Ok(asked), Ok(after), Ok(outcome)) = (
+            board.read64(reported::PARKED),
+            board.read64(reported::PARKED_TAKEN),
+            board.read64(reported::OUTCOME),
+        ) else {
+            return Err(Trouble::BadReport);
+        };
+        // Past zero as well, for the first wait only: before any entry the
+        // word the component writes is the page's own zero, and zero entries
+        // taken is also what an ask before the first submission says.
+        if asked > 0 && after == submitted {
+            return Ok(());
         }
-        if crate::smp::past(deadline) {
+        if outcome != 0 {
             return Err(Trouble::NotParked);
         }
         core::hint::spin_loop();
@@ -4420,7 +4468,7 @@ fn waited_for_park(board: &Window, tsc_khz: u64, was: u64) -> Result<u64, Troubl
 ///
 /// [`Trouble::Refused`] where the ring will not take the batch or a completion
 /// does not arrive inside the bound, and [`Trouble::NotParked`] where the
-/// component never stopped its core.
+/// component left its loop without asking to stop its core.
 fn drive_batch(
     producer: &mut Producer<'_>,
     wire: Wire<'_, '_>,
@@ -4430,11 +4478,23 @@ fn drive_batch(
     seen: &mut Seen,
 ) -> Result<Batched, Trouble> {
     let Wire { reaper, arena, board, cap: _ } = wire;
-    // Asleep first, as [`drive`]'s own submissions are, and for the same reason.
-    // The count is read fresh rather than carried in, because every entry above
-    // moved it and what this needs is one more park after the last of them.
-    let was = board.read64(reported::PARKED).unwrap_or(0);
-    waited_for_park(board, tsc_khz, was)?;
+    // Asleep first, as [`drive`]'s own submissions are, and for the same reason:
+    // an ask made after the last entry [`drive`] submitted was taken.
+    //
+    // **This line is where the wake half failed nine runs in twenty, and it was
+    // not slowness.** It used to read the park count fresh and wait for it to
+    // move once more. When the component had already asked and halted before
+    // that read — which is the ordinary case, since it asks within a turn of
+    // answering — the one more park it waited for could come only from a halt
+    // ending on something other than a doorbell, and nothing rings a component
+    // whose client has not submitted yet. The occupant's timer was the only
+    // other thing, and `component::OCCUPANT_TICKS` gives it sixty-four ticks at
+    // a thousand hertz: a run whose batch came after those were spent waited on
+    // a core that was asleep and would stay asleep, and reported *the component
+    // never stopped its core* about the one component in the boot that
+    // certainly had. A pause of a tenth of a second before the old read made it
+    // fail three runs in three. RFC 0137.
+    waited_for_park(board, seen.submitted)?;
 
     // One reading for the whole batch, written before any of it goes on the
     // ring. Four entries published by one store are one moment, and giving them
