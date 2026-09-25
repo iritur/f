@@ -13741,7 +13741,12 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
             }
             Ending::TimedOut(_) => {
                 return Err(format!(
-                    "`compositor={name}` never finished. A component that holds a core and                      does not give it back is the one failure a served datapath has that a                      spawn does not: the boot core is waiting on a mailbox word that will                      never move."
+                    "`compositor={name}` never finished. A component that holds a core and \
+                     does not give it back is the one failure a served datapath has that a \
+                     spawn does not: the boot core is waiting on a mailbox word that will \
+                     never move. On the wake half this is also where a component that neither \
+                     asks to stop its core nor leaves its loop is reported, because the \
+                     client's wait for the ask has no clock of its own (RFC 0137)."
                 ));
             }
             other => return Err(format!("the boot {other}; expected exit 33")),
@@ -23251,7 +23256,7 @@ fn strip_to_code(line: &str, carry: &mut Carry) -> String {
                 carry.comment = true;
                 i += 2;
             }
-            b'r' if !word_byte_before(bytes, i) && raw_string_hashes(bytes, i).is_some() => {
+            b'r' if raw_prefix_ok(bytes, i) && raw_string_hashes(bytes, i).is_some() => {
                 let hashes = raw_string_hashes(bytes, i).unwrap_or(0);
                 let opened = i + 1 + hashes + 1;
                 match run_to_close(bytes, opened, Quote::Raw(hashes)) {
@@ -23323,6 +23328,29 @@ fn run_to_close(bytes: &[u8], from: usize, quote: Quote) -> Option<usize> {
 
 fn word_byte_before(bytes: &[u8], at: usize) -> bool {
     at > 0 && is_word_byte(bytes[at - 1])
+}
+
+/// Whether an `r` at `at` can open a raw string: with nothing that is part of a
+/// word before it, or with exactly a `b` or `c` before it that is itself not
+/// part of a word — `br#"…"#` and `cr#"…"#`, raw byte and raw C strings.
+///
+/// **Found by an audit on 2026-09-25, and it hid code from every lint that reads
+/// through [`strip_to_code`].** Without the prefix case, the `r` of `br#"` was
+/// taken for the tail of an identifier, the `"` after it opened an *ordinary*
+/// string, the next `"` closed it, and a `/*` the compiler reads as string
+/// content opened a comment the lint never closed — so a single line,
+/// `const _HIDE: &[u8] = br#"" /* "#;`, made `lint-datapath` read nothing until
+/// the next `*/`, including its `#[path]` and `include!` refusals. `rustc`
+/// compiles that line and `rustfmt` leaves it alone.
+///
+/// *What would reverse this:* a reader built on the compiler's own tokens rather
+/// than a hand-written one, which is the repair RFC 0135 names as the end of this
+/// class of finding.
+fn raw_prefix_ok(bytes: &[u8], at: usize) -> bool {
+    if !word_byte_before(bytes, at) {
+        return true;
+    }
+    at >= 1 && matches!(bytes[at - 1], b'b' | b'c') && !word_byte_before(bytes, at - 1)
 }
 
 /// The number of `#` in a raw string starting at `at`, if one starts there.
@@ -31665,6 +31693,25 @@ mod tests {
         // item in it is not an exclusion here.
         let inside = "#[cfg(test)]\nmod t { use f_supervisor::policy::fate; }\n";
         assert!(!frame_findings("kernel/x.rs", inside, "policy").is_empty());
+    }
+
+    /// The audit's probe from 2026-09-25, verbatim: a raw byte or raw C string
+    /// holding `/*` must not open a comment the compiler never sees.
+    #[test]
+    fn a_raw_byte_or_c_string_hides_no_code_from_the_frame_rules() {
+        for opener in ["br", "cr", "r"] {
+            let probe = format!(
+                "const _HIDE: &[u8] = {opener}#\"\" /* \"#;\nuse f_supervisor::policy::fate;\n// */\n"
+            );
+            assert!(
+                !frame_findings("kernel/x.rs", &probe, "policy").is_empty(),
+                "a `{opener}#` literal holding `/*` hid the line below it: {probe}"
+            );
+        }
+        // A word that merely ends in `b` before an `r` is not a prefix.
+        let mut carry = Carry::default();
+        let code = strip_to_code("let x = abr;", &mut carry);
+        assert!(code.contains("abr"), "an identifier was read as a raw-string prefix: {code}");
     }
 
     #[test]

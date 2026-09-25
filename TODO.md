@@ -1354,6 +1354,29 @@ half the time.** A refusal naming the wrong half, a second constructor, a cost
 field widened behind its accessor, a guard that could not be taken — every one
 of those was green against the whole suite when somebody wrote *met* beside it.
 
+**After the twenty-first wave, 2026-09-25.** Unchanged at sixty-one `[x]`, no
+`[>]`, thirty-seven `[ ]` of ninety-eight. **The flake that had not yet failed a
+gate was a race**: the compositor's `wake` half was red nine runs in twenty
+because the client waited for a park that only an occupant's timer could cause,
+and that timer runs out after sixty-four milliseconds. It waits on the event now,
+with no clock, and was red zero in twenty twice. The longer timeout the symptom
+suggested was refused, because the next host is slower.
+
+**An audit of waves 19 and 20 found a second hole in the reader every
+source-level lint shares.** `strip_to_code` did not know a raw byte or raw C
+string, so `br#"" /* "#;` — which `rustc` compiles and `rustfmt` leaves alone —
+opened a comment the compiler never sees, and every rule of `lint-datapath`,
+including the previous wave's `#[path]` and `include!` refusals, read nothing
+until the next `*/`. That is repaired, with the audit's probe as a fixture that
+goes red under the old predicate. **Three more findings are owed and are the
+honest limit of this approach rather than three more patches**: a `#[path]`
+spliced in by a macro, a declaration the compiler never builds because it
+carries `#[cfg(any())]`, and a YAML key spelled with an escape. Every audit this
+epoch has beaten a lint that reads source as text, each a layer deeper than the
+last; the class ends when the lints read the compiler's tokens, which RFC 0135
+names as its own reversal, and that is a decision about a dependency rather than
+a task.
+
 **After the twentieth wave, 2026-09-25.** Unchanged at sixty-one `[x]`, no `[>]`,
 thirty-seven `[ ]` of ninety-eight: the wave closed no line and repaired what an
 audit of the two before it found. **The worst was a lint that stopped reading.**
@@ -1856,6 +1879,7 @@ thing it will measure would be blocking a ruler on a wall.
   **Met on 2026-09-25, on the frame `E3-B02j` chose rather than one chosen for its count.** `cargo xtask compositor timeline` rebuilds `claims/0033-scene`'s audio timeline — 995 nodes — whole every frame in `user/compositor/src/timeline.rs`, `f_scene::reconcile` turns each rebuild into the deltas that differ, and `drive` puts every one on the real ring. Forty frames build the scene under the manifest's cap of fifty (1 709 deltas; the first frame of this scene cannot be one commit, and its worst build frame costs 102); eight warm frames move the playhead, and each costs **4** — the transform and the commit out, two completions back — by the component's count and the client's, required equal at every one of 48 commits through `reported::CUT_*`, written before each commit's completion is posted. `claims/0039` gates on the worst warm frame ≤ 9; RFC 0133 is why a warm frame is the UI frame. Paths, glyph runs and effect declarations still cannot reach the compositor (scene.toml's `[unreachable]`), and none of them moves in this frame.
   **What does not hold, published rather than chosen away:** a playing timeline whose eight meters move costs **20** per frame (10 out, 10 back) — `RED  ring_crossings_per_representative_frame_worst = 20  (min 2, max 9)` — so *under ten* is a property of the frame the scene declares, not of every frame a timeline draws. And the cut's write-before-post ordering is argued from the ring's pair, not observed: moving the write after the post left the boot green.
   **Why this frame and not a worse one, stated by the coordinator who accepted it.** The scene's own README declared *the frame in which `playhead` moved and nothing else did* before anyone counted a crossing on it, for its own reasons — the encode stage touches changed nodes only, and a scene that dirties everything measures a cold frame every frame. The count was taken on the frame the tree had already chosen, not on one chosen for its number, and that ordering is what keeps it from being cherry-picked. The twenty-crossing frame is published beside it because it is the one a reader of an audio application would reach for next, and *under ten* is a property of the declared frame and not of every frame a timeline draws.
+  **`claims/0039`'s reproduction was confirmed on 2026-09-25 after an audit could not run it**: the command it names, run on the tree carrying wave 21, printed every row of its `[threshold]` table green — worst warm frame 4, best 4, 995 nodes held, 40 build frames and 8 warm ones — and ended *every row ... was printed and holds*. The same audit observed that `worst <= 9` is implied by the exact out and back rows and so can never be the row that turns red first; it is kept because it is the row that carries the parent's sentence.
   *exit:* **met.** boundary crossings per UI frame under 10, counted rather than estimated. Met as: four per warm frame of `claims/0033`'s scene, the worst of eight, counted on both sides at every commit and carried by `claims/0039`; the skeptic's frame, with the meters moving, is twenty and is recorded in RFC 0133.
   *needs:* E3-B01a, E3-B01b, E3-B01c, E3-B01d, E3-B01e, E3-B01f, E3-B01g, E3-B01h, E3-B01i, E3-B01j, E3-B01k, E3-B01l (its decomposition, and nothing else — every external blocker this line used to carry is now on the subtask that waits on it, and the two that no subtask names are named nowhere because nothing in a scene graph waits for a submit-latency number or for a user-interrupt path)
 - [x] **E3-B01a** `M` The scene-delta entry format in `abi/`: `CreateNode`, `SetTransform`, `SetPath`, `SetPaint`, `RemoveNode`, `Commit`, over part I's envelope.
@@ -1891,6 +1915,8 @@ thing it will measure would be blocking a ruler on a wall.
   **No fifth cross-core word was needed, which is the constraint this line was written against.** The four new per-core counters are `Relaxed` because they publish nothing, and they are read off core 1 only after `smp::join_serviced` returns — so the happens-before is the mailbox `Release`/`Acquire` pair `smp` already pays for and already tests. Nothing in `ring/src/lib.rs`'s ordering moved, so no litmus test is owed. The eighth door call is RFC 0107, and `kernel/src/process.rs` had already priced it: *adding an eighth means arguing against both documents in writing*.
   **A batch rings at most one doorbell, printed beside what a per-entry client would have said:** `one batch: 4 entr(y/ies), 1 operation(s), 1 doorbell(s) — a client charging per entry would say 4 and 4`. Charging per entry turns it red on *batching being reported as suppression*. This is deliberately not `E3-B01j`'s evidence and no crossings-per-frame figure is computed.
   **One thing argued and not observed, named rather than left to a reviewer.** The wakeup latch that closes the race between a component deciding to sleep and its core stopping fires nine times in twenty-eight waits, and **nothing here kills it**: the APIC timer rescues a lost doorbell within a tick, which the `Ipi::to_self()` mutation measured directly — zero doorbells delivered and the component completed anyway. Asserting that the race occurred is not something a boot may require.
+  **2026-09-25: the wake half was red nine runs in twenty, and the cause was a race the timing exposed, not a slow host.** `drive_batch` read the park count after the component's last ask and waited for one more, which only the occupant's timer could cause — and `OCCUPANT_TICKS` spends that in sixty-four milliseconds, after which the core is asleep for good; a tenth of a second's pause made it red three in three. The failure message blamed the one component that had certainly stopped its core. The client now waits for `reported::PARKED_TAKEN` to equal the entries it submitted, **with no clock**, and fails only on the component's own outcome word: red zero in twenty, twice. The repair the symptom suggested — a longer timeout — was refused on `SPAWN_STACK_PAGES`' own rule, because the next host is slower.
+  **This line's own paragraph above is corrected on two points.** The nine spares it reads as the race were mostly the wakeup latch outliving the halt its own doorbell had ended: `doorbell::wait` now clears it, spares fell to zero to four, and `wake_verdict` requires them no more than the deliveries that ended no halt — a clause that fails on all twenty runs before the repair and holds on all forty after. And *the APIC timer rescues a lost doorbell within a tick* holds only for an occupant's first sixty-four ticks: `Ipi::to_self()` now reddens on the lifecycle's *never reported back* rather than on the delivery clause. RFC 0137.
   *exit:* **met.** cross-core delivery is observed for the first time — `E0-B15` left it unproven and said it belonged with the component that would actually sleep on a doorbell; one boot shows a client's commit waking a parked compositor, and a batch still rings at most one doorbell.
   *needs:* E3-B01f, E0-B13
 - [x] **E3-B01h** `M` Frame pacing: the application's deadline computed backwards from the next scanout, from the compositor's own rolling p99.
