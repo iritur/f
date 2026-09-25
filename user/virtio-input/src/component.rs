@@ -142,9 +142,14 @@ fn serve() -> ! {
         end(stopped::NO_CLOCK)
     };
 
-    let Ok(mut driver) =
-        crate::driver::Driver::start(parts.windows, parts.queues, parts.data, clock, parts.class)
-    else {
+    let Ok(mut driver) = crate::driver::Driver::start(
+        parts.windows,
+        parts.queues,
+        parts.data,
+        clock,
+        parts.class,
+        parts.origin,
+    ) else {
         report(&board, None, stopped::NO_DEVICE);
         end(stopped::NO_DEVICE)
     };
@@ -221,6 +226,10 @@ struct Parts {
     seed: u64,
     /// Unit: nanoseconds per report.
     tick_nanos: u64,
+    /// Where the pointer starts, `(x, y)`: the frame's word, and the reason is
+    /// [`routing::at::ORIGIN_X_X65536`]'s.
+    /// Unit: device pixels, scaled by 65 536.
+    origin: (i32, i32),
 }
 
 /// Read the routing page and state everything it names.
@@ -300,6 +309,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
+    // A word back to the signed number it was written as, and refused unless
+    // it is one the accumulator can hold: a word past `i32` taken for a
+    // position would be a pointer that starts wrapped.
+    let origin = |offset: u32| -> Option<i32> {
+        i32::try_from(board.read64(offset).ok()?.cast_signed()).ok()
+    };
+
     Some(Parts {
         windows,
         queues,
@@ -309,6 +325,7 @@ fn laid_out(board: &Window) -> Option<Parts> {
         spins,
         seed: board.read64(at::STAMP_SEED).ok()?,
         tick_nanos: board.read64(at::STAMP_TICK_NANOS).ok()?,
+        origin: (origin(at::ORIGIN_X_X65536)?, origin(at::ORIGIN_Y_X65536)?),
     })
 }
 

@@ -3084,6 +3084,65 @@ pub unsafe fn demonstrate(
             subject.place.occupant.as_ref().and_then(|occupant| occupant.table.stop_deadline());
         liveness_line(record, epoch, (served_tree, mounted), words, &consulted, named);
 
+        // --- 1b. the same reading, heard a second time -------------------------
+        //
+        // **The half of `f_supervisor::policy::fate` no first look can test.**
+        // The rule is *the abandoned count has risen since this supervisor last
+        // looked, and a wait is outstanding now*, and every half's first
+        // consultation is a supervisor that has never looked: its memory is zero,
+        // so on the serving half's (1, 1) the count has risen by construction, and
+        // a rule that ignored *has risen* — `waits > 0`, or `abandoned > 0 &&
+        // waits > 0` — named the same timeout and passed every boot. The audit of
+        // `E3-B05e` found that by reading and it was true.
+        //
+        // So the supervisor is consulted again over the words it has just heard,
+        // before anything else happens to the place: the same occupant, the same
+        // copied row, and its own memory now equal to the abandoned count. A wait
+        // is still outstanding and the count has not risen, so the right answer is
+        // no fate — one abandoned frame is one timeout, not one per consultation,
+        // which is what stops a stuck component spending its whole restart budget
+        // on a single missed deadline. The frame compares nothing: it prints what
+        // this consultation named and `cargo xtask compositor` requires none.
+        //
+        // What this consultation named is read apart from the first. The frame
+        // keeps the first word a stop named and never lets a second rewrite it —
+        // `Serving::stop` — so the word is taken aside for the length of this
+        // run and put back after it, whatever this run said.
+        let (again, named_again, remembered) = {
+            let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            // A fresh endpoint, for the reason the stop below mints one: the run
+            // above was reaped and the handle it was given names nothing.
+            let watches = watch(occupant, frames)?;
+            let remembered = subject.place.seen;
+            let first =
+                subject.place.occupant.as_mut().map_or(0, |held| core::mem::take(&mut held.named));
+            let mut asking = Consulting {
+                generation,
+                frames,
+                kernel,
+                features,
+                supervisor: &mut supervisor,
+                reservations: &reservations,
+                on,
+            };
+            // SAFETY: as the consultation above; its core came back from it and
+            // the supervisor's address space is live until the loop at the end of
+            // this function.
+            let again = unsafe {
+                consult(&mut asking, occupant, &mut subject.place, &subject.account, watches, now)
+            }?;
+            let named_again = subject
+                .place
+                .occupant
+                .as_mut()
+                .map_or(0, |held| core::mem::replace(&mut held.named, first));
+            (again, named_again, remembered)
+        };
+        subject.place.budget = again.budget;
+        subject.place.seen = again.heard.seen;
+        report.scheduled += 1;
+        again_line(record, epoch, remembered, &again, named_again);
+
         // --- 2. the stop it asked for, and the restart -------------------------
         //
         // A deadline still ahead is left pending, and the occupant goes at the
@@ -5714,6 +5773,32 @@ fn liveness_line(
         cause::detail(named),
         consulted.told,
         verdict_label(consulted.verdict),
+        consulted.answered,
+        consulted.refusal as u32,
+    );
+}
+
+/// The same row, consulted a second time: what the supervisor heard, what it
+/// remembered from the first look, and what — if anything — it named.
+///
+/// **Printed and not compared**, for [`liveness_line`]'s reason: whether the
+/// supervisor should have named anything is a judgement about an occupant's
+/// reading, which RFC 0123 keeps out of the frame. `cargo xtask compositor`
+/// requires *no fate* here on every serving half, and the serving half is the
+/// one where it carries weight: a wait outstanding, the abandoned count equal to
+/// the supervisor's own memory of it.
+fn again_line(record: &Record, epoch: u32, remembered: u64, consulted: &Consulted, named: u64) {
+    crate::kprintln!(
+        "  again         place {} epoch {}: consulted a second time on the reading it has \
+         heard, its memory of the abandoned count {} on the row — the supervisor heard waits \
+         {}, abandoned {} and named {}, detail {}; the frame answered {}, last refusal {:#010x}",
+        Name(record.label()),
+        epoch,
+        remembered,
+        consulted.heard.waits,
+        consulted.heard.abandoned,
+        if named == 0 { "no fate" } else { cause::label(cause::of(named)) },
+        cause::detail(named),
         consulted.answered,
         consulted.refusal as u32,
     );

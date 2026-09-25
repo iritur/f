@@ -68,14 +68,24 @@
 //!
 //! # The origin of the pointer, which a relative device cannot supply
 //!
-//! [`Decoder`] starts the pointer at `(0, 0)` and accumulates from there, and
-//! nothing clamps it. Both halves are deliberate and both are costs:
+//! [`Decoder`] starts the pointer where the frame says and accumulates from
+//! there, and nothing clamps it. Both halves are deliberate and both are costs:
 //!
-//! The origin is arbitrary because a mouse has no position to report — it
-//! reports that it moved. Nothing in this component knows where the pointer was
-//! when the machine booted, and nothing above it has told it. What that costs is
-//! that the first motion after a restart puts the pointer wherever this origin
-//! plus that movement lands rather than where the user left it.
+//! The origin is told because a mouse has no position to report — it reports
+//! that it moved. Nothing in this component knows where the pointer was when
+//! the machine booted, so the start is the routing page's
+//! [`crate::routing::at::ORIGIN_X_X65536`] rather than a number this file
+//! chooses. What that costs is unchanged: the first motion after a restart puts
+//! the pointer wherever the told origin plus that movement lands rather than
+//! where the user left it. [`Decoder::new`] is the told origin `(0, 0)`, which
+//! is what every host test here starts from.
+//!
+//! **Why told rather than `(0, 0)`, which it was until 2026-09-25.** Not for this
+//! component's sake: the frame that stands it up also commits the client's
+//! pointer transform, and over a transform committed at zero a compositor latch
+//! that *added* the position to the committed translation cannot be told from
+//! one that replaced it. A frame that can name the start can commit there, and
+//! a start that is not zero is what tells the two apart. RFC 0132.
 //!
 //! Nothing clamps because clamping needs the size of the surface the pointer is
 //! on, which is the compositor's and not the driver's, and a driver that clamped
@@ -279,13 +289,21 @@ pub struct Emitted {
 }
 
 impl Decoder {
-    /// A decoder whose pointer is at the origin and whose entries carry `class`.
+    /// A decoder whose pointer is at `(0, 0)` and whose entries carry `class`.
     #[must_use]
     pub const fn new(class: u16) -> Self {
+        Self::starting_at(class, (0, 0))
+    }
+
+    /// A decoder whose pointer starts at `origin`, `(x, y)`, and whose entries
+    /// carry `class`. The module's *origin of the pointer* is why it is told.
+    /// Unit: `origin` is device pixels, scaled by [`SCALE`].
+    #[must_use]
+    pub const fn starting_at(class: u16, origin: (i32, i32)) -> Self {
         Self {
             stamp: None,
-            x_x65536: 0,
-            y_x65536: 0,
+            x_x65536: origin.0,
+            y_x65536: origin.1,
             moved: false,
             scroll_dx_x65536: 0,
             scroll_dy_x65536: 0,
@@ -661,6 +679,7 @@ impl Driver {
         client: Client,
         clock: Interrupt,
         class: u16,
+        origin: (i32, i32),
     ) -> Result<Self, Trouble> {
         let transport = Transport::open(windows, queue::QUEUE_SIZE)?;
         let region = queues.slice(0, queue::QUEUE_BYTES).map_err(Trouble::from)?;
@@ -676,7 +695,7 @@ impl Driver {
             transport,
             queue: ring,
             clock,
-            decoder: Decoder::new(class),
+            decoder: Decoder::starting_at(class, origin),
             out,
             counters: Counters::default(),
         })
@@ -907,6 +926,28 @@ mod tests {
         );
         assert_eq!(event.stamp_nanos, 2 * TICK_NANOS, "the second report is the second stamp");
         assert_eq!(decoder.stamped(), 2);
+    }
+
+    #[test]
+    fn a_told_origin_is_where_the_first_motion_starts_from() {
+        // RFC 0132. The first entry is the told origin plus the motion, and not
+        // the motion: a decoder that ignored the origin would pass every other
+        // test here, which all start at zero, and would put the boot's pointer
+        // where the frame did not commit it.
+        let origin = (640 * SCALE, -360 * SCALE);
+        let mut decoder = Decoder::starting_at(CLASS, origin);
+        let mut clock = Interrupt::new(0x1_4E17, TICK_NANOS).expect("a tick");
+        assert_eq!(decoder.at(), origin, "nothing has moved, so the pointer is where it was told");
+        let out = report(
+            &mut decoder,
+            &mut clock,
+            &[(ev::REL, rel::X, 3), (ev::REL, rel::Y, -2i32 as u32), (ev::SYN, syn::REPORT, 0)],
+        );
+        assert_eq!(
+            out[0].expect("one motion").body,
+            Entry::PointerMotion(PointerMotion { x_x65536: 643 * SCALE, y_x65536: -362 * SCALE })
+        );
+        assert_eq!(decoder.at(), (643 * SCALE, -362 * SCALE));
     }
 
     #[test]

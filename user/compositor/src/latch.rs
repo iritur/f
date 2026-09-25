@@ -47,6 +47,43 @@
 //! what stage 2 of the ladder receives, and a difference the encoding cannot see
 //! is a difference no renderer can see either.
 //!
+//! # The patch is the submitted frame's, and it leaves with it
+//!
+//! The latch writes into the retained graph during the window and
+//! [`LateLatch::restore`] writes the client's committed transform back once the
+//! chain driver returns — after the compositor's own submission has entered its
+//! wait, which is when the frame has left this component. Until 2026-09-25 there
+//! was no restore, and the graph kept the patch: on the next frame without a new
+//! client `SetTransform`, what `LateLatch::patch` read as *committed* was this
+//! component's own previous latch, which is the comparison that function's own
+//! comment forbids. An audit found it by reading; every test closed one frame.
+//!
+//! **Why in the graph and restored, rather than never in the graph.** The other
+//! placement — the patch only in the outgoing frame — needs an outgoing frame to
+//! put it in, and this component has none: nothing draws, the graph *is* what a
+//! submission would be read from, and there is no heap for a second copy of an
+//! arena (`routing::HEAP_BYTES` leaves 6 528 bytes). A patch held beside the
+//! graph as an overlay would make every future reader of *the submitted frame*
+//! remember to apply it, and would leave the boot's *and by nothing else* — the
+//! fold of the graph either side of the patch — with nothing patched to fold.
+//! Restoring keeps the one door (`Arena::set_transform`, one node and six
+//! numbers) as the only way the latch touches anything, in both directions.
+//!
+//! **And why that answers `E3-B06f` rather than only this file.** That line's
+//! property is that the compositor cannot tell an authored delta from a
+//! projected one: the retained graph is a function of the deltas a client sent
+//! and of nothing else. A graph the latch had written into and left was neither
+//! authored nor projected — a third source, and the one no client could see or
+//! undo. Restored after submit, the retained graph between frames is the
+//! client's again, byte for byte, which
+//! `a_second_frame_is_latched_against_the_clients_transform_and_not_its_own`
+//! asserts across two frames.
+//!
+//! *What would reverse this:* a renderer that encodes the submitted frame into
+//! a buffer of its own. Then the patch belongs in that buffer, is never written
+//! into the graph at all, and the restore is deleted rather than kept as a
+//! second guard.
+//!
 //! # Why this component and not `interface/`
 //!
 //! Because `xtask`'s `INPUT_PATH` said `interface/` was "the frame loop and the
@@ -388,6 +425,16 @@ pub struct LateLatch {
     latches: u64,
     /// Frames that did not. Unit: frames.
     declines: u64,
+    /// The transform the client committed for the node this frame patched,
+    /// owed back to the graph once the frame's submission has crossed.
+    ///
+    /// `Some` from a latch until [`LateLatch::restore`], and `None` otherwise.
+    /// The module's *the patch is the submitted frame's* is why it exists.
+    owed: Option<SetTransform>,
+    /// Frames whose patch was taken back out of the graph after they were
+    /// submitted. Equal to [`LateLatch::latches`] on every run in which the
+    /// graph refused nothing it had just accepted. Unit: frames.
+    restores: u64,
 }
 
 impl LateLatch {
@@ -407,6 +454,8 @@ impl LateLatch {
         unstamped: 0,
         latches: 0,
         declines: 0,
+        owed: None,
+        restores: 0,
     };
 
     /// A compositor told which node the pointer rides.
@@ -435,6 +484,8 @@ impl LateLatch {
             unstamped: 0,
             latches: 0,
             declines: 0,
+            owed: None,
+            restores: 0,
         }
     }
 
@@ -554,6 +605,42 @@ impl LateLatch {
         self.declines
     }
 
+    /// Frames whose patch was taken back out of the graph once submitted.
+    /// Unit: frames.
+    #[must_use]
+    pub const fn restores(&self) -> u64 {
+        self.restores
+    }
+
+    /// Give the graph back the transform the client committed, once the frame
+    /// the latch patched has been submitted.
+    ///
+    /// Called by `crate::tree::Held::close` after `crate::waits::Waits::frame`
+    /// returns, which is after the compositor's own submission has entered its
+    /// wait — the frame has left, and the patch was that frame's. A frame that
+    /// carried no latch owes nothing and this does nothing.
+    ///
+    /// **After the submission and not before the next latch**, and the
+    /// difference is a scene. A restore deferred to the next frame's latch
+    /// would leave a transform no client sent in the retained graph between
+    /// frames, and would then write the old committed value *over* a transform
+    /// the client had sent in the meantime — the client's newest word lost to
+    /// the compositor's memory of its previous one.
+    ///
+    /// Through the same door as the patch, `f_scene::arena::Arena::set_transform`,
+    /// which names one node and six numbers and can do nothing else. `false`
+    /// where the graph refused it, which would be the graph refusing a node it
+    /// accepted a statement ago; it is not counted in [`LateLatch::restores`],
+    /// so a reader comparing that against [`LateLatch::latches`] sees it.
+    pub fn restore(&mut self, graph: &mut Arena) -> bool {
+        let Some(owed) = self.owed.take() else { return true };
+        let restored = graph.set_transform(owed).is_ok();
+        if restored {
+            self.restores += 1;
+        }
+        restored
+    }
+
     /// The instant the last latch was aimed at, so that the two records
     /// `E3-B04e` compares are asked the same question.
     ///
@@ -644,6 +731,10 @@ impl LateLatch {
         if graph.set_transform(patched).is_err() {
             return Err(Declined::Refused);
         }
+        // Owed back, whole: the client's own record and not a copy with its
+        // translation re-derived, so the restore is the client's transform and
+        // nothing this component computed.
+        self.owed = Some(committed);
         let (unmoved_after, walked) = unmoved(graph, self.node);
         Ok(Latched {
             node: self.node,
@@ -903,6 +994,9 @@ mod tests {
             scanout_period_nanos: PERIOD_NANOS,
             margin_nanos: MARGIN_NANOS,
             pointer_node,
+            // The compositor's declared cap. Nothing in this module comes near
+            // it: the latch is about one transform, not about how many.
+            deltas_per_frame_max: 50,
         }
     }
 
@@ -1186,8 +1280,8 @@ mod tests {
     /// The three tests above reach the window through a harness, because nothing
     /// outside this component can be inside it. This one asserts the production
     /// path: `crate::tree::Held::close` builds the window, the chain driver calls
-    /// it, and the frame that reaches the graph is the client's frame with one
-    /// transform patched.
+    /// it, the frame submitted is the client's frame with one transform patched,
+    /// and the graph left behind once it has gone is the client's again.
     ///
     /// What it cannot assert is the injection's *instant*: the last moment a
     /// caller outside the component can report a position is before the commit
@@ -1230,18 +1324,99 @@ mod tests {
         assert_eq!(held.latch().latches(), 1);
         assert_eq!(held.latch().reports(), 2);
         assert_eq!(held.latch().stale(), 0);
+        // What was submitted is the record's; what is retained is the client's.
+        // The patch left with the frame it was made for, which the module's
+        // *the patch is the submitted frame's* argues.
+        assert_eq!(
+            (latched.latched_tx_x65536(), latched.latched_ty_x65536()),
+            (
+                i64::from(COMMITTED_X_X65536 + INJECTED_X_X65536),
+                i64::from(COMMITTED_Y_X65536 + INJECTED_Y_X65536)
+            ),
+            "the record does not say the injected position was submitted"
+        );
+        assert_eq!(held.latch().restores(), 1, "the patch was not taken back out");
         assert_eq!(
             held.graph().transform_of(POINTER),
-            Ok(Some(committed(
-                latched.latched_tx_x65536() as i32,
-                latched.latched_ty_x65536() as i32
-            ))),
-            "the graph does not hold what the record says was submitted"
+            Ok(Some(committed(COMMITTED_X_X65536, COMMITTED_Y_X65536))),
+            "the retained graph holds the submitted patch rather than what the client committed"
         );
         assert_eq!(
             held.graph().transform_of(STILL),
             Ok(None),
             "a node nobody named acquired a transform"
+        );
+    }
+
+    /// **A second frame with no new transform in it is latched against what the
+    /// client committed, and not against the last frame's latch.**
+    ///
+    /// The audit's finding, and the test that was not written: every test above
+    /// closes one frame, and `the_boots_motion_is_held_and_not_extrapolated`
+    /// latches four times over one graph without once asking what it read as
+    /// *committed*. A latch that leaves its patch in the retained graph reads
+    /// its own previous patch there on the next frame — the comparison
+    /// `LateLatch::patch`'s own comment forbids — and the graph between frames
+    /// holds a transform no client sent.
+    #[test]
+    fn a_second_frame_is_latched_against_the_clients_transform_and_not_its_own() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan(POINTER), &Theme::DEFAULT);
+
+        // Frame one: the client commits the pointer, and the device has moved.
+        assert!(held.reported(Reading {
+            at_nanos: COMMITTED_AT_NANOS,
+            x_x65536: COMMITTED_X_X65536 + INJECTED_X_X65536,
+            y_x65536: COMMITTED_Y_X65536 + INJECTED_Y_X65536,
+        }));
+        for (at, (entry, payload)) in
+            scene(COMMITTED_X_X65536, COMMITTED_Y_X65536).iter().enumerate()
+        {
+            let answer = held.offer(entry, payload, Tick(1_000 + 100 * at as u64));
+            assert!(answer.is_some_and(|cqe| cqe.result == 0), "the graph refused delta {at}");
+        }
+        let first = held.latch().last().expect("frame one latched");
+        assert_eq!(first.committed_tx_x65536(), i64::from(COMMITTED_X_X65536));
+        assert_ne!(
+            first.moved_x_x65536(),
+            0,
+            "frame one moved nothing, so frame two proves nothing"
+        );
+
+        // Between frames the retained graph is what the client authored. The
+        // latch's patch was the submitted frame's and has left with it.
+        assert_eq!(
+            held.graph().transform_of(POINTER),
+            Ok(Some(committed(COMMITTED_X_X65536, COMMITTED_Y_X65536))),
+            "the retained graph holds a transform no client sent"
+        );
+
+        // Frame two: no transform from the client, the device moved again, and
+        // the frame is the commit alone.
+        assert!(held.reported(Reading {
+            at_nanos: INJECTED_AT_NANOS,
+            x_x65536: COMMITTED_X_X65536 + 2 * INJECTED_X_X65536,
+            y_x65536: COMMITTED_Y_X65536 + 2 * INJECTED_Y_X65536,
+        }));
+        let (entry, payload) =
+            wire(Entry::Commit(Commit { frame_token: IMAGE_FRAME + 1 }), 1_000_000_000);
+        let answer = held.offer(&entry, &payload, Tick(2_000));
+        assert!(answer.is_some_and(|cqe| cqe.result == 0), "the second commit was refused");
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.latch().latches(), 2);
+
+        let second = held.latch().last().expect("frame two latched");
+        assert_eq!(
+            (second.committed_tx_x65536(), second.committed_ty_x65536()),
+            (i64::from(COMMITTED_X_X65536), i64::from(COMMITTED_Y_X65536)),
+            "frame two's committed transform is the compositor's own last latch, so the latch \
+             compared its memory against itself"
+        );
+        assert_eq!(
+            held.graph().transform_of(POINTER),
+            Ok(Some(committed(COMMITTED_X_X65536, COMMITTED_Y_X65536))),
+            "after frame two the retained graph holds a transform no client sent"
         );
     }
 
@@ -1473,7 +1648,17 @@ mod tests {
             assert_eq!(latched.lead_nanos(), 0);
             assert_eq!(latched.latched_tx_x65536(), i64::from(x_x65536));
             assert_eq!(latched.latched_ty_x65536(), i64::from(y_x65536));
+            // Four latches over one graph, and every one of them against the
+            // client's transform — which this loop never asked until the audit
+            // found a latch that read its own last patch here.
+            assert_eq!(
+                (latched.committed_tx_x65536(), latched.committed_ty_x65536()),
+                (i64::from(COMMITTED_X_X65536), i64::from(COMMITTED_Y_X65536)),
+                "aimed at {scanout_nanos}, the latch compared against its own previous patch"
+            );
+            assert!(latch.restore(&mut graph), "the graph refused the client's own transform");
         }
+        assert_eq!(latch.restores(), latch.latches());
     }
 
     /// One way to change the committed frame, for the test below.

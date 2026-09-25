@@ -448,6 +448,23 @@ pub enum Half {
     /// one ring. A client that charged per entry would report four here and
     /// would be measuring batching while calling it suppression.
     Wake,
+    /// Send one frame past the cap the compositor's manifest declares, and one
+    /// frame under it.
+    ///
+    /// **`E3-B07e`'s boot, and RFC 0128's *Consequences* is what it shows.** The
+    /// frame found the cap on the compositor's `scene` server ring and wrote it
+    /// onto the routing page; the client sends [`CAPPED_DELTAS`] creations and a
+    /// commit, and requires the cap's worth applied, the rest answered
+    /// `RESOURCE/QUOTA_EXHAUSTED` with the cap as the detail, the commit accepted
+    /// and the frame closed on the rung it started on. Then [`UNCAPPED_DELTAS`]
+    /// creations and a commit, every one applied — which is the clause that says
+    /// the count is the frame's and not the run's.
+    ///
+    /// **Its own half rather than frames added to the serving one**, because the
+    /// serving half's script is `claims/0038`'s workload and its bounds are
+    /// exact: two frames and sixteen crossings. Seventy more entries there would
+    /// be a claim re-declared to make room for a different subject.
+    Capped,
 }
 
 impl Half {
@@ -460,6 +477,7 @@ impl Half {
             Self::Mute => "mute",
             Self::Floorless => "floorless",
             Self::Wake => "wake",
+            Self::Capped => "capped",
         }
     }
 
@@ -473,7 +491,9 @@ impl Half {
     const fn reported(self) -> u64 {
         match self {
             Self::Floorless => FLOORLESS_CAPABILITIES,
-            Self::Serve | Self::Starved | Self::Mute | Self::Wake => BACKEND_CAPABILITIES,
+            Self::Serve | Self::Starved | Self::Mute | Self::Wake | Self::Capped => {
+                BACKEND_CAPABILITIES
+            }
         }
     }
 }
@@ -569,6 +589,17 @@ pub enum Trouble {
     /// A red line and not an empty report: a boot that asked for a compositor
     /// half and never ran it would otherwise print a verdict over zeroes.
     NotServed,
+    /// The compositor's record serves no ring speaking
+    /// `f_abi::manifest::FRAMED_PROTOCOL`, so there is no cap to hand it.
+    ///
+    /// **RFC 0128's *a protocol renamed walks past both rules*, closed here.**
+    /// The manifest checker and the frame's reader both key on a server ring
+    /// whose protocol is exactly `scene`, so a manifest saying `scenes` is
+    /// uncapped and refused by neither. The frame is where the cap is read, so
+    /// the frame is where its absence is refused — before a page is spent,
+    /// beside the heap check — and the rename is a red boot rather than a
+    /// compositor serving without a quota.
+    Unframed,
 }
 
 impl Trouble {
@@ -597,6 +628,10 @@ impl Trouble {
             Self::NotServed => {
                 "the compositor's place was never served, so there is no run to judge — the \
                  component lifecycle did not reach it"
+            }
+            Self::Unframed => {
+                "the compositor's record serves no `scene` ring, so the frame has no \
+                 deltas_per_frame_max to hand it and will not start it uncapped (RFC 0128)"
             }
         }
     }
@@ -708,6 +743,20 @@ pub struct Report {
     /// occupant. RFC 0129.
     /// Unit: instances, and bytes, physical.
     pub served: Option<(u32, u64)>,
+    /// The cap the frame read off the compositor's `scene` server ring and wrote
+    /// onto its routing page, `E3-B07e`. Zero on the two halves that stand
+    /// nothing up. Unit: deltas per frame.
+    pub cap: u64,
+    /// Completions the client reaped that said `RESOURCE/QUOTA_EXHAUSTED` with
+    /// [`Report::cap`] as the detail, by the frame they were sent in — the
+    /// first commit this client submitted closes index zero, and anything past
+    /// the last index is counted in it.
+    ///
+    /// **Per frame, because the clause is per frame.** A total of ten would be
+    /// satisfied by a compositor that refused five of the sixty and five of the
+    /// eight, and only the split says the count went back to zero at the commit.
+    /// Unit: completions.
+    pub capped: [u64; CAPPED_FRAMES],
 }
 
 impl Report {
@@ -737,6 +786,8 @@ impl Report {
             heap: 0,
             bells: Bells::default(),
             served: None,
+            cap: 0,
+            capped: [0; CAPPED_FRAMES],
         }
     }
 }
@@ -1036,6 +1087,9 @@ pub struct Board {
     /// control ring. `reported::EPOCH` argues the word. Unit: none — an epoch
     /// plus one.
     pub epoch: u64,
+    /// Deltas it refused because their frame had staged its cap, `E3-B07e`.
+    /// Unit: deltas.
+    pub capped: u64,
 }
 
 impl Board {
@@ -1118,6 +1172,7 @@ impl Board {
             latch_unmoved_after: board.read64(reported::LATCH_UNMOVED_AFTER).ok()?,
             latch_walked: board.read64(reported::LATCH_WALKED).ok()?,
             epoch: board.read64(reported::EPOCH).ok()?,
+            capped: board.read64(reported::CAPPED).ok()?,
         })
     }
 }
@@ -1283,6 +1338,86 @@ fn batch_script() -> [Delta; BATCH_DELTAS] {
     ]
 }
 
+/// How many creations the capped half's first frame carries. Unit: deltas.
+///
+/// **Sixty, which is RFC 0128's own number** — *a boot sends one frame of sixty
+/// deltas and reads fifty applied, ten refused* — and it has to sit between the
+/// cap and the batch: above the compositor's declared fifty so the cap is
+/// reached, and at or below `f_scene::commit::DELTAS_MAX`, sixty-four, so that
+/// a compositor with **no** cap takes the whole frame rather than having the
+/// batch poison it. That second bound is what makes the cap's deletion a
+/// visible sixty applied instead of a frame lost for another reason.
+const CAPPED_DELTAS: u32 = 60;
+
+/// How many creations the capped half's second frame carries. Unit: deltas.
+///
+/// Eight, under the cap by a margin and over zero by one that a count carried
+/// across the commit cannot hide: fifty already taken in the run would refuse
+/// all eight.
+const UNCAPPED_DELTAS: u32 = 8;
+
+/// The capped half's two frames, as the client names them. See [`FRAME_ONE`].
+/// Unit: none — frame identifiers.
+const FRAME_CAPPED: u64 = 4;
+
+/// See [`FRAME_CAPPED`]. Unit: none — a frame identifier.
+const FRAME_UNCAPPED: u64 = 5;
+
+/// Entries in the capped half's script: two frames of creations and their two
+/// commits. Unit: entries.
+const CAPPED_SCRIPT: usize = (CAPPED_DELTAS + UNCAPPED_DELTAS) as usize + 2;
+
+/// How many frames [`Report::capped`] keeps apart. Unit: frames.
+///
+/// Four, which is more than any half here closes before the frame whose count
+/// matters: the capped half's two, the wake half's three.
+const CAPPED_FRAMES: usize = 4;
+
+/// The capped half's script: [`CAPPED_DELTAS`] creations and a commit, then
+/// [`UNCAPPED_DELTAS`] creations and a commit.
+///
+/// Creations rather than paints, because a creation leaves a node behind and
+/// the arena counts its own nodes: `live` at the end is the graph's account of
+/// how many of the sixty reached it, taken by nothing that also counted the
+/// completions. Node 1 is the root and every other node hangs under it, so the
+/// ten a correct compositor refuses are ten leaves whose absence disturbs
+/// nothing else, and the second frame's parent is a node the first frame's
+/// first delta made. Both commits have a whole scanout of room: this half is
+/// not about pacing, and a late frame would move words its verdict does not
+/// read for a reason it does not test.
+fn capped_script() -> [Delta; CAPPED_SCRIPT] {
+    let first = CAPPED_DELTAS as usize;
+    let second = first + 1 + UNCAPPED_DELTAS as usize;
+    core::array::from_fn(|at| {
+        let commit = |named: u64| Delta {
+            user_data: at as u64 + 1,
+            class: 0,
+            deadline: SCANOUT_PERIOD_NANOS,
+            payload_offset: 0,
+            flags: 0,
+            body: Entry::Commit(Commit { frame_token: named }),
+        };
+        if at == first {
+            return commit(FRAME_CAPPED);
+        }
+        if at == second {
+            return commit(FRAME_UNCAPPED);
+        }
+        // Node identifiers one past the index, skipping the commit's slot, so
+        // the first frame makes 1..=60 and the second 61..=68.
+        let node = if at < first { at as u32 + 1 } else { at as u32 };
+        let (parent, kind) = if node == 1 { (NO_NODE, kind::LAYER) } else { (1, kind::TRANSFORM) };
+        Delta {
+            user_data: at as u64 + 1,
+            class: 0,
+            deadline: 0,
+            payload_offset: 0,
+            flags: 0,
+            body: Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind }),
+        }
+    })
+}
+
 /// What the script implies, counted from the script rather than written down
 /// beside it.
 ///
@@ -1300,17 +1435,30 @@ struct Expected {
     created: u64,
     /// Nodes it removes, subtrees included. Unit: nodes.
     removed: u64,
+    /// Deltas the cap should refuse, `E3-B07e`. Unit: deltas.
+    capped: u64,
+    /// Deltas staged into the frame the walk is in, which goes back to zero at
+    /// each commit exactly as the component's does. Unit: deltas.
+    staged: u64,
 }
 
 impl Expected {
-    /// Walk the script and count.
+    /// Walk the script and count, under the cap the frame read off the
+    /// compositor's record.
     ///
     /// The `match` has one arm per opcode and no wildcard, so a seventh scene
     /// opcode stops this build and asks what a boot should expect of it.
-    fn of(script: &[Delta]) -> Self {
-        let mut expected = Self { frames: 0, edits: 0, created: 0, removed: REMOVED_NODES };
-        expected.count(script);
+    fn of(script: &[Delta], cap: u64) -> Self {
+        let mut expected = Self::seeded(REMOVED_NODES);
+        expected.count(script, cap);
         expected
+    }
+
+    /// Nothing counted yet, with `removed` nodes the script's removals take —
+    /// which is a fact about a subtree the walk cannot see, and is why it is
+    /// seeded rather than counted. Unit of `removed`: nodes.
+    const fn seeded(removed: u64) -> Self {
+        Self { frames: 0, edits: 0, created: 0, removed, capped: 0, staged: 0 }
     }
 
     /// Add one run of deltas to what is expected.
@@ -1323,10 +1471,25 @@ impl Expected {
     ///
     /// The `match` has one arm per opcode and no wildcard, so a seventh scene
     /// opcode stops this build and asks what a boot should expect of it.
-    fn count(&mut self, script: &[Delta]) {
+    fn count(&mut self, script: &[Delta], cap: u64) {
         for delta in script {
+            // The cap, as RFC 0128 states it and not as the component codes it:
+            // a delta that is not a commit, arriving when its frame already
+            // holds `cap`, is refused and reaches nothing. Written here from the
+            // sentence, so a component that counted differently disagrees with
+            // this walk rather than with a copy of itself.
+            if !matches!(delta.body, Entry::Commit(_)) {
+                if self.staged >= cap {
+                    self.capped += 1;
+                    continue;
+                }
+                self.staged += 1;
+            }
             match delta.body {
-                Entry::Commit(_) => self.frames += 1,
+                Entry::Commit(_) => {
+                    self.frames += 1;
+                    self.staged = 0;
+                }
                 Entry::CreateNode(_) => {
                     self.created += 1;
                     self.edits += 1;
@@ -1360,6 +1523,7 @@ impl Report {
             Half::Serve => self.serve_verdict(),
             Half::Floorless => self.floorless_verdict(),
             Half::Wake => self.wake_verdict(),
+            Half::Capped => self.capped_verdict(),
         }
     }
 
@@ -1388,10 +1552,10 @@ impl Report {
             (Half::Mute | Half::Floorless, Some(_)) => {
                 Err("a half that stands no compositor up reports an instance it served")
             }
-            (Half::Serve | Half::Starved | Half::Wake, None) => {
+            (Half::Serve | Half::Starved | Half::Wake | Half::Capped, None) => {
                 Err("a serving half reports no instance, so nothing says it ran in its place")
             }
-            (Half::Serve | Half::Starved | Half::Wake, Some((epoch, _))) => {
+            (Half::Serve | Half::Starved | Half::Wake | Half::Capped, Some((epoch, _))) => {
                 if self.board.epoch != u64::from(epoch) + 1 {
                     return Err("the component's own control ring names a different occupant \
                                 than the one the lifecycle served, so the instance that published \
@@ -1500,6 +1664,16 @@ impl Report {
                  the wrong defect",
             );
         }
+        // The cap's refusals, counted on both sides of the boundary, `E3-B07e`.
+        // The component counts what it refused for the cap and the client counts
+        // the completions that said so with the cap in them; on a half that
+        // never reaches the cap both are zero, and that is the same relation
+        // holding rather than a clause about nothing.
+        if self.board.capped != self.capped.iter().sum::<u64>() {
+            return Err("the deltas the component says it refused for the cap are not the capped \
+                 completions the client reaped, so one side is counting something that is \
+                 not the cap — or a refusal went out without the cap as its detail");
+        }
         if self.board.chain_refusals != 0 {
             return Err(
                 "the component's own timeline chain refused one of its own frame ordinals, \
@@ -1550,8 +1724,8 @@ impl Report {
     /// halves of the exit, each with the control that stops it passing for the
     /// wrong reason.
     fn wake_verdict(&self) -> Result<(), &'static str> {
-        let mut expected = Expected::of(&script());
-        expected.count(&batch_script());
+        let mut expected = Expected::of(&script(), self.cap);
+        expected.count(&batch_script(), self.cap);
 
         if self.board.outcome != stopped::TOLD {
             return Err(
@@ -1753,6 +1927,118 @@ impl Report {
         self.crossings_and_chain_held()
     }
 
+    /// The half that is capped, `E3-B07e`.
+    ///
+    /// **The order is RFC 0128's sentence.** The cap is the manifest's and not
+    /// this file's, so it is checked to sit where the script can test it; then
+    /// the excess refused and nothing else; then the commit accepted and the
+    /// frame closed; then the rung held; then the second frame whole. The
+    /// counts are walked out of the script under the cap the frame read, so a
+    /// manifest declaring another cap moves the expectation with it — and the
+    /// straddle clause is what stops that from quietly turning the boot into a
+    /// run in which nothing was refused.
+    fn capped_verdict(&self) -> Result<(), &'static str> {
+        let expected = {
+            let mut expected = Expected::seeded(0);
+            expected.count(&capped_script(), self.cap);
+            expected
+        };
+        if self.cap <= u64::from(UNCAPPED_DELTAS) || self.cap >= u64::from(CAPPED_DELTAS) {
+            return Err(
+                "the cap the compositor's manifest declares does not sit between this half's two \
+                 frames, so one of them proves nothing: the first has to reach the cap and the \
+                 second has to stay under it",
+            );
+        }
+        if self.board.outcome != stopped::TOLD {
+            return Err(
+                "the component did not end on the frame's stop notice: its outcome word says it \
+                 fell out of its loop for a reason of its own",
+            );
+        }
+        if self.completed != self.submitted || self.board.drained != self.submitted {
+            return Err(
+                "the client did not get one completion per entry it submitted, or the component \
+                 took a different number off the ring — a capped delta is still answered",
+            );
+        }
+        // Nothing refused but the excess: no delta under the cap, and neither
+        // commit. The commit is the clause RFC 0128 is most careful about — the
+        // one that closes the frame is never counted and never refused.
+        if self.refused != 0 || self.board.refused != 0 {
+            return Err(
+                "an entry was refused for something other than the cap: a delta under it, or a \
+                 commit, which RFC 0128 never counts and never refuses because it is what \
+                 closes the frame",
+            );
+        }
+        let excess = u64::from(CAPPED_DELTAS) - self.cap;
+        if self.capped[0] != excess {
+            return Err(
+                "the frame past the cap was not refused exactly its excess: fifty of sixty \
+                 applied and ten answered RESOURCE/QUOTA_EXHAUSTED with the cap as the detail. \
+                 Sixty applied is a cap nobody enforces; fewer refused is a cap counted from \
+                 somewhere other than the frame's first delta",
+            );
+        }
+        if self.capped[1..] != [0; CAPPED_FRAMES - 1] {
+            return Err(
+                "the frame after the capped one was refused something, though it carried eight \
+                 deltas against a cap of fifty — the count did not go back to zero at the commit, \
+                 so it is a quota over the run rather than over a frame",
+            );
+        }
+        if self.board.capped != expected.capped {
+            return Err("the component's own count of capped deltas is not the script's excess");
+        }
+        // The batch was never offered the excess, so the frame closed with the
+        // cap's worth in it: two frames, the cap plus the second frame's eight
+        // applied, and the arena holding exactly those nodes.
+        if self.board.staged != 0
+            || self.board.frames != expected.frames
+            || self.board.edits != expected.edits
+            || self.board.created != expected.created
+            || self.board.live != expected.live()
+        {
+            return Err(
+                "the frames did not close with the cap's worth of the first and all of the \
+                 second: an excess offered to the batch and refused there poisons the frame, \
+                 and an excess applied leaves more nodes in the graph than the cap allows",
+            );
+        }
+        if self.board.named != FRAME_UNCAPPED {
+            return Err("the last frame the component closed is not the second one submitted");
+        }
+        if self.board.rung != HYBRID_RUNG {
+            return Err(
+                "the component is not on the rung this machine's report selects after a frame \
+                 was capped: a quota is a refusal of submissions, and nothing about it is a \
+                 reason to change how the compositor draws",
+            );
+        }
+        if self.board.late != 0 || self.board.waits != 0 || self.board.timeouts != 0 {
+            return Err(
+                "a frame of this half was late or abandoned, though both had a whole scanout \
+                 of room — so the cap cost the frame it refused into, which it must not",
+            );
+        }
+        let published = [
+            self.board.frames,
+            self.board.edits,
+            self.board.live,
+            self.board.refused,
+            self.board.rung,
+            self.board.named,
+        ];
+        if self.tree[..published.len()] != published {
+            return Err(
+                "the component's published tree does not say what its board says about the \
+                 frames it closed under the cap",
+            );
+        }
+        self.crossings_and_chain_held()
+    }
+
     /// The half that is refused a compositor.
     ///
     /// Five clauses, and the order is the argument. The control first, because
@@ -1872,7 +2158,7 @@ impl Report {
 
     /// The serving half.
     fn serve_verdict(&self) -> Result<(), &'static str> {
-        let expected = Expected::of(&script());
+        let expected = Expected::of(&script(), self.cap);
         if self.board.outcome != stopped::TOLD {
             return Err(
                 "the component did not end on the frame's stop notice: its outcome word says it \
@@ -2317,6 +2603,9 @@ pub fn report_lines(report: &Report) {
             Half::Wake =>
                 "the component stops its own core between frames and the client on another \
                  core rings it awake",
+            Half::Capped =>
+                "the client sends one frame past the cap the compositor's manifest declares \
+                 and one under it",
         }
     );
     match report.half {
@@ -2346,7 +2635,7 @@ pub fn report_lines(report: &Report) {
                 error::pack(error::ADMISSION, error::admission::NO_STATE_TREE),
             );
         }
-        Half::Serve | Half::Starved | Half::Wake => {
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped => {
             crate::kprintln!(
                 "  compositor    {} entr(y/ies) submitted, {} answered, {} refused, {} drained \
                  by the component",
@@ -2354,6 +2643,17 @@ pub fn report_lines(report: &Report) {
                 report.completed,
                 report.refused,
                 report.board.drained,
+            );
+            // The cap, `E3-B07e`, on every serving half: the word the frame read
+            // off the manifest's `scene` ring, and both sides' counts of what it
+            // refused. Zero refused on the halves that never reach it is part of
+            // the reading, not an absence of one.
+            crate::kprintln!(
+                "  compositor    cap {} delta(s) per frame from the manifest's scene ring; the \
+                 component capped {}, the client reaped {} capped per frame (first four)",
+                report.cap,
+                report.board.capped,
+                FramesCapped(report.capped),
             );
             crate::kprintln!(
                 "  compositor    {} frame(s) closed, {} delta(s) applied, {} node(s) created, {} \
@@ -2606,6 +2906,29 @@ pub(crate) fn heap_declared(record: &Record) -> Option<u64> {
     None
 }
 
+/// The cap the compositor's record declares on the ring it serves scene deltas
+/// on, `E3-B07e`.
+///
+/// **Found by `f_abi::manifest::FRAMED_PROTOCOL` and not by position or label**,
+/// which is RFC 0128's defence against a rename: the checker and
+/// `Record::read` refuse a `scene` server with no cap, and neither can see a
+/// ring that stopped being called `scene`. This is the third reader and the one
+/// that turns *not called `scene`* into a refusal — `None` here is
+/// [`Trouble::Unframed`] and no compositor is started.
+///
+/// `None` also for a framed ring whose cap reads zero, which the reader refuses
+/// already; it is answered here as well rather than trusted, because a zero
+/// written onto the routing page is the one value the component refuses as a
+/// page nobody finished.
+///
+/// Visible to the rest of the frame for [`found`]'s reason: `kernel/src/input.rs`
+/// stands the same component up and must hand it the same word.
+/// Unit: deltas per frame.
+pub(crate) fn frame_cap(record: &Record) -> Option<u64> {
+    let ring = record.rings().iter().find(|ring| ring.framed_server())?;
+    (ring.deltas_per_frame_max != 0).then_some(u64::from(ring.deltas_per_frame_max))
+}
+
 /// Put the compositor's record past the admission a spawn performs, or describe a
 /// machine below the bottom of the ladder and be refused — the two halves that
 /// stand no component up.
@@ -2653,7 +2976,7 @@ pub unsafe fn demonstrate(
         // allocator, passed down; nothing is running.
         Half::Mute => unsafe { mute(frames, &record, image) },
         Half::Floorless => Ok(floorless(image)),
-        Half::Serve | Half::Starved | Half::Wake => Err(Trouble::Placed),
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped => Err(Trouble::Placed),
     }
 }
 
@@ -2770,6 +3093,10 @@ pub struct Placed {
     client: usize,
     /// What was taken after the core came back, `None` until [`Self::ended`].
     after: Option<After>,
+    /// The cap [`frame_cap`] read out of the compositor's record, written onto
+    /// the routing page and carried back on every capped completion.
+    /// Unit: deltas per frame.
+    cap: u64,
 }
 
 /// What a [`Placed`] reads off the occupant before its first instruction.
@@ -2824,8 +3151,10 @@ impl Placed {
     ///
     /// [`Trouble::NoComponent`], [`Trouble::NoHeap`] and
     /// [`Trouble::HeapDisagrees`] exactly as [`demonstrate`] refuses them, before
-    /// the lifecycle is asked to build anything; [`Trouble::Placed`] for a half
-    /// that stands nothing up, said rather than served.
+    /// the lifecycle is asked to build anything; [`Trouble::Unframed`] for a
+    /// record serving no `scene` ring, which is RFC 0128's rename made red;
+    /// [`Trouble::Placed`] for a half that stands nothing up, said rather than
+    /// served.
     ///
     /// # Safety
     ///
@@ -2837,12 +3166,16 @@ impl Placed {
         if declared != routing::HEAP_BYTES {
             return Err(Trouble::HeapDisagrees);
         }
+        // Before the lifecycle builds anything, beside the heap check and for
+        // its reason: a compositor with no cap to hand it is refused while
+        // nothing has been spent, rather than started and told zero.
+        let cap = frame_cap(&record).ok_or(Trouble::Unframed)?;
         let described = match half {
             // What the manifest declares, or — on the starved half — two pages,
             // which is the one number in this plan the component is asked to
             // disbelieve.
             Half::Starved => STARVED_HEAP_BYTES,
-            Half::Serve | Half::Wake => routing::HEAP_BYTES,
+            Half::Serve | Half::Wake | Half::Capped => routing::HEAP_BYTES,
             Half::Mute | Half::Floorless => return Err(Trouble::Placed),
         };
         Ok(Self {
@@ -2856,6 +3189,7 @@ impl Placed {
             rung: ("Polling", 0, 0),
             client: 0,
             after: None,
+            cap,
         })
     }
 
@@ -2930,6 +3264,8 @@ impl Placed {
                 spared: spared.saturating_sub(was_spared),
             },
             served: Some((before.epoch, before.tree_at)),
+            cap: self.cap,
+            capped: seen.capped,
             ..Report::nothing(self.half, self.image)
         })
     }
@@ -3039,6 +3375,12 @@ impl crate::component::Datapath for Placed {
             // vector, an interrupt controller and a second core, and all three
             // are on this side of the boundary.
             (at::DOORBELL, if self.half == Half::Wake { bell::RING } else { bell::POLL }),
+            // **The cap, `E3-B07e`**, out of the record by `FRAMED_PROTOCOL` in
+            // `Placed::new` and written on every half, because it is a fact about
+            // the component's manifest and not about what this half tests: the
+            // component refuses a page without it, so a half that left it off
+            // would be testing that refusal instead.
+            (at::DELTAS_PER_FRAME_MAX, self.cap),
         ] {
             board.write64(offset, value).map_err(|_| Trouble::Channel(0).why())?;
         }
@@ -3120,16 +3462,21 @@ impl crate::component::Datapath for Placed {
         // `PACING_SEED` is the whole of what decides the readings below, which
         // is what lets a pacing estimate be printed in a boot log at all.
         let mut env = SeededEnv::new(PACING_SEED, 0);
-        let ends = Wire { reaper: &reaper, arena: &arena, board: &board };
+        let ends = Wire { reaper: &reaper, arena: &arena, board: &board, cap: self.cap };
         let tsc_khz = wired.tsc_khz;
         let driven = match self.half {
-            Half::Serve => drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false),
+            Half::Serve => {
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false, &script())
+            }
+            Half::Capped => {
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false, &capped_script())
+            }
             Half::Wake => {
                 // The script first, one entry at a time and each one waited for,
                 // so that every submission lands on a core this client has
                 // watched stop. Then the third frame, whole, as the one batch the
                 // second clause is about.
-                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true).and_then(
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true, &script()).and_then(
                     |mut seen| {
                         self.batch = drive_batch(
                             &mut producer,
@@ -3146,9 +3493,7 @@ impl crate::component::Datapath for Placed {
             // A starved component ends before it adopts anything, so a client
             // that submitted would be waiting for a completion from a component
             // that has already exited.
-            Half::Starved | Half::Mute | Half::Floorless => {
-                Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
-            }
+            Half::Starved | Half::Mute | Half::Floorless => Ok(Seen::NOTHING),
         };
 
         // Told to stop whatever happened above, because a component left serving
@@ -3231,6 +3576,23 @@ struct Seen {
     /// The last clock reading it wrote into the routing page.
     /// Unit: nanoseconds, in this boot's seeded epoch.
     last_tick: u64,
+    /// Completions that said `RESOURCE/QUOTA_EXHAUSTED` with the cap as the
+    /// detail, by frame — [`Report::capped`]. Counted apart from
+    /// [`Seen::refused`], so a capped half's clean clause stays *nothing else
+    /// was refused*. Unit: completions.
+    capped: [u64; CAPPED_FRAMES],
+}
+
+impl Seen {
+    /// A client that submitted nothing.
+    const NOTHING: Self = Self {
+        submitted: 0,
+        completed: 0,
+        refused: 0,
+        deadline: 0,
+        last_tick: 0,
+        capped: [0; CAPPED_FRAMES],
+    };
 }
 
 /// Submit the script, one delta at a time, and reap every completion.
@@ -3259,11 +3621,17 @@ fn drive(
     tsc_khz: u64,
     doorbell: &mut Bell<crate::doorbell::Ipi>,
     waited: bool,
+    script: &[Delta],
 ) -> Result<Seen, Trouble> {
-    let Wire { reaper, arena, board } = wire;
-    let mut seen = Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 };
+    let Wire { reaper, arena, board, cap } = wire;
+    let mut seen = Seen::NOTHING;
     let mut parked = 0;
-    for mut delta in script() {
+    // Which frame an answer belongs to, by the commits already submitted, for
+    // `Report::capped`'s split. The last index takes everything past it.
+    let mut frame = 0;
+    let quota = error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED);
+    for &delta in script {
+        let mut delta = delta;
         // **On the half that sleeps, wait for it to be asleep.** Without this
         // the boot would still be correct — the ring's arm-look-sleep and the
         // frame's latch between them mean nothing is ever lost — and it would
@@ -3334,7 +3702,16 @@ fn drive(
             match reaper.take() {
                 Ok(Some(answer)) => {
                     seen.completed += 1;
-                    if answered_badly(&answer, entry.user_data) {
+                    // The cap's answer, and only the cap's: the right entry,
+                    // the quota, and the cap the frame wrote as the detail. A
+                    // quota refusal carrying any other detail is a refusal this
+                    // client cannot account for and is counted as one.
+                    if answer.user_data == entry.user_data
+                        && answer.result == quota
+                        && answer.ext == cap
+                    {
+                        seen.capped[frame] += 1;
+                    } else if answered_badly(&answer, entry.user_data) {
                         seen.refused += 1;
                     }
                     break;
@@ -3377,6 +3754,9 @@ fn drive(
         {
             return Err(Trouble::Refused);
         }
+        if matches!(delta.body, Entry::Commit(_)) {
+            frame = (frame + 1).min(CAPPED_FRAMES - 1);
+        }
     }
     Ok(seen)
 }
@@ -3403,6 +3783,9 @@ struct Wire<'a, 'm> {
     /// The page the client writes its clock into and reads the component's
     /// park count out of.
     board: &'a Window,
+    /// The cap the frame wrote on that page, which is what a capped completion
+    /// must carry back as its detail. Unit: deltas per frame.
+    cap: u64,
 }
 
 /// What one published batch cost.
@@ -3473,7 +3856,7 @@ fn drive_batch(
     doorbell: &mut Bell<crate::doorbell::Ipi>,
     seen: &mut Seen,
 ) -> Result<Batched, Trouble> {
-    let Wire { reaper, arena, board } = wire;
+    let Wire { reaper, arena, board, cap: _ } = wire;
     // Asleep first, as [`drive`]'s own submissions are, and for the same reason.
     // The count is read fresh rather than carried in, because every entry above
     // moved it and what this needs is one more park after the last of them.
@@ -3554,6 +3937,16 @@ fn drive_batch(
         }
     }
     Ok(batched)
+}
+
+/// [`Report::capped`] as the log prints it: four counts, oldest frame first.
+struct FramesCapped([u64; CAPPED_FRAMES]);
+
+impl core::fmt::Display for FramesCapped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [a, b, c, d] = self.0;
+        write!(f, "{a} {b} {c} {d}")
+    }
 }
 
 /// Is this completion anything other than *the entry it names was accepted*?

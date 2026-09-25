@@ -209,6 +209,24 @@ pub mod at {
     /// it refuses every other field it cannot state, before the device is
     /// started. Unit: nanoseconds per report.
     pub const STAMP_TICK_NANOS: u32 = 192;
+    /// Where the pointer starts, along x: the accumulator's first value.
+    ///
+    /// **Told, because a relative device cannot supply it** — `crate::driver`'s
+    /// *origin of the pointer* is the argument — and told by the frame, which
+    /// is the one party that can then commit a transform there without having
+    /// been told where the pointer is since. Zero is an ordinary place and is
+    /// taken; what is refused is a word that is not an `i32` written as two's
+    /// complement, since the accumulator is one.
+    ///
+    /// *Why it exists at all:* `E3-B01i`'s boot committed the pointer at the
+    /// origin the driver could not be told about, `(0, 0)`, and over a commit
+    /// of zero a latch that **added** its position to the committed translation
+    /// submits the same frame as one that replaced it. A boot that starts the
+    /// pointer anywhere else tells the two apart. RFC 0132.
+    /// Unit: device pixels, scaled by 65 536, as two's complement in a word.
+    pub const ORIGIN_X_X65536: u32 = 200;
+    /// The same along y. Unit: as [`ORIGIN_X_X65536`].
+    pub const ORIGIN_Y_X65536: u32 = 208;
 }
 
 /// Where the component's own half of the page starts.

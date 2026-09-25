@@ -496,23 +496,39 @@ const MINTS: &[&str] = &[];
 /// whose needle nothing defines is indistinguishable from a rule that holds.
 ///
 /// Each row is `(the prefix that must not name it, the needle, the prefix that
-/// must)`. A second driver therefore **does** add a row, because the needle is
-/// spelled after a type and each crate spells its own — `E1-B03` and `E1-B04`
-/// each add one. The rule stays about the frame; what the third field pins is
-/// that the rule still has a subject.
-const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
-    ("kernel/", "Driver::", "user/virtio-blk/"),
+/// must, what it must name there)`. A second driver therefore **does** add a
+/// row, because the needle is spelled after a type and each crate spells its
+/// own — `E1-B03` and `E1-B04` each add one. The rule stays about the frame;
+/// what the third field pins is that the rule still has a subject.
+///
+/// # Why the fourth field is not always the needle
+///
+/// Because a needle short enough to catch every route *into* a module is short
+/// enough to be satisfied by anything *in* a crate. `policy` was the first:
+/// `pub policy: Policy,` and `let policy = at::POLICY` in
+/// `user/supervisor/src/routing.rs` answered for it, so renaming `pub mod
+/// policy` to `pub mod judge` left the row green over a frame calling
+/// `f_supervisor::judge::fate` — the third field's whole claim, false. Where the
+/// needle is a module's name, the fourth field is the module's **declaration**,
+/// spelled with its semicolon so that `pub mod policy_old;` is not it; a rename
+/// then goes red here until the row is renamed with it. Where the needle is a
+/// path into a type (`Driver::`, `ReadPath::`, `Event::decode(`) the needle is
+/// already specific enough to be its own subject, and the field repeats it.
+/// *What would reverse this:* a module declared inline (`pub mod policy {`),
+/// which this refuses as absent — red, and the fourth field is edited to say so.
+const NOT_THE_FRAME: &[(&str, &str, &str, &str)] = &[
+    ("kernel/", "Driver::", "user/virtio-blk/", "Driver::"),
     // The second row the doc comment above predicted, and it is not
     // redundant with the first even though the needle is the same string.
     // The first field is a rule about `kernel/`; the third is what keeps
     // that rule from being satisfied by a name nothing defines, and each
     // crate spells its own. Delete `user/virtio-net`'s `Driver` and this
     // row goes red, which is exactly what the third field is for.
-    ("kernel/", "Driver::", "user/virtio-net/"),
+    ("kernel/", "Driver::", "user/virtio-net/", "Driver::"),
     // The third, and the doc comment above predicted it exactly. The needle is
     // the same string for the third time and the third field is what keeps the
     // rule from being satisfied by a name nothing defines.
-    ("kernel/", "Driver::", "user/virtio-gpu/"),
+    ("kernel/", "Driver::", "user/virtio-gpu/", "Driver::"),
     // The fourth, and the first whose needle is not `Driver::` — which is the
     // doc comment above working rather than an exception to it. `user/objects`
     // is not a driver and spells its own type, so the rule that the frame must
@@ -522,7 +538,7 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // table answered for, so a frame that ran this code would be running it
     // with the direct map underneath every address in it — and `copies_per_read
     // = 0` would be a number about a component that is not one.
-    ("kernel/", "ReadPath::", "user/objects/"),
+    ("kernel/", "ReadPath::", "user/objects/", "ReadPath::"),
     // The fifth, and the fourth whose needle is `Driver::`. The frame links
     // `f-virtio-input` from `E3-B04d` for the same three shared vocabularies the
     // three rows above name, and `kernel/src/input.rs` calls none of its code: what
@@ -532,15 +548,18 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // `user/virtio-input/src/driver.rs` holds the accumulator every coordinate on
     // this path comes out of, so a frame that ran it would be a frame deciding where
     // the pointer is.
-    ("kernel/", "Driver::", "user/virtio-input/"),
+    ("kernel/", "Driver::", "user/virtio-input/", "Driver::"),
     // The sixth, and the first about a decision rather than a datapath. RFC 0008
     // puts restart above the frame and RFC 0123 puts a timeout's judgement there
     // too; `E3-B05e`'s delivery then gave the frame two words an occupant
     // published about itself to copy onto a supervisor's row. The day the frame
     // calls `f_supervisor::policy` — `fate`, `decide`, `answer`, or builds a
     // `Liveness` to hand one of them — it has moved the file and kept the
-    // decision, which is RFC 0123's own reversal condition. The third field keeps
-    // the rule from being satisfied by a module nothing defines. RFC 0126.
+    // decision, which is RFC 0123's own reversal condition. The third and fourth
+    // fields keep the rule from being satisfied by a module nothing defines —
+    // the fourth is the declaration and not the name, because the name alone
+    // was satisfied by a struct field in `routing.rs` over a renamed module
+    // (the doc comment above). RFC 0126, RFC 0130.
     //
     // **The module's name and not a path into it**, because the path was beaten
     // the first time it was attacked: this row read `policy::`, and
@@ -549,7 +568,22 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // `use` or a path, and comments and strings are stripped before this looks;
     // the cost is that the frame may not call anything of its own `policy` in
     // code, which is why `write_board`'s local is `declared`.
-    ("kernel/", "policy", "user/supervisor/"),
+    ("kernel/", "policy", "user/supervisor/", "pub mod policy;"),
+    // The same decision, reached without naming the module at all. A frame that
+    // wrote `abandoned > seen && waits > 0` inline and packed the word itself
+    // would be judging a timeout in `kernel/` while spelling nothing the row
+    // above refuses. What such a frame cannot avoid is the *word*: the judgement
+    // is only a judgement once it is written onto the wire as `TIMEDOUT`, and
+    // `cause::named_above` says that word is the one cause the frame never
+    // names, only carries — `kernel/src/component.rs` checks it by
+    // `named_above(cause::of(..))` and never spells it. So the frame may not
+    // name it in code at all. RFC 0123, RFC 0130.
+    //
+    // What this cannot see: the literal `5` in place of the name, or an inline
+    // judgement written onto the wire as some other cause — the first is a
+    // magic number in the frame and the second is not a timeout any reader
+    // would be told of, and both are review findings rather than a needle.
+    ("kernel/", "TIMEDOUT", "abi/src/control.rs", "pub const TIMEDOUT: u64"),
     // The seventh, and the first whose needle is not a component's type but the
     // decoder a component calls. `E3-B04g` took the input path's consumer out
     // of the frame: `kernel/src/input.rs` decoded every entry the driver
@@ -559,7 +593,7 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // the rule honest from the other side: the day `user/compositor` stops
     // decoding, nothing is the consumer and the row goes red for that too.
     // RFC 0125.
-    ("kernel/", "Event::decode(", "user/compositor/"),
+    ("kernel/", "Event::decode(", "user/compositor/", "Event::decode("),
     // The eighth, and the seventh's needle closed the way the sixth's was.
     // `<f_abi::input::Event>::decode(` has no `Event::decode(` in it, and nor do
     // `use f_abi::input::Event as E;` then `E::decode(`, or `Event :: decode`
@@ -580,7 +614,7 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // two need a `pub use` or a `pub const` in a crate the frame links, which
     // today nothing has; the third is a parser in `kernel/`, which is a review
     // finding the size of a file. RFC 0125.
-    ("kernel/", "Event", "abi/src/input.rs"),
+    ("kernel/", "Event", "abi/src/input.rs", "Event"),
     // The ninth, and the route the eighth leaves open without it. The frame
     // links `f-compositor` for its routing page, and `pub mod inbound` is
     // compiled everywhere, so `f_compositor::inbound::Inbound::default().take(
@@ -588,8 +622,11 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // neither `Event` nor `decode` — it is the compositor's own drain, which is
     // exactly the component code this table exists to keep out. The module's
     // name for the sixth row's reason: every route to it spells it once, and
-    // nothing re-exports it at the crate root.
-    ("kernel/", "inbound", "user/compositor/"),
+    // nothing re-exports it at the crate root. And the declaration in the fourth
+    // field for the sixth row's other reason: `let mut inbound =` in
+    // `user/compositor/src/component.rs` satisfied the bare name over a module
+    // renamed `drain`, exactly as `routing.rs` did for `policy`. RFC 0130.
+    ("kernel/", "inbound", "user/compositor/", "pub mod inbound;"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -12420,19 +12457,21 @@ fn injected_boot(append: &str) -> Result<Watched, String> {
     Ok(Watched { ending, log, shot: None })
 }
 
-/// Where the kernel said its driver's accumulator ended up, and after how many
-/// motion events.
+/// Where the kernel said its driver's accumulator ended up, where the frame
+/// told it to start, and after how many motion events.
 ///
 /// Read by position in a whitespace split for [`gpu_claim`]'s reason: this is a
 /// boot log and not a data format, and a parser that searched for words would
-/// start agreeing with a sentence somebody rewrote.
+/// start agreeing with a sentence somebody rewrote. The word before each
+/// number is checked, as [`input_latch`] does, so a line whose format moved is
+/// a refusal naming the line rather than a start read from the wrong place.
 ///
 /// # Errors
 ///
 /// A log with no such line, or one whose numbers are not numbers.
-/// Unit: the first two are fixed-point units of 1/65536 device pixel; the third
-/// is events.
-fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
+/// Unit: the two translations are fixed-point units of 1/65536 device pixel, as
+/// `(ended, started)`; the count is events.
+fn input_pointer(log: &str) -> Result<(Translation, Translation, u64), String> {
     let line = log
         .lines()
         .find(|line| line.contains(INPUT_POINTER))
@@ -12441,17 +12480,25 @@ fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
     let at = |index: usize| -> Result<&str, String> {
         fields.get(index).copied().ok_or_else(|| format!("short pointer line: {line}"))
     };
-    let signed = |text: &str| -> Result<i64, String> {
+    let signed = |index: usize, word: &str| -> Result<i64, String> {
+        if fields.get(index.wrapping_sub(1)).copied() != Some(word) {
+            return Err(format!("the pointer line is not in the format this reads: {line}"));
+        }
+        let text = at(index)?;
         text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
     };
-    // `input pointer x <x> y <y> in units of ... after <n> motion event(s)`.
-    // The leading spaces are not fields, so the first token is `input`.
-    let x = signed(at(3)?)?;
-    let y = signed(at(5)?)?;
+    // `input pointer x <x> y <y> from x <x0> y <y0> in units of ... after <n>
+    // motion event(s)`. The leading spaces are not fields, so the first token
+    // is `input`.
+    let ended = (signed(3, "x")?, signed(5, "y")?);
+    if at(6)? != "from" {
+        return Err(format!("the pointer line is not in the format this reads: {line}"));
+    }
+    let started = (signed(8, "x")?, signed(10, "y")?);
     let count = at(fields.len() - 3)?;
     let motions =
         count.parse::<u64>().map_err(|_| format!("`{count}` is not a count in: {line}"))?;
-    Ok((x, y, motions))
+    Ok((ended, started, motions))
 }
 
 /// A translation off the kernel's latch line, `(x, y)`.
@@ -12587,13 +12634,28 @@ fn input(kind: Option<&str>) -> Result<(), String> {
             ));
         }
 
-        let (x, y, motions) = input_pointer(&watched.log)?;
+        let ((ended_x, ended_y), (x0, y0), motions) = input_pointer(&watched.log)?;
         println!(
             "\ninput={name}: this harness moved the pointer by ({asked_x}, {asked_y}) device \
-             pixels in {} event(s); the driver's accumulator ended at ({x}, {y}) in units of \
-             1/{INPUT_SCALE} of one",
+             pixels in {} event(s); the driver's accumulator went from ({x0}, {y0}) to \
+             ({ended_x}, {ended_y}) in units of 1/{INPUT_SCALE} of one",
             MOTIONS.len(),
         );
+        // A start of zero on either axis is the boot RFC 0132 replaced: over a
+        // pointer committed at zero, a latch that adds its position to the
+        // committed translation submits what one that replaces it does, and
+        // every equality below passes both. Refused here as well as by the
+        // kernel's own assertion, because this is where the blindness would show.
+        if x0 == 0 || y0 == 0 {
+            return Err(format!(
+                "`input={name}` started the pointer at ({x0}, {y0}). A start of zero on either \
+                 axis cannot tell a latch that replaces the committed translation from one \
+                 that adds to it, so this boot would pass both (RFC 0132)."
+            ));
+        }
+        // How far the accumulator moved, which is the only thing this process
+        // knows the answer to.
+        let (x, y) = (ended_x - x0, ended_y - y0);
 
         if motions as usize != MOTIONS.len() {
             return Err(format!(
@@ -12605,11 +12667,12 @@ fn input(kind: Option<&str>) -> Result<(), String> {
         }
         if x != asked_x * INPUT_SCALE || y != asked_y * INPUT_SCALE {
             return Err(format!(
-                "`input={name}` ended with the pointer at ({x}, {y}) and this harness asked \
-                 for ({}, {}). The two numbers are computed on opposite sides of the \
-                 emulator and neither holds the other's copy, so a disagreement is the \
-                 driver's accumulation, the axis mapping, or the fixed-point scale — and \
-                 which of the three it is shows in how they differ.",
+                "`input={name}` moved the pointer by ({x}, {y}) from where it was told to start \
+                 and this harness asked for ({}, {}). The two numbers are computed on opposite \
+                 sides of the emulator and neither holds the other's copy, so a disagreement \
+                 is the driver's accumulation, the axis mapping, the fixed-point scale, or a \
+                 driver that did not start where it was told — and which it is shows in how \
+                 they differ.",
                 asked_x * INPUT_SCALE,
                 asked_y * INPUT_SCALE,
             ));
@@ -13199,6 +13262,12 @@ const COMPOSITOR_HALVES: &[(&str, &str)] = &[
          it awake: cross-core delivery, observed for the first time, and one batch of four
          entries charged one operation and at most one doorbell",
     ),
+    (
+        "capped",
+        "one frame of sixty deltas against the fifty the manifest declares, then one of eight:
+         the excess answered RESOURCE/QUOTA_EXHAUSTED and never offered to the batch, both
+         frames closed, and nothing of the eight refused — the cap is per frame (E3-B07e)",
+    ),
 ];
 
 /// Boot the compositor: a component that holds the machine's scene graph at
@@ -13272,7 +13341,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
     if all {
         println!(
             "
-compositor: ok — all five halves held. A component held the machine's scene graph at
+compositor: ok — all six halves held. A component held the machine's scene graph at
              ring 3, took two frames of deltas across one ring, applied each whole or not
              at all, and published what it holds into the state tree its own manifest
              declares — which the frame read back rather than being told. It started on
@@ -13292,7 +13361,10 @@ compositor: ok — all five halves held. A component held the machine's scene gr
              core to another and the delivery observed. The last frame went as one batch
              of four entries, charged one operation and one doorbell; a client accounting
              per entry would have said four of each and the kernel's verdict would have
-             refused it."
+             refused it. And the sixth is `E3-B07e`: a frame of sixty deltas against the
+             fifty the manifest declares had fifty applied and ten answered
+             RESOURCE/QUOTA_EXHAUSTED without being offered to the batch, closed on its
+             commit, and the next frame of eight was refused nothing."
         );
     }
     Ok(())
@@ -13326,7 +13398,14 @@ compositor: ok — all five halves held. A component held the machine's scene gr
 /// words are the manifest's declared zeroes rather than a zero it computed —
 /// and it is served from the place all the same, so its reading is its own
 /// occupant's. `mute` and `floorless` never stood the component up, so a reading
-/// carried for them is a reading nobody published.
+/// carried for them is a reading nobody published. `capped` is `E3-B07e`'s and
+/// fits both its frames, so its reading is `wake`'s shape without the abandoned
+/// frame and it is left.
+///
+/// Neither control refuses a rule that ignores *has the abandoned count risen*,
+/// and neither does `serve`'s first look — a supervisor that has never looked
+/// has a memory of zero. [`heard_again_held`] is the second look that does, on
+/// every half that carries a reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Liveness {
     /// Stopped for a timeout and restarted under the place's own policy.
@@ -13342,7 +13421,7 @@ enum Liveness {
 fn liveness_expected(half: &str) -> Result<Liveness, String> {
     match half {
         "serve" => Ok(Liveness::Restarted),
-        "starved" | "wake" => Ok(Liveness::Left),
+        "starved" | "wake" | "capped" => Ok(Liveness::Left),
         "mute" | "floorless" => Ok(Liveness::NotCarried),
         other => Err(format!(
             "`compositor={other}` is a half `liveness_expected` does not name. Say whether it\n\
@@ -13464,6 +13543,65 @@ fn identity_held(expected: Liveness, log: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The second look, which every half that carries a reading must survive.
+///
+/// **What a first look cannot test.** `f_supervisor::policy::fate` names a
+/// timeout when the abandoned count *has risen since this supervisor last
+/// looked* and a wait is outstanding, and a first look has no last look: the
+/// supervisor's memory is zero, so any abandoned count has risen. The serving
+/// half's (1, 1), the waking half's (0, 1) and the starved half's (0, 0) are
+/// answered the same by the rule and by `waits > 0`, and by `abandoned > 0 &&
+/// waits > 0` — which is the audit's finding against `E3-B05e`, and it was
+/// right. So the lifecycle consults the supervisor a second time on the words
+/// it has just heard, and this requires three things of that line: that it is
+/// the same reading the compositor published, that the row carried the
+/// supervisor's own memory of it — the count, not risen — and that the answer
+/// was no fate and no stop. On the serving half a wait is still outstanding,
+/// so that is the half where a rule ignoring *has risen* names a second
+/// timeout and goes red here.
+fn heard_again_held(published: (u64, u64), log: &str) -> Result<(), String> {
+    let line =
+        log.lines().find(|line| line.starts_with("  again         place compositor")).ok_or(
+            "no `again` line: the supervisor was never consulted a second time on a reading it had \
+         heard, so nothing in this boot tells a rule that reads *has the abandoned count risen* \
+         from one that ignores it",
+        )?;
+    let remembered = digits_after(line, "its memory of the abandoned count ")
+        .ok_or("the again line carries no memory")?;
+    let heard_at = line.find("the supervisor heard ").ok_or("the again line says nothing heard")?;
+    let heard_part = line.get(heard_at..).unwrap_or("");
+    let heard = (
+        digits_after(heard_part, "waits ").ok_or("the again line carries no heard waits")?,
+        digits_after(heard_part, "abandoned ").ok_or("the again line carries no heard count")?,
+    );
+    if heard != published {
+        return Err(format!(
+            "on the second look the supervisor heard waits {}, abandoned {} and the compositor's \
+             tree says waits {}, timeouts {}: the second consultation is not over the same \
+             reading, so it tests nothing about a reading already heard",
+            heard.0, heard.1, published.0, published.1
+        ));
+    }
+    if remembered != heard.1 {
+        return Err(format!(
+            "the row carried the supervisor's memory as {remembered} and the count it heard is {}, \
+             so the second look is a count that rose rather than one that did not — the case this \
+             line exists to put in front of the rule",
+            heard.1
+        ));
+    }
+    if !line.contains("named no fate") || !line.contains("the frame answered 0,") {
+        return Err(format!(
+            "the supervisor named a fate, or asked the frame for something, on a reading it had \
+             already heard: waits {}, abandoned {} against its own memory of {remembered}. The \
+             count has not risen, so this is one abandoned frame judged twice — a rule that \
+             ignores *has risen* spends a place's whole restart budget on one stuck frame:\n{line}",
+            heard.0, heard.1
+        ));
+    }
+    Ok(())
+}
+
 /// The pure half of [`liveness_held`], so that fixtures can drive it.
 fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
     let line = log.lines().find(|line| line.starts_with("  liveness      place compositor"));
@@ -13514,6 +13652,7 @@ fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
     // **And whose words they are**, before anything the supervisor did with them
     // is looked at: a right fate on somebody else's reading is RFC 0126's gap.
     identity_held(expected, log)?;
+    heard_again_held(published, log)?;
     match expected {
         Liveness::Restarted => {
             if !line.contains("named timed out") {
@@ -13595,8 +13734,54 @@ mod liveness_tests {
             "{SERVED}{TREE}  liveness      place compositor epoch 0: the occupant that ran keeps \
              its tree at 0x1c9000, and the frame copied waits 1, abandoned 1 through its root's \
              mount of 0x1c9000; the supervisor heard {heard} and named timed out, 1 frame(s) \
-             abandoned — the frame answered 1\n{tail}"
+             abandoned — the frame answered 1\n{}{tail}",
+            again("waits 1, abandoned 1", 1, "no fate", 0),
         )
+    }
+
+    /// The second look, as `kernel/src/component.rs`'s `again_line` prints it.
+    fn again(heard: &str, remembered: u64, named: &str, answered: u64) -> String {
+        format!(
+            "  again         place compositor epoch 0: consulted a second time on the reading it \
+             has heard, its memory of the abandoned count {remembered} on the row — the \
+             supervisor heard {heard} and named {named}, detail 1; the frame answered \
+             {answered}, last refusal 0x00000000\n"
+        )
+    }
+
+    /// **`E3-B05e`'s *has risen*, which no first look can test.** The serving
+    /// half's reading heard a second time, against the supervisor's own memory
+    /// of it: the two wrong rules the audit named — `waits > 0`, and
+    /// `abandoned > 0 && waits > 0` — both name a second timeout here and ask
+    /// the frame for a second stop, and the line is refused whichever it shows.
+    #[test]
+    fn a_reading_already_heard_is_not_a_second_timeout() {
+        let whole = stuck("waits 1, abandoned 1", &format!("{ENDED}{RESTARTED}"));
+        assert_eq!(liveness_verdict(Liveness::Restarted, &whole), Ok(()));
+        let right = again("waits 1, abandoned 1", 1, "no fate", 0);
+
+        let named = whole.replace(&right, &again("waits 1, abandoned 1", 1, "timed out", 1));
+        let why = liveness_verdict(Liveness::Restarted, &named).expect_err("a second timeout");
+        assert!(why.contains("judged twice"), "{why}");
+        // A stop asked for with no word named on it is still a stop.
+        let stopped = whole.replace(&right, &again("waits 1, abandoned 1", 1, "no fate", 1));
+        assert!(liveness_verdict(Liveness::Restarted, &stopped).is_err());
+
+        // **The check attacked.** A second look whose row did not carry the
+        // supervisor's memory — a frame that stored nothing between the two
+        // runs — is a count that rose, and a correct rule names the timeout
+        // again for it. That is not the case this line exists for, so it is
+        // refused as a test of nothing rather than passed as a test of the rule.
+        let forgot = whole.replace(&right, &again("waits 1, abandoned 1", 0, "no fate", 0));
+        let why = liveness_verdict(Liveness::Restarted, &forgot).expect_err("memory not carried");
+        assert!(why.contains("rose rather than one that did not"), "{why}");
+        // And a second look over somebody else's words is not a second look.
+        let other = whole.replace(&right, &again("waits 0, abandoned 1", 1, "no fate", 0));
+        assert!(liveness_verdict(Liveness::Restarted, &other).is_err());
+        // And no second look at all.
+        let none = whole.replace(&right, "");
+        let why = liveness_verdict(Liveness::Restarted, &none).expect_err("never asked again");
+        assert!(why.contains("no `again` line"), "{why}");
     }
 
     const ENDED: &str = "  timeout       place compositor epoch 0 ended on the supervisor's word \
@@ -13700,13 +13885,15 @@ mod liveness_tests {
              timeout(s) 1\n  liveness      place compositor epoch 0: the occupant that ran keeps \
              its tree at 0x1c9000, and the frame copied waits 0, abandoned 1 through its root's \
              mount of 0x1c9000; the supervisor heard waits 0, abandoned 1 and named no fate — the \
-             frame answered 0\n"
+             frame answered 0\n{}",
+            again("waits 0, abandoned 1", 1, "no fate", 0),
         );
         assert_eq!(liveness_verdict(Liveness::Left, &late), Ok(()));
         assert!(liveness_verdict(Liveness::Left, &format!("{late}{ENDED}{RESTARTED}")).is_err());
         assert!(liveness_verdict(Liveness::NotCarried, &late).is_err());
         assert_eq!(liveness_verdict(Liveness::NotCarried, TREE), Ok(()));
-        assert!(liveness_expected("a-sixth-half").is_err());
+        assert!(liveness_expected("a-seventh-half").is_err());
+        assert_eq!(liveness_expected("capped"), Ok(Liveness::Left));
         // A control copied off another instance is refused as the exit is.
         let beside = late.replace("mount of 0x1c9000", "mount of 0x2a4000");
         assert!(liveness_verdict(Liveness::Left, &beside).is_err());
@@ -16411,67 +16598,101 @@ mod schedule_shapes {
 /// The job names a workflow declares, in file order.
 ///
 /// Not a YAML parser, and it does not pretend to be one — `ops/detect.sh` says
-/// the same about its own reader and for the same reason. A job key is a line of
-/// exactly two spaces, a name and a colon, with nothing after it but a comment,
-/// inside the `jobs:` block. That is the shape every workflow in this repository
-/// is written in, and it was checked against all seven of them.
+/// the same about its own reader and for the same reason. A job key is a name
+/// and a colon, with nothing after it but a comment, at the column the `jobs:`
+/// block's first key sits at — **whatever that column is**.
+///
+/// # The hole this closes
+///
+/// This was *exactly two spaces*, and a workflow indented any other way had no
+/// jobs: `lint-pulls` then skipped it in silence, and its only backstop —
+/// *no container job anywhere* — was satisfied by any one correctly indented
+/// file. That is the hole [`has_schedule`] was rewritten to close, left open one
+/// function down. So the column is read from the block rather than assumed,
+/// the way [`has_schedule`] reads `on:`'s: `jobs:` at column zero opens it, the
+/// next key at column zero closes it, and the first key inside it says where
+/// job keys are. RFC 0130.
 ///
 /// The failure mode is worth naming because it decides which way this is wrong
-/// when it is wrong: a line inside a `run: |` block that happened to look like a
-/// job key would add a phantom job, and a phantom job makes the check *red*. A
-/// real job would only be missed by a key this does not match, which is why a
-/// trailing comment is stripped rather than making the line fail to match.
+/// when it is wrong: a line inside a `run: |` block sits deeper than a job key
+/// and is not one, and a real job would only be missed by a key this does not
+/// match — a quoted name, a flow mapping — which is why [`lint_pulls`] also
+/// counts the keys it cares about by text and refuses a file whose count and
+/// this reader's disagree.
 fn workflow_jobs(text: &str) -> Vec<String> {
-    let mut jobs = Vec::new();
-    let mut in_jobs = false;
-    for line in text.lines() {
-        if line.trim_end() == "jobs:" {
-            in_jobs = true;
-            continue;
-        }
-        if !in_jobs {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("  ") else { continue };
-        if rest.starts_with(' ') || rest.starts_with('#') || rest.is_empty() {
-            continue;
-        }
-        let Some((name, after)) = rest.split_once(':') else { continue };
-        let after = after.split('#').next().unwrap_or("").trim();
-        if !after.is_empty() {
-            continue;
-        }
-        if name.is_empty()
-            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            continue;
-        }
-        jobs.push(name.to_string());
-    }
-    jobs
+    let Some((block, column)) = jobs_block(text) else { return Vec::new() };
+    block.iter().filter_map(|line| job_key(line, column)).map(str::to_string).collect()
 }
 
-/// One job's lines, from its key to the next job key or the end of the file.
-fn workflow_job_body(text: &str, job: &str) -> Option<String> {
-    let mut body: Option<Vec<&str>> = None;
-    let key = format!("  {job}:");
-    for line in text.lines() {
-        if line.trim_end() == key {
-            body = Some(Vec::new());
-            continue;
-        }
-        if let Some(collected) = body.as_mut() {
-            let is_next_job = line.starts_with("  ")
-                && !line.starts_with("   ")
-                && !line.trim_start().starts_with('#')
-                && line.trim_end().ends_with(':');
-            if is_next_job {
-                break;
-            }
-            collected.push(line);
-        }
+/// Leading whitespace, in bytes. YAML refuses a tab in indentation, so for any
+/// file a runner accepts this is the column.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// A line that says nothing about structure: blank, or only a comment.
+fn yaml_quiet(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+/// The lines of the top-level `jobs:` block, and the column its keys sit at.
+fn jobs_block(text: &str) -> Option<(Vec<&str>, usize)> {
+    let mut lines = text.lines();
+    // `trim_end` and not `trim`: the block is the one opened at column zero.
+    lines.by_ref().find(|line| line.trim_end() == "jobs:")?;
+    let block: Vec<&str> = lines
+        .take_while(|line| yaml_quiet(line) || line.starts_with(char::is_whitespace))
+        .collect();
+    let column = block.iter().find(|line| !yaml_quiet(line)).map(|line| indent_of(line))?;
+    Some((block, column))
+}
+
+/// The job a line opens, if it is a job key at `column`.
+fn job_key(line: &str, column: usize) -> Option<&str> {
+    if yaml_quiet(line) || indent_of(line) != column {
+        return None;
     }
-    body.map(|lines| lines.join("\n"))
+    let (name, after) = line.trim_start().split_once(':')?;
+    let after = after.split('#').next().unwrap_or("").trim();
+    let named =
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    (after.is_empty() && named).then_some(name)
+}
+
+/// One job's lines, from its key to the next line at or left of the key's
+/// column — the next job, or the next top-level key.
+///
+/// **Re-indented so that the job's own keys sit at four spaces**, whatever the
+/// file wrote. [`yaml_key_region`], [`four_space_key`] and the `container:`
+/// test in [`workflow_pulls`] all read a job's keys at four spaces, and
+/// normalising here is what lets them stay small without going back to reading
+/// only the files that happen to be written that way. A line deeper than the
+/// job's keys keeps its depth relative to them; a comment shallower than them
+/// is put at four spaces, where it ends a region rather than joining one — the
+/// direction [`yaml_key_region`] says matters.
+fn workflow_job_body(text: &str, job: &str) -> Option<String> {
+    let (block, column) = jobs_block(text)?;
+    let start = block.iter().position(|line| job_key(line, column) == Some(job))?;
+    let lines: Vec<&str> = block[start + 1..]
+        .iter()
+        .copied()
+        .take_while(|line| yaml_quiet(line) || indent_of(line) > column)
+        .collect();
+    let depth = lines.iter().find(|line| !yaml_quiet(line)).map_or(column + 2, |l| indent_of(l));
+    let body: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else if indent_of(line) >= depth {
+                format!("    {}", &line[depth..])
+            } else {
+                format!("    {}", line.trim_start())
+            }
+        })
+        .collect();
+    Some(body.join("\n"))
 }
 
 /// Everything a four-space key holds, including a flow sequence written over
@@ -16553,13 +16774,27 @@ fn four_space_key(line: &str) -> bool {
 /// A container that needs no token — a public image — would be refused here all
 /// the same. Nothing in this tree runs one, and the day something does it names
 /// `packages: read` anyway or this learns to tell the two apart. Nor can it see
-/// a pull that fails for a reason other than the token.
+/// a pull that fails for a reason other than the token, nor a workflow written
+/// entirely in flow style (`jobs: {a: {container: x}}`), whose keys are not on
+/// lines of their own for either count to find.
+///
+/// # Why `services:` too, and why the count by text
+///
+/// A service container is pulled with the same token before the same first
+/// step, so a job with `services:` and a narrowed block fails the same way at
+/// the same place; reading only `container:` passed it. And the job reader
+/// finds jobs by structure, which is only as good as the structures it knows —
+/// so each file's `container:` and `services:` keys are also counted by text,
+/// and a key no job it read holds is a finding in that file. Before this, the
+/// only backstop was *no container job anywhere*, and a workflow re-indented to
+/// four spaces was skipped under it in silence. RFC 0130.
 ///
 /// # Errors
 ///
-/// Every container job whose permissions cannot pull, named with its file; or no
-/// container job at all, which would mean this reader has stopped matching the
-/// workflows it reads rather than that the tree stopped using its image.
+/// Every container job whose permissions cannot pull, named with its file; a
+/// file with a key no job holds; or no container job at all, which would mean
+/// this reader has stopped matching the workflows it reads rather than that the
+/// tree stopped using its image.
 fn lint_pulls() -> Result<(), String> {
     let dir = root().join(".github").join("workflows");
     let mut files: Vec<(String, String)> = Vec::new();
@@ -16585,8 +16820,18 @@ fn lint_pulls() -> Result<(), String> {
         narrowed += pulls.narrowed;
         for (job, whose) in pulls.cannot {
             findings.push(format!(
-                "  {name}: `{job}` runs in a container and {whose} `permissions:` does not \
-                 name `packages: read`"
+                "  {name}: `{job}` pulls an image (`container:` or `services:`) and {whose} \
+                 `permissions:` does not name `packages: read`"
+            ));
+        }
+        // Per file, because the zero-containers refusal below is per
+        // directory and one readable file satisfied it for all of them.
+        if pulls.unread > 0 {
+            findings.push(format!(
+                "  {name}: {} `container:` or `services:` key(s) sit in no job this reader \
+                 found, so it cannot say whether they can pull — a quoted job name or a flow \
+                 mapping it does not read, and a file it cannot read is a file it passes",
+                pulls.unread
             ));
         }
     }
@@ -16624,7 +16869,8 @@ fn lint_pulls() -> Result<(), String> {
 
 /// What [`lint_pulls`] found in one workflow.
 struct WorkflowPulls {
-    /// Jobs that declare a `container:`. Unit: jobs.
+    /// Jobs that declare a `container:` or `services:` — an image pulled before
+    /// any step. Unit: jobs.
     containers: usize,
     /// Of those, the ones whose token is narrowed by a `permissions:` block,
     /// their own or the workflow's. Unit: jobs.
@@ -16632,6 +16878,9 @@ struct WorkflowPulls {
     /// Each job that cannot pull, and whose block narrowed it — `its` or `the
     /// workflow's`.
     cannot: Vec<(String, &'static str)>,
+    /// `container:` and `services:` keys in the text that no job read here
+    /// holds — the file's shape has left the reader's. Unit: keys.
+    unread: usize,
 }
 
 /// The rule, over one workflow's text, so that a fixture can hold the shapes the
@@ -16657,12 +16906,21 @@ fn workflow_pulls(text: &str) -> WorkflowPulls {
             .any(|grant| block.contains(grant))
     };
 
-    let mut pulls = WorkflowPulls { containers: 0, narrowed: 0, cannot: Vec::new() };
+    let mut pulls = WorkflowPulls { containers: 0, narrowed: 0, cannot: Vec::new(), unread: 0 };
+    let mut read = 0usize;
     for job in workflow_jobs(text) {
         let Some(body) = workflow_job_body(text, &job) else { continue };
-        if !body.lines().any(|line| line.starts_with("    container:")) {
+        // At four spaces because `workflow_job_body` puts a job's own keys
+        // there, whatever the file wrote.
+        let keys = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| PULL_KEYS.iter().any(|key| rest.starts_with(key)))
+            .count();
+        if keys == 0 {
             continue;
         }
+        read += keys;
         pulls.containers += 1;
         let own = yaml_key_region(&body, "permissions");
         let (block, whose) = if !own.is_empty() {
@@ -16678,8 +16936,22 @@ fn workflow_pulls(text: &str) -> WorkflowPulls {
             pulls.cannot.push((job, whose));
         }
     }
+    // The same keys counted by text, at any depth. A key the reader above did
+    // not attribute to a job is a job it did not read, and a job it did not
+    // read is a job it passed.
+    let written = text
+        .lines()
+        .filter(|line| PULL_KEYS.iter().any(|key| line.trim_start().starts_with(key)))
+        .count();
+    pulls.unread = written.saturating_sub(read);
     pulls
 }
+
+/// The job keys that make a runner pull an image before any step runs: the
+/// job's own `container:`, and the `services:` it starts beside it. Both pull
+/// with the job's token, so both are refused by a `permissions:` block that
+/// drops `packages: read`.
+const PULL_KEYS: &[&str] = &["container:", "services:"];
 
 /// The shapes [`workflow_pulls`] has to tell apart, most of which this tree does
 /// not write and only a fixture can.
@@ -16710,6 +16982,42 @@ mod workflow_pulls_shapes {
         // strips comments before asking.
         let commented = "jobs:\n  a:\n    container: img\n    permissions:\n      # packages: read\n      issues: write\n";
         assert_eq!(workflow_pulls(&without_comments(commented)).cannot.len(), 1);
+    }
+
+    #[test]
+    fn a_job_is_read_at_any_indentation_and_a_service_is_a_pull() {
+        // RFC 0130. The same narrowed job at two, three and four spaces, and
+        // with its keys eight deep: the reader took exactly two and four, and
+        // every other shape had no jobs at all — skipped, and so passed.
+        for (jobs, keys) in [("  ", "    "), ("   ", "      "), ("    ", "        ")] {
+            let text = format!(
+                "on:\n{jobs}push:\njobs:\n{jobs}narrowed:\n{keys}container: img\n\
+                 {keys}permissions:\n{keys}{jobs}issues: write\n\
+                 {jobs}fine:\n{keys}container: img\n"
+            );
+            assert_eq!(workflow_jobs(&text), vec!["narrowed", "fine"], "{text}");
+            let pulls = workflow_pulls(&text);
+            assert_eq!(pulls.containers, 2, "{text}");
+            assert_eq!(pulls.cannot, vec![("narrowed".to_string(), "its")], "{text}");
+            assert_eq!(pulls.unread, 0, "{text}");
+        }
+
+        // A service container is pulled with the job's token too.
+        let served = "jobs:\n  a:\n    services:\n      db:\n        image: img\n\
+                      \x20   permissions:\n      issues: write\n";
+        assert_eq!(workflow_pulls(served).cannot, vec![("a".to_string(), "its")]);
+
+        // And a job this reader cannot name is not a job it may pass: the key is
+        // counted by text, and nothing read holds it.
+        let quoted = "jobs:\n  \"a\":\n    container: img\n    permissions:\n      issues: write\n";
+        let pulls = workflow_pulls(quoted);
+        assert!(pulls.cannot.is_empty(), "the fixture no longer models an unread job");
+        assert_eq!(pulls.unread, 1);
+
+        // A top-level key after `jobs:` ends the block rather than joining a job.
+        let after = "jobs:\n  a:\n    runs-on: x\nenv:\n  container: not-a-job-key\n";
+        assert_eq!(workflow_jobs(after), vec!["a"]);
+        assert!(!workflow_job_body(after, "a").expect("a").contains("not-a-job-key"));
     }
 
     #[test]
@@ -17819,7 +18127,7 @@ fn lint_datapath() -> Result<(), String> {
     //
     // Both directions, for `NOT_THE_FRAME`'s own reason: the absence half is a
     // search for a name, and a name nothing defines is absent from everywhere.
-    for (prefix, needle, defines) in NOT_THE_FRAME {
+    for (prefix, needle, defines, definition) in NOT_THE_FRAME {
         let mut named = 0usize;
         for path in &sources {
             let rel = relative(path);
@@ -17831,14 +18139,14 @@ fn lint_datapath() -> Result<(), String> {
             if rel.starts_with(defines) {
                 let text =
                     std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
-                named += code_mentions(&text, needle);
+                named += code_mentions(&text, definition);
             }
         }
         if named == 0 {
             findings.push(format!(
-                "  {defines}  nothing under this prefix names `{needle}` in shipped code, so \
-                 the rule that `{prefix}` must not name it cannot fail — rename the \
-                 type and the check goes green over a frame calling a component"
+                "  {defines}  nothing under this prefix says `{definition}` in shipped code, \
+                 so the rule that `{prefix}` must not name `{needle}` cannot fail — rename \
+                 the type or module and the check goes green over a frame calling a component"
             ));
         }
     }
@@ -22458,8 +22766,9 @@ struct BootBound {
     /// A bound spelled as the sum it is compared against dominates it by
     /// construction, so `at_least` cannot fail for it and the row's one
     /// remaining job is to keep the spelling: a literal in its place is the
-    /// decay RFC 0101 describes, arriving with a green row. Unit: none —
-    /// identifiers, taken by their last path segment.
+    /// decay RFC 0101 describes, arriving with a green row. Unit: none — terms
+    /// as written, full path and all: a last segment is a spelling a shadowing
+    /// module or an alias shares (RFC 0130).
     spelled_as: &'static [&'static str],
 }
 
@@ -22525,7 +22834,7 @@ fn lint_bounds() -> Result<(), String> {
         let path = root().join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {file} for `{name}`: {e}"))?;
-        match constant_value(&text, name, &read) {
+        match constant_value(file, &text, name, &read) {
             Ok(value) => {
                 read.insert((*name).to_string(), value);
                 spelled.insert((*name).to_string(), constant_terms(&text, name));
@@ -22550,7 +22859,7 @@ fn lint_bounds() -> Result<(), String> {
                       failing, arbitrarily far away. This was the literal 13 against a \
                       MAX_MODULES of 16 for a day; the relation is structural in the \
                       spelling now, and this row exists to refuse the next literal",
-            spelled_as: &["FIXED_RESERVED", "MAX_MODULES"],
+            spelled_as: &["FIXED_RESERVED", "arch::x86_64::multiboot::MAX_MODULES"],
         },
         BootBound {
             bound: ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
@@ -22724,10 +23033,36 @@ fn lint_paths() -> Result<(), String> {
 /// The value of `const NAME: usize = ...;` in `text`, resolved against `known`.
 ///
 /// A sum of decimal integers and names already read, and deliberately nothing
-/// more. Underscored digit separators are accepted; a path is taken by its last
-/// segment, so `arch::x86_64::multiboot::MAX_MODULES` resolves as `MAX_MODULES`
-/// — which is exactly the spelling `MAX_RESERVED` uses and the one a reader
-/// would have to follow anyway.
+/// more. Underscored digit separators are accepted.
+///
+/// # How a term is allowed to name a constant
+///
+/// A term resolves only when its **spelling** names the one declaration this
+/// check read for it: bare, when that declaration is in `file` itself; or the
+/// declaring file's module path — `arch::x86_64::multiboot::MAX_MODULES`, with
+/// or without `crate::` — when it is elsewhere in the same crate. This used to
+/// take a path by its last segment, and that is the audit's finding against
+/// RFC 0101's check: `pinned::MAX_MODULES` with a `mod pinned` beside it, or a
+/// bare `MAX_MODULES` behind `use crate::component::PLACES_MAX as MAX_MODULES`,
+/// resolved to multiboot's sixteen while the compiler built thirteen or nine.
+/// `f_supervisor::routing::PLACES_MAX` — a real constant, four — would have
+/// resolved to the frame's nine in any bound read after `PLACES_MAX`; today it
+/// is refused only because [`BOUND_SOURCES`] happens to read `MAX_MODULES`
+/// first, which is an order and not a rule. Each of those is a spelling that
+/// names *something else* with the same last word, and each is now refused by
+/// what it spells, which is a finding naming the term.
+///
+/// That argument rests on the declaration read being the one a spelling
+/// reaches, so it must be at the **top level of its file** — at column zero,
+/// with nothing but a visibility before `const`. Inside a nested module it is
+/// not what the file's module path names, and a same-named alias or glob at the
+/// top would be; at the top, a second top-level binding of the name is a
+/// compile error, which is the compiler holding the rest. RFC 0130.
+///
+/// *What would reverse this:* a bound spelled through another crate, which
+/// nothing is today — this refuses it until it is taught that crate's name —
+/// or a `#[path]` attribute moving a module off its file, which this does not
+/// read and which nothing in `kernel/` writes.
 ///
 /// # Why a second declaration is refused rather than resolved
 ///
@@ -22751,7 +23086,12 @@ fn lint_paths() -> Result<(), String> {
 /// # Errors
 ///
 /// One sentence saying which constant and why, for a finding line.
-fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Result<u64, String> {
+fn constant_value(
+    file: &str,
+    text: &str,
+    name: &str,
+    known: &BTreeMap<String, u64>,
+) -> Result<u64, String> {
     let needle = format!("const {name}: usize = ");
     let found = text.matches(&needle).count();
     if found > 1 {
@@ -22768,27 +23108,75 @@ fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Resu
              check already read>;` — so its value cannot be compared with anything"
         )
     };
-    let (_, rest) = text.split_once(&needle).ok_or_else(unresolved)?;
+    let (before, rest) = text.split_once(&needle).ok_or_else(unresolved)?;
+    let opens = before.rsplit('\n').next().unwrap_or_default();
+    if !["", "pub ", "pub(crate) "].contains(&opens) {
+        return Err(format!(
+            "`{name}` is declared as `{opens}const {name}`, not at the top level of this \
+             file — so a spelling of it names some other binding, and the value read here \
+             is not the one the compiler uses"
+        ));
+    }
     let (expression, _) = rest.split_once(';').ok_or_else(unresolved)?;
     let mut total: u64 = 0;
     for term in expression.split('+') {
         let term = term.trim();
-        let term = term.rsplit("::").next().ok_or_else(unresolved)?;
         if term.is_empty() {
             return Err(unresolved());
         }
         let value = if term.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
             term.replace('_', "").parse::<u64>().map_err(|_| unresolved())?
         } else {
-            *known.get(term).ok_or_else(unresolved)?
+            let last = term.rsplit("::").next().unwrap_or(term);
+            if !bound_spellings(file, last).iter().any(|spelling| spelling == term) {
+                return Err(format!(
+                    "`{name}` is spelled through `{term}`, which does not name the `{last}` \
+                     this check reads — a term must be the bare name of a constant declared \
+                     in this file, or the module path of the file that declares it, or the \
+                     value read here is not the value the compiler builds"
+                ));
+            }
+            *known.get(last).ok_or_else(unresolved)?
         };
         total = total.checked_add(value).ok_or_else(unresolved)?;
     }
     Ok(total)
 }
 
-/// The terms of `const NAME: usize = ...;` in `text`, each by its last path
-/// segment — the spelling of a bound rather than its value.
+/// Every spelling that names the `name` in [`BOUND_SOURCES`], as written from
+/// `file`: bare from its own file, and its file's module path — with or without
+/// `crate::` — from elsewhere in its crate. Empty for a name this does not read,
+/// or one declared in another crate.
+fn bound_spellings(file: &str, name: &str) -> Vec<String> {
+    let Some((declared, _)) = BOUND_SOURCES.iter().find(|(_, bound)| *bound == name) else {
+        return Vec::new();
+    };
+    if *declared == file {
+        return vec![name.to_string()];
+    }
+    let crate_of = |path: &str| path.split('/').next().unwrap_or_default().to_string();
+    if crate_of(declared) != crate_of(file) {
+        return Vec::new();
+    }
+    let Some((_, module)) = declared.split_once("/src/") else {
+        return Vec::new();
+    };
+    let module = module.trim_end_matches(".rs").trim_end_matches("/mod");
+    let path = if module == "main" || module == "lib" {
+        name.to_string()
+    } else {
+        format!("{}::{name}", module.replace('/', "::"))
+    };
+    vec![format!("crate::{path}"), path]
+}
+
+/// The terms of `const NAME: usize = ...;` in `text`, each **as written** — the
+/// spelling of a bound rather than its value.
+///
+/// As written and not by last segment, for [`constant_value`]'s reason: a row
+/// that pins `arch::x86_64::multiboot::MAX_MODULES` is pinning the constant
+/// that path names, and `pinned::MAX_MODULES` or an alias spelled `MAX_MODULES`
+/// has the same last segment and names something else.
 ///
 /// [`constant_value`] has already refused a second declaration and an
 /// expression it cannot read by the time this is asked, so an absent needle
@@ -22797,13 +23185,7 @@ fn constant_terms(text: &str, name: &str) -> Vec<String> {
     let needle = format!("const {name}: usize = ");
     text.split_once(&needle)
         .and_then(|(_, rest)| rest.split_once(';'))
-        .map(|(expression, _)| {
-            expression
-                .split('+')
-                .filter_map(|term| term.trim().rsplit("::").next())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|(expression, _)| expression.split('+').map(|term| term.trim().to_string()).collect())
         .unwrap_or_default()
 }
 
@@ -22826,17 +23208,69 @@ mod bound_constants {
         let two = "const PLACES_MAX: usize = 9;\n\
                    #[cfg(test)]\n\
                    const PLACES_MAX: usize = 2;\n";
-        let why = constant_value(two, "PLACES_MAX", &BTreeMap::new())
+        let why = constant_value("kernel/src/component.rs", two, "PLACES_MAX", &BTreeMap::new())
             .expect_err("two declarations resolved to one value");
         assert!(why.contains("PLACES_MAX"), "the refusal does not name the constant: {why}");
         assert!(why.contains("declared 2 times"), "the refusal does not say why: {why}");
 
         // And one declaration still resolves, including through a name already
-        // read and through a path taken by its last segment.
+        // read and through the path of the file that declares it.
         let mut known = BTreeMap::new();
         known.insert("PLACES_MAX".to_string(), 9u64);
-        let one = "pub const MAX_MODULES: usize = 1 + component::PLACES_MAX + 1 + 2;\n";
-        assert_eq!(constant_value(one, "MAX_MODULES", &known), Ok(13));
+        let one = "pub const MAX_MODULES: usize = 1 + crate::component::PLACES_MAX + 1 + 2;\n";
+        assert_eq!(constant_value(MULTIBOOT, one, "MAX_MODULES", &known), Ok(13));
+    }
+
+    /// Where `MAX_MODULES` is declared, and so what a spelling of it must name.
+    const MULTIBOOT: &str = "kernel/src/arch/x86_64/multiboot.rs";
+
+    #[test]
+    fn a_term_resolves_only_through_a_spelling_that_names_what_was_read() {
+        // RFC 0130: the resolver took a path by its last segment, so each of
+        // these read multiboot's sixteen, or the frame's nine, while the
+        // compiler built something else — `known` holds every name here, which
+        // is the case read order hid for the foreign one. Each is now a finding
+        // naming the term.
+        let mut known = BTreeMap::new();
+        known.insert("MAX_MODULES".to_string(), 16u64);
+        known.insert("FIXED_RESERVED".to_string(), 5u64);
+        known.insert("PLACES_MAX".to_string(), 9u64);
+        let main = "kernel/src/main.rs";
+        for (file, text) in [
+            // A shadowing module beside the bound.
+            (main, "const MAX_RESERVED: usize = FIXED_RESERVED + pinned::MAX_MODULES;"),
+            // An alias, spelled bare.
+            (main, "const MAX_RESERVED: usize = FIXED_RESERVED + MAX_MODULES;"),
+            // Another crate's constant of the same name, which is four.
+            (
+                MULTIBOOT,
+                "pub const MAX_MODULES: usize = 3 + f_supervisor::routing::PLACES_MAX + 3;",
+            ),
+            // A bare name imported into a file that does not declare it.
+            (MULTIBOOT, "pub const MAX_MODULES: usize = 3 + PLACES_MAX + 3;"),
+        ] {
+            let name = if file == main { "MAX_RESERVED" } else { "MAX_MODULES" };
+            let why = constant_value(file, text, name, &known).expect_err(text);
+            assert!(why.contains("does not name"), "{why}");
+        }
+
+        // The spellings that do name it, from the crate root, with and without
+        // `crate::`.
+        let root =
+            "const MAX_RESERVED: usize = FIXED_RESERVED + arch::x86_64::multiboot::MAX_MODULES;";
+        assert_eq!(constant_value(main, root, "MAX_RESERVED", &known), Ok(21));
+        let full = "const MAX_RESERVED: usize = FIXED_RESERVED + crate::arch::x86_64::multiboot::MAX_MODULES;";
+        assert_eq!(constant_value(main, full, "MAX_RESERVED", &known), Ok(21));
+
+        // And the declaration read must be the file's own: one inside a nested
+        // module is not what the file's path names, and an alias at the top
+        // would be.
+        let nested = "pub use crate::component::PLACES_MAX as MAX_MODULES;\n\
+                      mod real {\n    pub const MAX_MODULES: usize = 16;\n}\n";
+        let why = constant_value(MULTIBOOT, nested, "MAX_MODULES", &known).expect_err(nested);
+        assert!(why.contains("not at the top level"), "{why}");
+        let inline = "mod real { pub const MAX_MODULES: usize = 16; }\n";
+        assert!(constant_value(MULTIBOOT, inline, "MAX_MODULES", &known).is_err());
     }
 
     #[test]
@@ -22845,7 +23279,10 @@ mod bound_constants {
         // apart — both are 21 — which is why the `MAX_RESERVED` row reads this.
         let sum =
             "const MAX_RESERVED: usize = FIXED_RESERVED + arch::x86_64::multiboot::MAX_MODULES;";
-        assert_eq!(constant_terms(sum, "MAX_RESERVED"), vec!["FIXED_RESERVED", "MAX_MODULES"]);
+        assert_eq!(
+            constant_terms(sum, "MAX_RESERVED"),
+            vec!["FIXED_RESERVED", "arch::x86_64::multiboot::MAX_MODULES"]
+        );
         assert_eq!(constant_terms("const MAX_RESERVED: usize = 21;", "MAX_RESERVED"), vec!["21"]);
     }
 }
@@ -30089,7 +30526,7 @@ mod tests {
         // explaining it.
         let row = crate::NOT_THE_FRAME
             .iter()
-            .find(|(prefix, _, defines)| *prefix == "kernel/" && *defines == "user/supervisor/")
+            .find(|(prefix, _, defines, _)| *prefix == "kernel/" && *defines == "user/supervisor/")
             .expect("RFC 0126's row");
         for route in [
             "fn f() { let _ = f_supervisor::policy::fate; }\n",
@@ -30113,8 +30550,8 @@ mod tests {
         // does not depend on which row happens to hold it.
         let rows: Vec<&str> = crate::NOT_THE_FRAME
             .iter()
-            .filter(|(prefix, _, _)| *prefix == "kernel/")
-            .map(|(_, needle, _)| *needle)
+            .filter(|(prefix, _, _, _)| *prefix == "kernel/")
+            .map(|(_, needle, _, _)| *needle)
             .collect();
         let named =
             |route: &str| rows.iter().any(|n| !frame_findings("kernel/x.rs", route, n).is_empty());
@@ -30167,6 +30604,39 @@ mod tests {
         assert_eq!(code_mentions(recorded, "Driver::"), 0);
         let fixture = "fn turn() {}\n#[cfg(test)]\nmod t { fn f() { Driver::start(); } }\n";
         assert_eq!(code_mentions(fixture, "Driver::"), 0);
+    }
+
+    #[test]
+    fn a_module_row_is_kept_alive_by_the_declaration_and_not_by_the_name() {
+        // RFC 0130's first finding. The supervisor after `pub mod policy` is
+        // renamed `judge`: `routing.rs`'s field and local still spell the name,
+        // and that was the whole of what the third field asked for.
+        let renamed = "pub mod judge;\npub mod routing;\n\
+                       pub struct Place { pub policy: Policy }\n\
+                       fn f() { let policy = at::POLICY; }\n";
+        assert!(code_mentions(renamed, "policy") > 0, "the fixture no longer models the hole");
+        for (_, needle, defines, definition) in crate::NOT_THE_FRAME {
+            if *needle == "policy" {
+                assert_eq!(*defines, "user/supervisor/");
+                assert_eq!(code_mentions(renamed, definition), 0, "a renamed module still answers");
+                assert_eq!(code_mentions("pub mod policy_old;\n", definition), 0);
+                assert_eq!(code_mentions("// pub mod policy;\n", definition), 0);
+                assert_eq!(code_mentions("pub mod policy;\n", definition), 1);
+            }
+        }
+
+        // And the frame that judges a timeout without naming the module: the
+        // word it has to write onto the wire is what the table refuses.
+        let inline = "fn f(a: u64, s: u64, w: u64) -> u64 {\n\
+                      \x20   if a > s && w > 0 { cause::pack(cause::TIMEDOUT, a) } else { 0 }\n}\n";
+        let named = crate::NOT_THE_FRAME
+            .iter()
+            .filter(|(prefix, ..)| *prefix == "kernel/")
+            .any(|(_, needle, ..)| !frame_findings("kernel/x.rs", inline, needle).is_empty());
+        assert!(named, "a frame judging a timeout inline went unnamed");
+        // The frame's own check of the word is by predicate, which names nothing.
+        let carried = "fn f(n: u64) -> bool { cause::named_above(cause::of(n)) }\n";
+        assert!(frame_findings("kernel/x.rs", carried, "TIMEDOUT").is_empty());
     }
 
     #[test]

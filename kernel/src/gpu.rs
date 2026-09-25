@@ -1166,7 +1166,7 @@ unsafe fn run(
         crate::process::reap_holding(
             frames,
             prepared,
-            (domain.tables().len() as u64).saturating_sub(tables_before),
+            crate::process::Held { before: tables_before, after: domain.tables().len() as u64 },
         )
     }
     .map_err(Trouble::Process)?;

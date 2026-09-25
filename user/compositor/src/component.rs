@@ -495,6 +495,19 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
+    // The cap, `E3-B07e`, and unlike the pacing inputs below it **is** refused
+    // at zero. Every one of those has an honest answer at zero; this one does
+    // not, because zero is what a frame that never found this component's
+    // framed ring writes, and a compositor that read it as *no cap* would serve
+    // uncapped over a word nobody wrote. `crate::routing::at::DELTAS_PER_FRAME_MAX`
+    // is the argument. Narrowed here, where the page's word becomes the
+    // manifest's `u32`; a word past that range is a page this build cannot
+    // honour, not a cap to truncate.
+    let deltas_per_frame_max = u32::try_from(board.read64(at::DELTAS_PER_FRAME_MAX).ok()?).ok()?;
+    if deltas_per_frame_max == 0 {
+        return None;
+    }
+
     // The pacing inputs, read and **not** refused. Every one of them has an
     // honest answer at zero — no display declared, no margin wanted, no
     // capability reported — and `crate::pacing` says what each zero produces: a
@@ -513,6 +526,7 @@ fn laid_out(board: &Window) -> Option<Parts> {
         // it becomes: no latch, published as a decline on every frame, rather
         // than a truncation that would name a different node.
         pointer_node: u32::try_from(board.read64(at::POINTER_NODE).ok()?).unwrap_or(0),
+        deltas_per_frame_max,
     };
 
     // Not refused at any value, and the reason is the same shape as the pacing
@@ -589,6 +603,9 @@ fn report(
         let _ = board.write64(reported::REFUSED, counters.refused);
         let _ = board.write64(reported::TOKEN, counters.token);
         let _ = board.write64(reported::LATE, counters.late);
+        // The cap's refusals, `E3-B07e`: their own word beside `REFUSED`, which
+        // `reported::CAPPED` says is a different fact.
+        let _ = board.write64(reported::CAPPED, counters.capped);
         // The pacing decision, whole. Four numbers where one would do, because
         // the exit's sentence is a subtraction and a reader handed only the
         // answer cannot check it — `crate::routing::reported::WAKE` argues the

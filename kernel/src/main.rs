@@ -3121,6 +3121,9 @@ fn admission_demonstration(boot: &BootInfo) {
 /// `compositor=floorless` describes a machine below the bottom of RFC 0080's
 /// ladder and requires the frame to refuse it a compositor `ADMISSION/NO_RUNG`
 /// before a page is spent, having admitted this boot's own machine first.
+/// `compositor=capped` sends one frame past the cap the compositor's manifest
+/// declares and one under it, `E3-B07e`, and requires the excess refused and
+/// both frames closed.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
 /// `objects`' are: it knows which half it asked for, what it submitted, and what
@@ -3139,6 +3142,8 @@ fn compositor_boot(
         compositor::Half::Floorless
     } else if boot.has_parameter(b"compositor=wake") {
         compositor::Half::Wake
+    } else if boot.has_parameter(b"compositor=capped") {
+        compositor::Half::Capped
     } else {
         return None;
     };
@@ -3171,7 +3176,10 @@ fn compositor_boot(
         // refusal rather than a fallback that would be measuring something
         // else. The wake half least of all: its whole subject is a doorbell
         // crossing from one core to another.
-        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => {
+        compositor::Half::Serve
+        | compositor::Half::Starved
+        | compositor::Half::Wake
+        | compositor::Half::Capped => {
             let me = arch::x86_64::current_cpu();
             if !(smp::started() > 1 && smp::first_worker() != me) {
                 kprintln!(

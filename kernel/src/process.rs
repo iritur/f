@@ -1401,6 +1401,10 @@ pub enum Error {
     /// The free count did not come back. Something the process owned was not
     /// given back, and continuing would hide it.
     Leaked,
+    /// A structure that outlives the process held fewer frames after the run
+    /// than before it, so the free count cannot say what the process owned: a
+    /// frame given back there cancels a frame leaked here. [`reap_holding`].
+    HeldShrank,
     /// The core the process was handed to could not arm its own timer, so there
     /// was nothing to count ticks out of ring 3 with and the process would have
     /// polled forever.
@@ -1419,6 +1423,10 @@ impl Error {
             Self::NoSlot => "the capability table had no room for a process's own grants",
             Self::NoDeath => "the process ended and the frame did not record how",
             Self::Leaked => "a process's frames were not all given back",
+            Self::HeldShrank => {
+                "a structure outliving the process gave frames back during its run, so the free \
+                 count cannot tell what the process leaked (an unmap freed a table?)"
+            }
             Self::NoTimer => "the core a process was handed to could not arm its timer",
         }
     }
@@ -3193,7 +3201,27 @@ pub unsafe fn execute(kernel_root: u64) {
 /// shards sound, and what makes the `&mut` on `frames` live again.
 pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Report, Error> {
     // SAFETY: the caller's guarantee, passed down unchanged.
-    unsafe { reap_holding(frames, prepared, 0) }
+    unsafe { reap_holding(frames, prepared, Held::NOTHING) }
+}
+
+/// How many frames a structure that **outlives the process** held, read on
+/// either side of the run.
+///
+/// Two readings and not their difference, so that [`reap_holding`] is the one
+/// place that decides what a count going backwards means — and it refuses it.
+/// Unit: frames.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Held {
+    /// Read on the same side of [`prepare`] as the free count. Unit: frames.
+    pub before: u64,
+    /// Read after the process has finished and before it is reaped.
+    /// Unit: frames.
+    pub after: u64,
+}
+
+impl Held {
+    /// A caller whose run allocated into nothing but the process.
+    pub const NOTHING: Self = Self { before: 0, after: 0 };
 }
 
 /// [`reap`], for a caller that knows exactly how many frames were allocated
@@ -3220,16 +3248,29 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
 /// the repair: the serve loop allocated no frame at the old layout and one at
 /// the new.
 ///
-/// `frames_held_elsewhere` is a **count, not a tolerance**: the caller reads it off the
-/// structure that holds the frames — `Domain::tables()` before [`prepare`] and
-/// again now — so a process that also leaked one frame of its own still fails
-/// here. *What would reverse this:* a domain whose tables are built whole when a
+/// `held` is a **count, not a tolerance**: the caller reads it off the structure
+/// that holds the frames — `Domain::tables()` before [`prepare`] and again now —
+/// so a process that also leaked one frame of its own still fails here.
+/// *What would reverse this:* a domain whose tables are built whole when a
 /// region is granted rather than when it is mapped, at which point nothing is
-/// allocated during a run and every caller passes zero again.
+/// allocated during a run and every caller passes [`Held::NOTHING`] again.
+///
+/// # The count may only grow, and that is an invariant of another file
+///
+/// `held.after - held.before` is exact because nothing gives a table back
+/// during a run: `vtd::Unit::unmap_entry` leaves every table above a leaf in
+/// place until the domain is released, after this. Were an unmap to free one
+/// while the process leaked one frame, the free count would come back whole,
+/// the difference would be negative, and a saturating subtraction — which is
+/// what every caller wrote until 2026-09-25 — would make it zero: the two
+/// errors cancel and the leak passes. So a count that went backwards is
+/// [`Error::HeldShrank`], by name, rather than arithmetic. *What would reverse
+/// this:* an unmap that frees empty tables on purpose, at which point the
+/// difference is signed, is carried as one, and this refusal goes.
 ///
 /// # Errors
 ///
-/// As [`reap`].
+/// As [`reap`], and [`Error::HeldShrank`] for a count that went backwards.
 ///
 /// # Safety
 ///
@@ -3237,7 +3278,7 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
 pub unsafe fn reap_holding(
     frames: &mut FrameAllocator,
     prepared: Prepared,
-    frames_held_elsewhere: u64,
+    held: Held,
 ) -> Result<Report, Error> {
     let cpu = prepared.cpu;
 
@@ -3272,6 +3313,12 @@ pub unsafe fn reap_holding(
         count += 1;
     }
 
+    // After the process's own frames are back, so a refusal here leaves nothing
+    // of the process unreturned. See this function's doc for why it is a
+    // refusal and not a saturation.
+    let Some(frames_held_elsewhere) = held.after.checked_sub(held.before) else {
+        return Err(Error::HeldShrank);
+    };
     if frames.free_count().saturating_add(frames_held_elsewhere) != prepared.before {
         return Err(Error::Leaked);
     }

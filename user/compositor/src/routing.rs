@@ -310,6 +310,27 @@ pub mod at {
     pub const INPUT_AT: u32 = 160;
     /// How many bytes of it. Unit: bytes.
     pub const INPUT_LEN: u32 = 168;
+
+    /// The most scene deltas one frame may carry into this component, as the
+    /// compositor's own manifest declares it on its `scene` server ring.
+    ///
+    /// **`E3-B07e`'s enforcement, and RFC 0128's *Consequences* is the spec.**
+    /// The frame finds the ring by `f_abi::manifest::FRAMED_PROTOCOL` in the
+    /// record it spawned this component from, refuses to start a compositor
+    /// whose record has none — which is what turns a protocol renamed away from
+    /// `scene` into a red boot rather than an uncapped compositor — and writes
+    /// the ring's `deltas_per_frame_max` here. Written by the frame and not read
+    /// by this component out of its own image, because a component that decided
+    /// its own cap would be a component deciding how much of a client it will
+    /// take, and the manifest is where that is declared to somebody else.
+    ///
+    /// **Zero is refused as `BAD_ROUTING`**, not read as *no cap*: a frame that
+    /// never wrote this word is a frame that never found the framed ring, and a
+    /// compositor that served uncapped because a word was missing would be the
+    /// declaration a reader believes and nothing keeps — RFC 0128's own name for
+    /// the state this word ends. `crate::tree::Held::offer` is where it bites.
+    /// Unit: deltas per frame, commits not counted.
+    pub const DELTAS_PER_FRAME_MAX: u32 = 176;
 }
 
 /// What the frame says it will do when this component has nothing to do.
@@ -1076,6 +1097,20 @@ pub mod reported {
     /// no two instances share, at which point this word carries that rather than
     /// an ordinal a second place could also be at. Unit: none — an epoch plus one.
     pub const EPOCH: u32 = super::REPORT + 528;
+
+    /// Deltas refused because the frame they were offered to had already staged
+    /// [`super::at::DELTAS_PER_FRAME_MAX`] of them, `E3-B07e`.
+    ///
+    /// **Its own word and not folded into [`REFUSED`]**, because it is a
+    /// different fact: a refused entry is one the wire or the graph could not
+    /// take, and it poisons its frame; a capped one was well formed, was never
+    /// offered to the batch, and its frame still closes. A reader handed one
+    /// count could not tell a client that exceeded the cap from one that sent
+    /// garbage. Board only — the manifest's state tree is full, `node::WRITTEN`
+    /// says so — and the frame holds it against the capped completions its own
+    /// client reaped.
+    /// Unit: deltas.
+    pub const CAPPED: u32 = super::REPORT + 536;
 }
 
 /// Why the component's loop ended.

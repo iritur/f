@@ -306,23 +306,49 @@ const STILL_NODE: u32 = 3;
 /// How many nodes the setup deltas create. Unit: nodes.
 const SETUP_NODES: u64 = 3;
 
-/// How many transforms this client commits: the pointer's, at the origin, and
-/// the still sibling's. Unit: deltas.
+/// How many transforms this client commits: the pointer's, where the driver's
+/// accumulator starts, and the still sibling's. Unit: deltas.
 const COMMITTED_TRANSFORMS: u64 = 2;
 
-/// Where this client commits the pointer, along x.
+/// Where this client commits the pointer, along x — **and where this frame
+/// tells the driver its accumulator starts**, which is the same number on
+/// purpose.
 ///
-/// The origin, and not a number chosen to look like a screen position: this
+/// Where the accumulator starts, and not a position chosen for a screen: this
 /// client is never told where the pointer is — that is `E3-B04g` — so the one
 /// place it can honestly commit it is where the driver's accumulator starts.
 /// `commit`'s own doc is the argument, and it is what makes *latched minus
 /// committed* the motion the harness injected rather than an offset from a
 /// position somebody made up.
+///
+/// **Not zero, and that is the point of it.** Until 2026-09-25 the driver could
+/// not be told a start, so it began at `(0, 0)` and this client committed
+/// there; and over a committed translation of zero, a latch that *added* the
+/// position to it — `tx = committed.tx + predicted` — submits exactly the frame
+/// a latch that replaced it does. The harness's subtraction and this file's
+/// *latched is where the driver's accumulator ended* both passed it; only the
+/// host test, which commits at `(640, 360)`, caught it. It is the host
+/// fixture's number here too, so the boot catches it on a device path. The
+/// same shape as the identity matrix `COMMITTED_A_X65536` replaced, on the
+/// other axis of the transform. RFC 0132.
 /// Unit: device pixels, scaled by 65 536.
-const COMMITTED_TX_X65536: i64 = 0;
+const COMMITTED_TX_X65536: i64 = 640 * 65_536;
 
 /// And along y. Unit: device pixels, scaled by 65 536.
-const COMMITTED_TY_X65536: i64 = 0;
+const COMMITTED_TY_X65536: i64 = 360 * 65_536;
+
+// Non-zero on each axis, which is the property; different from each other, so
+// a latch that crossed the axes is a number that moved; and inside `i32`, which
+// is the accumulator the driver is told to start it in and refuses otherwise.
+const _: () = assert!(
+    COMMITTED_TX_X65536 != 0
+        && COMMITTED_TY_X65536 != 0
+        && COMMITTED_TX_X65536 != COMMITTED_TY_X65536
+        && COMMITTED_TX_X65536 <= i32::MAX as i64
+        && COMMITTED_TY_X65536 <= i32::MAX as i64
+        && COMMITTED_TX_X65536 >= i32::MIN as i64
+        && COMMITTED_TY_X65536 >= i32::MIN as i64
+);
 
 /// Where the still sibling is committed, along x.
 ///
@@ -486,6 +512,9 @@ pub enum Trouble {
     NoHeap,
     /// That heap and `f_compositor::routing::HEAP_BYTES` are different numbers.
     HeapDisagrees,
+    /// The compositor's record serves no `scene` ring, so there is no cap to
+    /// hand it. `crate::compositor::Trouble::Unframed`'s reason, RFC 0128.
+    Unframed,
     /// A component could not be built as a process, carrying which step.
     Process(crate::process::Error),
     /// A component's state tree could not be published or read back.
@@ -522,6 +551,10 @@ impl Trouble {
             Self::NoHeap => "the compositor's manifest declares no heap for its graph",
             Self::HeapDisagrees => {
                 "the manifest's heap and the compositor crate's own constant are different numbers"
+            }
+            Self::Unframed => {
+                "the compositor's record serves no `scene` ring, so there is no \
+                 deltas_per_frame_max to hand it (RFC 0128)"
             }
             Self::Process(_) => "a component could not be built as a process",
             Self::StateTree(_) => "a component's state tree could not be published or read",
@@ -697,19 +730,33 @@ pub struct Produced {
     pub asked: u32,
     /// Whether anything outside the machine said it had injected.
     pub acknowledged: bool,
-    /// Entries on the driver's ring when the driver had been reaped and before
-    /// the compositor was stood up — submitted and not yet taken by anybody.
+    /// The data ring's producer cursor when the driver had been reaped and
+    /// before the compositor was stood up.
     ///
     /// **The measurement behind *the frame relayed no input entry*.** Until a
     /// mutation that had this frame take one entry off the ring went red on the
     /// wrong sentence, the boot log said *this frame took 0 entries* as a
     /// literal: true of this file, and printed whatever this file did. So it is
     /// read off the ring's own cursors instead, at the one moment nothing is
-    /// running on either end, and required to equal what the driver says it put
-    /// there — every event and its attestation. A frame, or anything else, that
-    /// took an entry between the two components is a smaller number here.
-    /// Unit: entries.
-    pub on_ring: u64,
+    /// running on either end.
+    ///
+    /// **The cursors, and not their difference.** Until 2026-09-25 this was
+    /// `Producer::occupancy`, `head - tail`, and an audit showed by reading that
+    /// a relay which popped all six entries and resubmitted them to the same
+    /// ring left head 12 and tail 6: occupancy six, both folds unchanged, the
+    /// verdict green. A ring nobody has taken from is at one place and not at a
+    /// difference — tail zero, where `describe` laid it out, and head at every
+    /// event and attestation the driver says it put there.
+    /// Unit: entries, as a free-running cursor.
+    pub head: u64,
+    /// The consumer cursor at the same moment: zero, or somebody consumed.
+    ///
+    /// *What this cannot see:* a reader that copies entries without advancing
+    /// it, or one that puts both cursors back afterwards. Neither is reachable
+    /// from this file without a `Consumer` or a `Cursor::set` on this ring, and
+    /// the absence of both is `E3-B04g`'s structural half; this is the half a
+    /// boot can measure. Unit: entries, as a free-running cursor.
+    pub tail: u64,
 }
 
 /// What the compositor stage saw.
@@ -880,12 +927,21 @@ impl Report {
         // attestation — must still be there when the compositor is given it.
         // On both halves: the withholding half is the same ring with the same
         // entries, and a control that lost one would be a control for two
-        // things.
-        if seen.on_ring != seen.board.submitted.saturating_add(seen.board.attested) {
+        // things. The two cursors each against where an untouched ring leaves
+        // it, and not their difference — `Produced::head`'s doc has the relay
+        // that a difference cannot see. The ring holds sixteen and is laid out
+        // at zero, so these cursors have not wrapped and equality is exact.
+        if seen.tail != 0 {
+            return Err("the ring's consumer cursor had moved when the compositor was stood up: \
+                 something took entries off it between the two components - whether or not it \
+                 put them back, which the difference of the two cursors cannot see - and on \
+                 this path nothing may, the frame least of all");
+        }
+        if seen.head != seen.board.submitted.saturating_add(seen.board.attested) {
             return Err(
-                "the ring did not hold every entry the driver put on it when the compositor was \
-                 stood up: something took entries off it between the two components, and on \
-                 this path nothing may - the frame least of all",
+                "the ring's producer cursor is not at every entry the driver says it put there \
+                 when the compositor was stood up: something besides the driver submitted to \
+                 it, or the driver's own count is wrong",
             );
         }
         if seen.asked != 0 {
@@ -1176,10 +1232,11 @@ pub fn report_lines(report: &Report) {
     // components is the number `E3-B04g` is: every entry the driver put there,
     // read off the ring's own cursors rather than asserted by this file.
     crate::kprintln!(
-        "  input ring    {} entr(y/ies) on the ring when the compositor was stood up, of the {} \
-         the driver submitted and {} attestation(s); the compositor was {} and took {} entr(y/ies) \
-         and {} attestation(s): {} decoded, {} refused, {} of them pointer motion",
-        seen.on_ring,
+        "  input ring    head {} tail {} when the compositor was stood up, for the {} \
+         entr(y/ies) the driver submitted and {} attestation(s); the compositor was {} and took \
+         {} entr(y/ies) and {} attestation(s): {} decoded, {} refused, {} of them pointer motion",
+        seen.head,
+        seen.tail,
         seen.board.submitted,
         seen.board.attested,
         if board.input_connected == 1 { "connected" } else { "not connected" },
@@ -1216,10 +1273,19 @@ pub fn report_lines(report: &Report) {
     // nothing outside the machine can derive - where the driver's accumulator
     // ended up, as the driver published it - and the harness holds the other
     // half: how far it asked the pointer to move, in whole device pixels.
+    //
+    // And where the accumulator started, which this frame told the driver: the
+    // harness subtracts it, so its equality is about how far the pointer moved
+    // and a driver that ignored the start is a difference. The words are read
+    // by position, so the first eleven are a format — `xtask`'s
+    // `input_pointer` checks the word before each number.
     crate::kprintln!(
-        "  input pointer x {} y {} in units of 1/65536 device pixel, after {} motion event(s)",
+        "  input pointer x {} y {} from x {} y {} in units of 1/65536 device pixel, after {} \
+         motion event(s)",
         seen.board.pointer_x_x65536,
         seen.board.pointer_y_x65536,
+        COMMITTED_TX_X65536,
+        COMMITTED_TY_X65536,
         seen.board.motions,
     );
     crate::kprintln!(
@@ -1568,6 +1634,11 @@ unsafe fn produce(
         // are - and what they are not - is written down.
         (routing::at::STAMP_SEED, STAMP_SEED),
         (routing::at::STAMP_TICK_NANOS, STAMP_TICK_NANOS),
+        // Where the pointer starts, which is where `commit` puts it: one number,
+        // told to the driver and committed by the client, so the client has
+        // still never been told where the pointer *is*. RFC 0132.
+        (routing::at::ORIGIN_X_X65536, COMMITTED_TX_X65536.cast_unsigned()),
+        (routing::at::ORIGIN_Y_X65536, COMMITTED_TY_X65536.cast_unsigned()),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1693,27 +1764,26 @@ unsafe fn produce(
 
     let board = reported.ok_or(Trouble::BadReport)?;
 
-    // What is on the ring now, with the driver joined and reaped and the
-    // compositor not yet stood up: the one moment neither end is running. The
-    // ring's cursors are read and nothing is taken — `occupancy` is the
-    // producer's count of what it published and nobody has consumed.
+    // Where the ring's two cursors stand now, with the driver joined and reaped
+    // and the compositor not yet stood up: the one moment neither end is
+    // running. Both are read and nothing is taken — no `Producer` and no
+    // `Consumer` is bound, because neither has a call that answers a cursor
+    // without also being a handle that could move one.
     //
-    // A producer's handle and not a consumer's, because a producer's has no
-    // call that takes an entry off. `Producer::occupancy` is sound only for the
-    // ring's one producer — *only the owner may ask* — and it is sound here for
-    // that reason: the driver that owned the head is joined, the join is the
-    // edge that makes its last head store visible to this core, and nothing
-    // else holds either end until `consume` hands the far one out. The handle
-    // is dropped at the end of this expression and submits nothing.
+    // The raw reads are the diagnostic `Cursor::raw` exists for, and `Relaxed`
+    // is enough here for the reason `Producer::occupancy` gave when it stood
+    // here: the driver that owned the head is joined, the join is the edge
+    // that makes its last head store visible to this core, and nothing else
+    // holds either end until `consume` hands the far one out. The cursors and
+    // not their difference — `Produced::head`'s doc is the relay a difference
+    // cannot see.
     // SAFETY: `wire` is the frame the channel was laid out in above, allocated
     // by the caller and held by nothing that runs: the driver that held one end
     // is reaped. Every accessor hands out atomics rather than references.
     let ring = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
-    let on_ring = Producer::new(ring.channel())
-        .ok_or(Trouble::Channel(0))?
-        .occupancy()
-        .map_err(|_| Trouble::Channel(0))?;
-    Ok(Produced { board, exited, asked, acknowledged, on_ring: u64::from(on_ring) })
+    let cursors = ring.channel();
+    let (head, tail) = (u64::from(cursors.head.raw()), u64::from(cursors.tail.raw()));
+    Ok(Produced { board, exited, asked, acknowledged, head, tail })
 }
 
 /// The compositor stage: stand `user/compositor` up on the core the driver has
@@ -1750,6 +1820,10 @@ unsafe fn consume(
     if declared_heap != scene_routing::HEAP_BYTES {
         return Err(Trouble::HeapDisagrees);
     }
+    // The cap, `E3-B07e`, by the same finder `kernel/src/compositor.rs` uses:
+    // the component refuses a routing page without it, so this boot hands it
+    // the word its own manifest declares rather than one written here.
+    let cap = crate::compositor::frame_cap(&record).ok_or(Trouble::Unframed)?;
 
     // **The one line the two halves differ in.** The delivering half maps the
     // driver's data channel into the compositor and says where; the withholding
@@ -1850,6 +1924,7 @@ unsafe fn consume(
         (scene_routing::at::POINTER_NODE, u64::from(POINTER_NODE)),
         (scene_routing::at::INPUT_AT, input_at),
         (scene_routing::at::INPUT_LEN, input_len),
+        (scene_routing::at::DELTAS_PER_FRAME_MAX, cap),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1925,15 +2000,17 @@ struct Sent {
 /// Submit the three setup deltas, the two committed transforms, and one
 /// commit — the same six on both halves.
 ///
-/// # Why the committed transform is at the origin
+/// # Why the committed transform is where the accumulator starts
 ///
 /// Because this client has never been told where the pointer is, and that is
 /// the point of `E3-B04g`: the position goes from the driver to the compositor
 /// and not through here. The one place a client that knows nothing can honestly
-/// put the pointer is where the driver's accumulator starts, which is the
-/// origin. `E3-B01i`'s *by exactly the motion injected* is then a subtraction
-/// the harness can do against the list it injected: latched minus committed is
-/// the accumulator's end, and the accumulator's end is the sum of the motion.
+/// put the pointer is where the driver's accumulator starts — which this frame
+/// told the driver, on its routing page, before it ran. `E3-B01i`'s *by exactly
+/// the motion injected* is then a subtraction the harness can do against the
+/// list it injected: latched minus committed is the accumulator's end minus its
+/// start, and that is the sum of the motion. Why the start is not zero is
+/// [`COMMITTED_TX_X65536`]'s.
 ///
 /// # Why one at a time
 ///
@@ -2040,9 +2117,9 @@ fn commit(
         0,
     )?;
     // The transform the client commits for the pointer, which is the one the
-    // latch reads back out of the graph and patches: a shear at the origin —
-    // see this function's doc for why the origin, and `COMMITTED_A_X65536`
-    // for why a shear.
+    // latch reads back out of the graph and patches: a shear at the driver's
+    // start — see this function's doc for why there, `COMMITTED_TX_X65536` for
+    // why that is not zero, and `COMMITTED_A_X65536` for why a shear.
     send(
         &mut seen,
         SceneEntry::SetTransform(SetTransform {

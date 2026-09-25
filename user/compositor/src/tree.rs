@@ -176,6 +176,15 @@ pub struct Counters {
     /// something.
     /// Unit: entries.
     pub answered: u64,
+    /// Deltas refused because their frame had already staged its cap,
+    /// `E3-B07e`.
+    ///
+    /// Not in [`Counters::refused`], and not in [`Counters::staged`]: a capped
+    /// delta was well formed and was never offered to the batch, so it neither
+    /// poisoned the frame nor reached it. `crate::routing::reported::CAPPED`
+    /// says why the two refusals are two words.
+    /// Unit: deltas.
+    pub capped: u64,
 }
 
 impl Counters {
@@ -196,6 +205,7 @@ impl Counters {
         token: 0,
         late: 0,
         answered: 0,
+        capped: 0,
     };
 
     /// Entries that crossed this boundary in either direction.
@@ -264,6 +274,16 @@ pub struct Plan {
     /// `crate::latch::Declined::NoNode` on every frame rather than a refusal.
     /// Unit: none — a node identifier.
     pub pointer_node: u32,
+    /// The most non-commit deltas one frame may stage, `E3-B07e`.
+    ///
+    /// Told, off `crate::routing::at::DELTAS_PER_FRAME_MAX`, which the frame
+    /// copies out of this component's own manifest — RFC 0128's cap, declared on
+    /// the `scene` server ring. Never zero on a running component, because
+    /// `crate::component`'s layout refuses a page that says zero; a host test
+    /// that hands [`Held::new`] a zero gets a compositor that takes commits and
+    /// nothing else, which is what a cap of zero means.
+    /// Unit: deltas per frame, commits not counted.
+    pub deltas_per_frame_max: u32,
 }
 
 /// The bitmask the frame wrote, read back through the vocabulary.
@@ -835,6 +855,37 @@ impl<'a> Held<'a> {
     /// wake time from it, and until then a frame closes when it arrives.
     pub fn offer(&mut self, entry: &Sqe, payload: &[u8; PAYLOAD_BYTES], now: Tick) -> Option<Cqe> {
         self.counters.drained += 1;
+        // --- the cap, `E3-B07e` ------------------------------------------------
+        //
+        // **Before the batch and instead of it.** A delta past the frame's cap is
+        // answered `RESOURCE/QUOTA_EXHAUSTED` with the cap in `ext`, and is not
+        // offered: the batch poisons its frame on any refusal it makes itself, so
+        // a cap enforced by offering and then refusing would be a cap that loses
+        // the frame, and RFC 0128 says what is refused is the excess submission
+        // and not the frame. The fifty deltas already staged stay staged, the
+        // commit that follows closes them, and the client is told the size of the
+        // quota it ran into so it can split its next frame without guessing.
+        //
+        // **Counted against this frame's staged count and nothing longer.**
+        // `Counters::staged` goes back to zero where a commit seals, so the cap is
+        // per frame by the same line that ends a frame; a count over the run
+        // would refuse every delta once a client had sent fifty in its life.
+        //
+        // The commit is recognised by its opcode and never counted or refused:
+        // it is what closes the frame, and a cap that refused it would hold the
+        // frame open for ever. A malformed entry past the cap is answered as
+        // capped rather than decoded, which costs a client nothing it could act
+        // on: it was past the quota whatever its bytes said.
+        let cap = u64::from(self.plan.deltas_per_frame_max);
+        if entry.opcode != f_abi::scene::op::COMMIT && self.counters.staged >= cap {
+            self.counters.capped += 1;
+            return Some(Cqe {
+                user_data: entry.user_data,
+                result: error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED),
+                ext: cap,
+                ..Cqe::ZERO
+            });
+        }
         let answered = match self.batch.offer(entry, payload) {
             Ok(Offered::Staged) => {
                 // The instant the frame opened, taken at the first delta that
@@ -993,6 +1044,13 @@ impl<'a> Held<'a> {
             aim: Aim { scanout_nanos: self.story.decision.scanout_nanos },
         };
         self.waits.frame(ordinal, fitted, &mut window);
+        // **The frame has been submitted, so the patch goes back out of the
+        // graph.** It was the submitted frame's and never the client's, and a
+        // retained graph still holding it would hand the next frame's latch its
+        // own previous patch to call *committed*. `crate::latch`'s *the patch is
+        // the submitted frame's* is the argument; the `bool` is dropped because
+        // `LateLatch::restores` beside `LateLatch::latches` already says it.
+        let _restored = self.latch.restore(self.graph);
     }
 }
 
@@ -1001,10 +1059,12 @@ impl<'a> Held<'a> {
 ///
 /// It exists because [`crate::waits::Between`] hands out a moment and this is
 /// what this component does with one. Three borrows and no state: the graph to
-/// patch, the pointer to patch it from, and the instant to aim at.
+/// patch, the pointer to patch it from, and the instant to aim at. What it
+/// patches is taken back out by [`Held::close`] once the chain driver returns,
+/// so the patch lives exactly as long as the frame it was made for.
 struct Window<'g, 'l> {
     /// The retained scene, which the latch is the one editor of outside a
-    /// commit.
+    /// commit, and only for the length of one submission.
     graph: &'g mut Arena,
     /// The pointer, and the record of what it did.
     latch: &'l mut LateLatch,
@@ -1118,8 +1178,14 @@ mod tests {
             scanout_period_nanos: PERIOD_NANOS,
             margin_nanos: MARGIN_NANOS,
             pointer_node: NO_NODE,
+            deltas_per_frame_max: CAP,
         }
     }
+
+    /// The cap these tests are told, which is the one
+    /// `user/compositor/manifest.toml` declares and RFC 0128 argues: section
+    /// 07's *five to fifty nodes*. Unit: deltas per frame.
+    const CAP: u32 = 50;
 
     /// A sixty-hertz frame. Unit: nanoseconds.
     const PERIOD_NANOS: u64 = 16_666_667;
@@ -1283,6 +1349,78 @@ mod tests {
         assert_eq!(held.live(), 0);
     }
 
+    /// One creation under node 1, or node 1 itself as the root, in the shape
+    /// `kernel/src/compositor.rs`'s capped half sends.
+    fn creation(node: u32) -> (Sqe, [u8; PAYLOAD_BYTES]) {
+        let parent = if node == 1 { NO_NODE } else { 1 };
+        wire(
+            Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind: kind::TRANSFORM }),
+            0,
+        )
+    }
+
+    /// Offer creations `nodes` and then a commit, and answer how many of the
+    /// creations came back capped. Every answer is required to be either clean
+    /// or `RESOURCE/QUOTA_EXHAUSTED` carrying the cap, and the commit clean.
+    fn frame_of(
+        held: &mut Held<'_>,
+        clock: &mut Ticking,
+        nodes: core::ops::RangeInclusive<u32>,
+        token: u64,
+    ) -> u64 {
+        let quota = error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED);
+        let mut capped = 0;
+        for node in nodes {
+            let (entry, payload) = creation(node);
+            let answer = held
+                .offer(&entry, &payload, clock.next())
+                .expect("an offer with no flag completes");
+            if answer.result != 0 {
+                assert_eq!((answer.result, answer.ext), (quota, u64::from(CAP)), "node {node}");
+                capped += 1;
+            }
+        }
+        let (commit, payload) = wire(Entry::Commit(Commit { frame_token: token }), 1_000_000_000);
+        let answer = held.offer(&commit, &payload, clock.next()).expect("a commit completes");
+        assert_eq!(answer.result, 0, "the commit that closes frame {token:#x} was refused");
+        capped
+    }
+
+    /// **`E3-B07e`'s enforcement, at host level.** A frame of sixty deltas
+    /// against a cap of fifty: fifty applied, ten answered
+    /// `RESOURCE/QUOTA_EXHAUSTED` with the cap in `ext` and **not offered to the
+    /// batch**, the commit accepted and the frame closed. Then a frame of eight,
+    /// all of them applied — the count is the frame's and not the run's.
+    ///
+    /// The census is the witness a counter cannot fake: `live` is the arena's
+    /// own count of what is in it, so a cap that refused the answers and let the
+    /// deltas through anyway, or a batch poisoned by the excess, moves it.
+    #[test]
+    fn a_frame_past_its_cap_is_refused_the_excess_and_still_closes() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan(), &Theme::DEFAULT);
+        let mut clock = Ticking::new();
+
+        assert_eq!(
+            frame_of(&mut held, &mut clock, 1..=60, 0x21),
+            10,
+            "sixty against a cap of fifty"
+        );
+        assert_eq!(held.counters().frames, 1, "the capped frame did not close");
+        assert_eq!(held.counters().edits, u64::from(CAP));
+        assert_eq!(held.live(), u64::from(CAP), "the graph holds more or fewer than the cap");
+        assert_eq!(held.counters().capped, 10);
+        assert_eq!(held.counters().refused, 0, "a capped delta was counted as a refusal");
+        assert_eq!(held.counters().staged, 0);
+
+        assert_eq!(frame_of(&mut held, &mut clock, 61..=68, 0x22), 0, "the cap outlived its frame");
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.live(), u64::from(CAP) + 8);
+        assert_eq!(held.counters().capped, 10);
+        assert_eq!(held.counters().token, 0x22);
+    }
+
     /// A clock that ticks once per entry offered.
     ///
     /// This is what the *frame* is, from this component's side: something that
@@ -1358,6 +1496,7 @@ mod tests {
             scanout_period_nanos: PERIOD_NANOS,
             margin_nanos: MARGIN_NANOS,
             pointer_node: NO_NODE,
+            deltas_per_frame_max: CAP,
         }
     }
 
