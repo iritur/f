@@ -8,9 +8,29 @@
 //! It is the **client's half** of `E3-B01f`. `user/compositor` is the component:
 //! the graph, the frame under construction, the serve loop and the tally, in a
 //! crate that forbids `unsafe`. What is here is everything a client does around
-//! one — allocate a ring, stand the component up on a core of its own, submit
-//! two frames' worth of scene deltas, reap the completions, and then read what
-//! the component published and judge it against what was asked for.
+//! one — tell it where its rings are, submit two frames' worth of scene deltas,
+//! reap the completions, and then read what the component published and judge
+//! it against what was asked for.
+//!
+//! # Where the component runs, since RFC 0129
+//!
+//! **In its place.** The three halves that stand a compositor up are served by
+//! `component::demonstrate` against the occupant of the compositor's own place,
+//! with [`Placed`] as the client, so the instance a supervisor stops for a
+//! timeout is the instance whose tree the reading came from. Until RFC 0129 this
+//! file stood a compositor up *beside* the place with `process::prepare_server`,
+//! and the reading on the supervisor's row was that instance's while the
+//! occupant stopped and restarted was the place's own, which had never run — RFC
+//! 0126's narrowing. The reason it ran beside was not the one the next section
+//! gave: the manifest declared no `board` and no `data` need, so a spawned
+//! occupant had nowhere to be told where its rings were. [`Placed`] says it at
+//! length; a manifest without them is refused by name in the lifecycle, and
+//! nothing falls back to a stand-up.
+//!
+//! What moved is who built the instance. The script, the board, the clock, the
+//! doorbell, the stop and every verdict below are unchanged; the place's account
+//! paid for every page, the frame's root mounts the tree, and two words say
+//! which instance ran — [`Report::served`].
 //!
 //! It is **not** a second scene graph. There is one arena, in `f-scene`, and
 //! nothing here holds a node: what this file knows about the scene is what its
@@ -21,12 +41,13 @@
 //!
 //! # Why the frame is the client, and what that costs the claim
 //!
-//! Because there is no other client. `E1-B05`'s ring-3 supervisor does not yet
-//! hand a place's occupant a core *and* a peer, so the only thing in this boot
-//! that can hold the far end of a channel is the frame — the arrangement every
-//! datapath boot in this tree has, recorded under the same reversal. `CHAOS_GAP`
-//! in xtask carries what is still owed, and a fourth component in the same
-//! position widens nothing.
+//! Because there is no other client. Nothing in this build holds the far end of
+//! a scene ring but the frame — the arrangement every datapath boot in this tree
+//! has. The sentence that stood here said the supervisor did not hand a place's
+//! occupant a core *and* a peer; `component::Datapath` has done that for the
+//! block place since `E1-B05`, and it is how this file's client now reaches the
+//! compositor's place. What is left of the sentence is the client: the peer is
+//! still the frame.
 //!
 //! What it costs is worth stating plainly. *Client* here means **the far end of
 //! a real channel across a real privilege boundary**: the deltas are real
@@ -115,8 +136,7 @@ use f_interface::token::{Resolved, Theme, Token, resolve};
 use f_ring::{Arena, Bell, Collector, Hardware, Mapping, Path, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
-use crate::paging;
-use crate::process::{self, ServerPlan};
+use crate::process;
 
 /// The frame's address for the board, and the component's, required to agree by
 /// the machine rather than by two comments.
@@ -359,6 +379,16 @@ const _: () = {
 /// so what the component refuses is the *size* rather than a region that was
 /// never described. A zero would have exercised a different refusal and called
 /// it this one.
+///
+/// **Described, and since RFC 0129 no longer mapped at this size.** A place maps
+/// the heap its manifest declares out of its own account, so the starved
+/// occupant has the whole of it mapped and two pages *described* — the prologue
+/// is the frame's to write and is what the component reads. That is a narrowing
+/// and it is named: this half now proves the component refuses on the size it is
+/// told, not on the size it could touch. *What would reverse this:* a place that
+/// maps a heap smaller than its manifest declares, which is a spawn taking a
+/// quantity from somewhere other than the record — or a second component file
+/// whose manifest declares two pages.
 /// Unit: bytes.
 const STARVED_HEAP_BYTES: u64 = 8192;
 
@@ -523,6 +553,22 @@ pub enum Trouble {
     /// A verdict that folded the two would report a missing wakeup as a broken
     /// compositor.
     NotParked,
+    /// A half that stands a compositor up was asked of the path that stands none
+    /// up, or the other way round.
+    ///
+    /// **Its own variant because there is no second path, and a fallback is the
+    /// defect.** Since RFC 0129 the serving halves are served from the
+    /// compositor's place by the component lifecycle, and nothing in this file
+    /// stands one up beside the place — so a boot that reached here for one had
+    /// its halves routed wrong, and a stand-up here would put RFC 0126's gap
+    /// back green.
+    Placed,
+    /// The lifecycle never served the place this client was built for, so there
+    /// is nothing to judge.
+    ///
+    /// A red line and not an empty report: a boot that asked for a compositor
+    /// half and never ran it would otherwise print a verdict over zeroes.
+    NotServed,
 }
 
 impl Trouble {
@@ -544,29 +590,16 @@ impl Trouble {
             Self::Refused => "the ring refused a submission the client had room for",
             Self::Admission => "the admission probe could not stake an account",
             Self::NotParked => "the component never stopped its core, so nothing was asleep",
+            Self::Placed => {
+                "a serving half is served from the compositor's place and there is no second \
+                 path that stands one up beside it"
+            }
+            Self::NotServed => {
+                "the compositor's place was never served, so there is no run to judge — the \
+                 component lifecycle did not reach it"
+            }
         }
     }
-}
-
-/// Where and for how long the component runs.
-///
-/// A struct because the five travel together and always will: they are one
-/// decision — *which core, on what clock, for how long* — and threading them as
-/// five arguments is what made `objects::demonstrate`'s signature wider than
-/// clippy's bound and a reader's patience.
-pub struct Scheduling {
-    /// The physical address of the frame the **frame's** state tree is published
-    /// in, which every shape maps read-only. The component's own tree is a
-    /// different page and this file publishes it. Unit: bytes, physical.
-    pub tree: u64,
-    /// Which core the component is allocated. Unit: none — a core index.
-    pub cpu: usize,
-    /// The rate that core arms its own timer at. Unit: hertz.
-    pub hz: u32,
-    /// How many ticks it asks for. Unit: timer ticks.
-    pub target: u64,
-    /// The timestamp counter's rate, for bounding the waits. Unit: kilohertz.
-    pub tsc_khz: u64,
 }
 
 /// What the boot saw, from both sides.
@@ -664,6 +697,48 @@ pub struct Report {
     pub heap: u64,
     /// What the doorbell did, on the half that has one.
     pub bells: Bells,
+    /// Which occupant of the compositor's place was served, and the physical
+    /// page its tree is — `None` on the two halves that stand nothing up.
+    ///
+    /// `E3-B05e`'s identity, from the client's side. The component reports the
+    /// epoch it read off its own control ring (`Board::epoch`) and the verdict
+    /// requires the two to agree; the page is printed so `cargo xtask
+    /// compositor` can hold it equal to the page the lifecycle copied the
+    /// supervisor's reading from and the page it unmounted when it stopped the
+    /// occupant. RFC 0129.
+    /// Unit: instances, and bytes, physical.
+    pub served: Option<(u32, u64)>,
+}
+
+impl Report {
+    /// A report of nothing having been stood up: every count zero, no board, no
+    /// tree, no bells, nothing admitted — what a half that asked nothing is
+    /// entitled to, which each half then overrides for what it did ask.
+    fn nothing(half: Half, image: u64) -> Self {
+        Self {
+            half,
+            submitted: 0,
+            completed: 0,
+            refused: 0,
+            board: Board::default(),
+            tree_nodes: 0,
+            tree_blank: 0,
+            tree_before: [0; WORDS],
+            tree_after: 0,
+            tree: [0; WORDS],
+            submitted_deadline: 0,
+            last_tick: 0,
+            admitted: false,
+            muted: 0,
+            backend_admitted: false,
+            floorless: 0,
+            reported: 0,
+            image,
+            heap: 0,
+            bells: Bells::default(),
+            served: None,
+        }
+    }
 }
 
 /// What the doorbell did, from both ends of it.
@@ -956,6 +1031,11 @@ pub struct Board {
     pub latch_unmoved_after: u64,
     /// How many nodes that fold walked. Unit: nodes.
     pub latch_walked: u64,
+    /// Which occupant of its place the component is, as it read the epoch off
+    /// its own control ring's header, plus one — zero for a run that adopted no
+    /// control ring. `reported::EPOCH` argues the word. Unit: none — an epoch
+    /// plus one.
+    pub epoch: u64,
 }
 
 impl Board {
@@ -1037,6 +1117,7 @@ impl Board {
             latch_unmoved_before: board.read64(reported::LATCH_UNMOVED_BEFORE).ok()?,
             latch_unmoved_after: board.read64(reported::LATCH_UNMOVED_AFTER).ok()?,
             latch_walked: board.read64(reported::LATCH_WALKED).ok()?,
+            epoch: board.read64(reported::EPOCH).ok()?,
         })
     }
 }
@@ -1272,12 +1353,52 @@ impl Report {
     ///
     /// A sentence for the boot log, naming the clause that did not hold.
     pub fn verdict(&self) -> Result<(), &'static str> {
+        self.served_held()?;
         match self.half {
             Half::Mute => self.mute_verdict(),
             Half::Starved => self.starved_verdict(),
             Half::Serve => self.serve_verdict(),
             Half::Floorless => self.floorless_verdict(),
             Half::Wake => self.wake_verdict(),
+        }
+    }
+
+    /// Which instance ran, for the three halves that stand one up. RFC 0129.
+    ///
+    /// **The component's own account of which occupant it is, against the
+    /// occupant the lifecycle served.** The frame wrote the place's occupant
+    /// count into the control ring's header when it spawned the instance; the
+    /// component read it back through the adoption and reported it plus one.
+    /// Neither number is derived from the other: one is the `Instance` the
+    /// lifecycle handed a core, the other is what that core found in the ring it
+    /// was given. A compositor stood up by any other builder describes its rings
+    /// with whatever epoch *that* builder chose, and this is where the two part.
+    ///
+    /// Required on every serving half, the starved one included — a supervisor
+    /// judges the starved reading exactly as it judges a serving one's, so it
+    /// owes the same answer to *which instance published this*. The two halves
+    /// that stand nothing up are required to report no instance at all.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the boot log.
+    fn served_held(&self) -> Result<(), &'static str> {
+        match (self.half, self.served) {
+            (Half::Mute | Half::Floorless, None) => Ok(()),
+            (Half::Mute | Half::Floorless, Some(_)) => {
+                Err("a half that stands no compositor up reports an instance it served")
+            }
+            (Half::Serve | Half::Starved | Half::Wake, None) => {
+                Err("a serving half reports no instance, so nothing says it ran in its place")
+            }
+            (Half::Serve | Half::Starved | Half::Wake, Some((epoch, _))) => {
+                if self.board.epoch != u64::from(epoch) + 1 {
+                    return Err("the component's own control ring names a different occupant \
+                                than the one the lifecycle served, so the instance that published \
+                                is not the instance in the place");
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2164,6 +2285,20 @@ fn rules_owed(resolved: &Resolved) -> u64 {
 
 /// Print what happened, one subject per line.
 pub fn report_lines(report: &Report) {
+    // Which instance, first, because every number below is that instance's.
+    // `cargo xtask compositor` reads this line and holds its epoch and page
+    // against the lifecycle's `liveness` and `timeout` lines — the harness half
+    // of RFC 0129's identity, and the kernel half is `Report::served_held`.
+    if let Some((epoch, tree_at)) = report.served {
+        crate::kprintln!(
+            "  compositor    served in its place: occupant epoch {}, whose own control ring says \
+             epoch {} (reported plus one: {}); its tree is the page at {:#x}",
+            epoch,
+            report.board.epoch.saturating_sub(1),
+            report.board.epoch,
+            tree_at,
+        );
+    }
     crate::kprintln!(
         "  compositor    a component holding the scene graph at ring 3, and the {} half: {}",
         report.half.name(),
@@ -2471,25 +2606,33 @@ pub(crate) fn heap_declared(record: &Record) -> Option<u64> {
     None
 }
 
-/// Stand `user/compositor` up as a server and be its client, or put its record
-/// past the admission a spawn performs.
+/// Put the compositor's record past the admission a spawn performs, or describe a
+/// machine below the bottom of the ladder and be refused — the two halves that
+/// stand no component up.
+///
+/// **The three halves that do stand one up are not here any more**, and that is
+/// RFC 0129. They are served from the compositor's own place by
+/// `component::demonstrate`, with [`Placed`] as the client, so the occupant a
+/// supervisor judges and restarts is the one whose tree it judged. This
+/// function used to stand a compositor up beside the place with
+/// `process::prepare_server` for all five, and the reading that crossed onto the
+/// supervisor's row was that instance's — RFC 0126's narrowing, now reversed.
 ///
 /// # Errors
 ///
-/// [`Trouble`], every variant of which fails the boot.
+/// [`Trouble`], every variant of which fails the boot. A serving half handed to
+/// this function is [`Trouble::Placed`], by name: there is no second path that
+/// stands one up beside the place.
 ///
 /// # Safety
 ///
-/// As [`process::prepare_server`]: `kernel` must be the live kernel space,
-/// `frames` its allocator, and `on.cpu` a started, idle core that is not this
-/// one. The direct map must be live and cover every boot module.
+/// `frames` must be the kernel's allocator on its direct map, called on the boot
+/// processor with nothing running. The direct map must be live and cover every
+/// boot module.
 pub unsafe fn demonstrate(
     frames: &mut FrameAllocator,
-    kernel: &paging::AddressSpace,
-    features: paging::Features,
     half: Half,
     boot: &crate::BootInfo,
-    on: Scheduling,
 ) -> Result<Report, Trouble> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -2505,14 +2648,13 @@ pub unsafe fn demonstrate(
         return Err(Trouble::HeapDisagrees);
     }
 
-    if half == Half::Mute {
+    match half {
         // SAFETY: the caller's guarantee about the boot processor and the
         // allocator, passed down; nothing is running.
-        return unsafe { mute(frames, &record, image) };
+        Half::Mute => unsafe { mute(frames, &record, image) },
+        Half::Floorless => Ok(floorless(image)),
+        Half::Serve | Half::Starved | Half::Wake => Err(Trouble::Placed),
     }
-
-    // SAFETY: the caller's guarantee, passed down unchanged.
-    unsafe { serve(frames, kernel, features, half, &record, image, on) }
 }
 
 /// The refusal half: one record, twice, through the admission a spawn performs.
@@ -2543,412 +2685,535 @@ unsafe fn mute(
         .map_err(|_| Trouble::Admission)?;
 
     Ok(Report {
-        half: Half::Mute,
-        submitted: 0,
-        completed: 0,
-        refused: 0,
-        board: Board::default(),
-        tree_nodes: 0,
-        tree_blank: 0,
-        tree_before: [0; WORDS],
-        tree_after: 0,
-        tree: [0; WORDS],
-        submitted_deadline: 0,
-        last_tick: 0,
         admitted: declared.is_ok(),
         muted: refused.err().unwrap_or(0),
-        // Not this half's question either way round: no machine was described
-        // here and no compositor was stood up, so both words are the ones a
-        // half that asked nothing is entitled to.
-        backend_admitted: false,
-        floorless: 0,
-        reported: 0,
-        image: image.len() as u64,
-        heap: 0,
-        // No core, no ring, no doorbell: this half probes a record.
-        bells: Bells::default(),
+        ..Report::nothing(Half::Mute, image.len() as u64)
     })
 }
 
-/// The serving half.
+/// RFC 0080's refusal, before a page is spent.
 ///
-/// # Safety
+/// What this half says the machine reports, and whether a machine reporting it
+/// may be given a compositor at all. The control goes first and is the same
+/// function over this boot's own machine, for `mute`'s reason: a refusal that
+/// refused everything would look exactly like this one.
 ///
-/// As [`demonstrate`].
-unsafe fn serve(
-    frames: &mut FrameAllocator,
-    kernel: &paging::AddressSpace,
-    features: paging::Features,
-    half: Half,
-    record: &Record,
-    image: &'static [u8],
-    on: Scheduling,
-) -> Result<Report, Trouble> {
-    let Scheduling { tree, cpu, hz, target, tsc_khz } = on;
+/// **Nothing is stood up whatever the answer**, and that is the clause rather
+/// than a shortcut: *refused a compositor* means nothing was stood up, so the
+/// verdict requires every page to be absent. Before RFC 0129 an admitted
+/// floorless machine would have gone on to the stand-up below the refusal and
+/// the verdict would have caught a compositor that existed; now it catches a
+/// `floorless` word of zero, which is the same failure read one step earlier.
+fn floorless(image: &[u8]) -> Report {
+    let reported = Half::Floorless.reported();
+    Report {
+        backend_admitted: admit_backend(BACKEND_CAPABILITIES).is_ok(),
+        floorless: admit_backend(reported).err().unwrap_or(0),
+        ..Report::nothing(Half::Floorless, image.len() as u64)
+    }
+}
 
-    // --- RFC 0080's refusal, before a page is spent -------------------------
-    //
-    // What this half says the machine reports, and whether a machine reporting
-    // it may be given a compositor at all. The control goes first and is the
-    // same function over this boot's own machine, for `mute`'s reason: a
-    // refusal that refused everything would look exactly like this one.
-    //
-    // **Here rather than after the rings, and the position is the clause.**
-    // *Refused a compositor* means nothing was stood up, so the refusal has to
-    // come before the frame the channel lives in, before the address space,
-    // before the tree — and the verdict below says so by requiring every one of
-    // those to be absent. A check further down would refuse a compositor that
-    // already existed, which is a compositor that exited.
-    let reported = half.reported();
-    let backend_admitted = admit_backend(BACKEND_CAPABILITIES).is_ok();
-    if let Err(code) = admit_backend(reported) {
-        return Ok(Report {
+/// The client of a compositor served **from its place**: the three halves that
+/// stand one up, driven by `component::demonstrate` against the place's own
+/// occupant. RFC 0129.
+///
+/// # Why this is a client and not a stand-up
+///
+/// Because a stand-up is what made the reading a supervisor judged somebody
+/// else's. RFC 0126 recorded it: this file used to build a compositor beside its
+/// place with `process::prepare_server`, read two words off its tree, and hand
+/// them to the lifecycle, which put them on the row of the place's own occupant
+/// — an instance that had never run — and then stopped and restarted *that*
+/// one. Every link was real and the subject was two compositors.
+///
+/// # Why it ran beside its place, and what answers it
+///
+/// **Its manifest declared no `board` and no `data` need.** A spawn maps a
+/// routing page and ring memory only for a manifest that declares them, so the
+/// place's occupant had nowhere to learn where its rings were and its serving
+/// life would have ended `NO_ROUTING` before it looked. The file header's reason
+/// — *there is no other client* — had stopped being the reason when
+/// `component::Datapath` gave a place's occupant a client inside the lifecycle;
+/// the missing declaration was what was left, and it is the wall `E1-B05` found
+/// for `user/virtio-blk` and answered by declaring both. So is this one. A
+/// manifest that declares neither is refused by name in
+/// `component::demonstrate` — `Failure::Unserved` — and nothing falls back to a
+/// stand-up beside the place.
+///
+/// # What is the same, and what is not
+///
+/// The script, the rings' shape, the board, the clock, the doorbell, the stop
+/// and the verdict are this file's and unchanged: [`drive`] and [`drive_batch`]
+/// are called exactly as they were. What moved is who built the instance — the
+/// place's account paid for every page, the frame's root mounts its tree, and a
+/// supervisor can end it — and two words: the occupant's `epoch`, which the
+/// component reads off its own control ring and reports, and the physical page
+/// its tree is, which the lifecycle prints at the copy and at the teardown.
+pub struct Placed {
+    /// Which half.
+    half: Half,
+    /// How long the image is. Unit: bytes.
+    image: u64,
+    /// How much heap this half describes to the component. Unit: bytes.
+    described: u64,
+    /// Whether this boot's own machine was admitted a compositor.
+    backend_admitted: bool,
+    /// What was taken before the core ran, `None` until [`Self::prepare`].
+    before: Option<Before>,
+    /// What the client saw while the occupant ran, `None` until `drive`.
+    seen: Option<Result<Seen, Trouble>>,
+    /// The one batch the waking half publishes.
+    batch: Batched,
+    /// The doorbell's own accounting, and the path it chose.
+    rung: (&'static str, u64, u64),
+    /// Which core the client drove from. Unit: none — a core index.
+    client: usize,
+    /// What was taken after the core came back, `None` until [`Self::ended`].
+    after: Option<After>,
+}
+
+/// What a [`Placed`] reads off the occupant before its first instruction.
+#[derive(Clone, Copy)]
+struct Before {
+    /// Nodes the schema carries. Unit: nodes.
+    nodes: u32,
+    /// The blank tree's fold. Unit: none — a fold.
+    blank: u64,
+    /// The fifteen words, read while nothing had written them. Unit: as
+    /// [`Report::tree`].
+    words: [u64; WORDS],
+    /// The worker core's four doorbell counts, which are the core's and not the
+    /// run's: a place's occupant runs on a core the supervisor has already run
+    /// on, so what this run caused is the difference.
+    ///
+    /// **A guard this boot does not exercise, said rather than implied.** Nothing
+    /// that runs on the worker core before the compositor — the supervisor's
+    /// consultations — halts it, so these read zero today, and a mutation that
+    /// took the counts whole left the wake half green. The subtraction is here
+    /// for the first earlier occupant that parks on that core, which would
+    /// otherwise have its halts charged to this run. Unit: as [`Bells`].
+    counts: [u64; 4],
+    /// Which occupant of the place this is. Unit: instances.
+    epoch: u32,
+    /// The physical page its tree is. Unit: bytes, physical.
+    tree_at: u64,
+    /// Which core it runs on. Unit: none — a core index.
+    cpu: usize,
+}
+
+/// What a [`Placed`] reads off the occupant after its core came back.
+#[derive(Clone, Copy)]
+struct After {
+    /// Its board, or `None` where it never finished writing it.
+    board: Option<Board>,
+    /// What the routing page carried at `at::BACKEND_CAPABILITIES` at the end.
+    reported: u64,
+    /// The tree's fold at the end. Unit: none — a fold.
+    fold: u64,
+    /// The fifteen words at the end. Unit: as [`Report::tree`].
+    words: [u64; WORDS],
+    /// The worker core's four doorbell counts at the end. Unit: as [`Bells`].
+    counts: [u64; 4],
+}
+
+impl Placed {
+    /// A client for `half`, which must be one of the three that stand a
+    /// compositor up.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NoComponent`], [`Trouble::NoHeap`] and
+    /// [`Trouble::HeapDisagrees`] exactly as [`demonstrate`] refuses them, before
+    /// the lifecycle is asked to build anything; [`Trouble::Placed`] for a half
+    /// that stands nothing up, said rather than served.
+    ///
+    /// # Safety
+    ///
+    /// The direct map must be live and cover every boot module.
+    pub unsafe fn new(half: Half, boot: &crate::BootInfo) -> Result<Self, Trouble> {
+        // SAFETY: the caller's guarantee.
+        let (image, record) = unsafe { found(boot) }.ok_or(Trouble::NoComponent)?;
+        let declared = heap_declared(&record).ok_or(Trouble::NoHeap)?;
+        if declared != routing::HEAP_BYTES {
+            return Err(Trouble::HeapDisagrees);
+        }
+        let described = match half {
+            // What the manifest declares, or — on the starved half — two pages,
+            // which is the one number in this plan the component is asked to
+            // disbelieve.
+            Half::Starved => STARVED_HEAP_BYTES,
+            Half::Serve | Half::Wake => routing::HEAP_BYTES,
+            Half::Mute | Half::Floorless => return Err(Trouble::Placed),
+        };
+        Ok(Self {
             half,
-            submitted: 0,
-            completed: 0,
-            refused: 0,
-            board: Board::default(),
-            tree_nodes: 0,
-            tree_blank: 0,
-            tree_before: [0; WORDS],
-            tree_after: 0,
-            tree: [0; WORDS],
-            submitted_deadline: 0,
-            last_tick: 0,
-            // Not this half's question: no record was put past the admission a
-            // spawn performs, and saying otherwise would put a true-looking
-            // word in a report that had not earned it.
-            admitted: false,
-            muted: 0,
-            backend_admitted,
-            floorless: code,
-            // No page was ever written, so there is nothing to report having
-            // carried. The verdict requires this to be zero, which is the same
-            // clause as *nothing was spent* read from the page's side.
-            reported: 0,
             image: image.len() as u64,
-            heap: 0,
-            // Nothing was stood up, so nothing could be rung.
-            bells: Bells::default(),
+            described,
+            backend_admitted: false,
+            before: None,
+            seen: None,
+            batch: Batched::default(),
+            rung: ("Polling", 0, 0),
+            client: 0,
+            after: None,
+        })
+    }
+
+    /// Which place this client serves, by its manifest's label.
+    #[must_use]
+    pub const fn label() -> &'static [u8] {
+        b"compositor"
+    }
+
+    /// Which life the occupant is entered at.
+    #[must_use]
+    pub const fn life() -> u32 {
+        life::SERVE
+    }
+
+    /// Which two nodes go onto the supervisor's row, in its order: waits
+    /// outstanding, then frames abandoned. The component's own ids, so the frame
+    /// copies by id and never by position.
+    #[must_use]
+    pub const fn liveness() -> [u32; 2] {
+        [node::WAITS, node::TIMEOUTS]
+    }
+
+    /// What the boot saw, once the lifecycle has served the occupant.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NotServed`] for a client the lifecycle never ran — which is a
+    /// boot whose compositor half was asked for and never happened, and is red
+    /// rather than an empty report; the client's own trouble where it had one;
+    /// [`Trouble::BadReport`] for a board the component never finished.
+    pub fn report(&self) -> Result<Report, Trouble> {
+        let (Some(before), Some(seen), Some(after)) = (self.before, self.seen, self.after) else {
+            return Err(Trouble::NotServed);
+        };
+        let seen = seen?;
+        let board = after.board.ok_or(Trouble::BadReport)?;
+        let [delivered, parks, woken, spared] = after.counts;
+        let [was_delivered, was_parks, was_woken, was_spared] = before.counts;
+        let (path, operations, rings) = self.rung;
+        Ok(Report {
+            submitted: seen.submitted,
+            completed: seen.completed,
+            refused: seen.refused,
+            board,
+            tree_nodes: before.nodes,
+            tree_blank: before.blank,
+            tree_before: before.words,
+            tree_after: after.fold,
+            tree: after.words,
+            submitted_deadline: seen.deadline,
+            last_tick: seen.last_tick,
+            // The machine this half described was admitted a compositor, which
+            // is what makes this the positive half of the pair the floorless
+            // half completes: the same function, in the same build, over one
+            // word.
+            backend_admitted: self.backend_admitted,
+            reported: after.reported,
+            heap: self.described,
+            bells: Bells {
+                path,
+                worker: before.cpu,
+                client: self.client,
+                operations,
+                rings,
+                batch_entries: self.batch.entries,
+                batch_operations: self.batch.operations,
+                batch_rings: self.batch.rings,
+                delivered: delivered.saturating_sub(was_delivered),
+                parks: parks.saturating_sub(was_parks),
+                woken: woken.saturating_sub(was_woken),
+                spared: spared.saturating_sub(was_spared),
+            },
+            served: Some((before.epoch, before.tree_at)),
+            ..Report::nothing(self.half, self.image)
+        })
+    }
+}
+
+/// The worker core's four doorbell counts, in [`Bells`]' order.
+fn counts(cpu: usize) -> [u64; 4] {
+    [
+        crate::doorbell::delivered_at(cpu),
+        crate::doorbell::parks_at(cpu),
+        crate::doorbell::woken_at(cpu),
+        crate::doorbell::spared_at(cpu),
+    ]
+}
+
+impl crate::component::Datapath for Placed {
+    fn prepare(
+        &mut self,
+        wired: crate::component::Wired,
+        _frames: &FrameAllocator,
+    ) -> Result<(), &'static str> {
+        // RFC 0080's admission, over this boot's own machine. The positive half
+        // of the pair `floorless` completes, and asked before anything is told
+        // to the occupant: a machine refused here is a compositor that must not
+        // be started, and nothing below this line would be true of it.
+        self.backend_admitted = admit_backend(BACKEND_CAPABILITIES).is_ok();
+        let reported = self.half.reported();
+        if admit_backend(reported).is_err() {
+            return Err("RFC 0080 refused this machine a compositor on a half that serves one");
+        }
+        let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0).why())?;
+        if wired.board == 0 || wired.data == 0 || wired.tree == 0 || wired.heap == 0 {
+            return Err("the compositor's occupant has no board, data ring, tree or heap");
+        }
+
+        // The data ring's header, written by the *grantor* and adopted by the
+        // occupant — `f_ring::adopt`, RFC 0037. Here rather than in the
+        // lifecycle, because the entry count is the client's business, and at
+        // the occupant's own epoch, because a channel to this instance carries
+        // which instance it is.
+        // SAFETY: `wired.data` is the kernel address of a frame the occupant's
+        // account paid for, `FRAME_SIZE` long, frame-aligned and reachable
+        // through the direct map, with no core inside the occupant yet and no
+        // reference into it held anywhere.
+        let described =
+            unsafe { Mapping::describe(wired.data as *mut u8, bytes, ENTRIES, wired.epoch, 0, 0) };
+        described.map_err(|_| Trouble::Channel(0).why())?;
+
+        // **The starved half's one difference, and it is a description.** The
+        // account paid for the heap the manifest declares and `spawn` mapped all
+        // of it; what the component reads is the prologue, and the prologue is
+        // the frame's to write. Two pages here is the number the component is
+        // asked to disbelieve — exactly what `process::prepare_server` described
+        // on this half before RFC 0129, and the component's check is against
+        // what it reads rather than what is mapped, which is the point of it.
+        if self.half == Half::Starved {
+            let starved = u32::try_from(STARVED_HEAP_BYTES).map_err(|_| Trouble::NoHeap.why())?;
+            // SAFETY: `wired.heap` is the direct-map address of the run `spawn`
+            // carved for this occupant's heap and described a moment after; it
+            // is frame-aligned and longer than the prologue, and no core is
+            // inside the occupant yet, so nothing is reading the prologue.
+            unsafe { f_ring::heap::describe(wired.heap, starved) };
+        }
+
+        // The blank tree, read while it is blank. `spawn` wrote the schema out
+        // of the manifest before the first instruction, so a component that is
+        // served and does nothing still reads as *this component has done
+        // nothing* — RFC 0065's distinction, and the reason this snapshot is
+        // worth taking.
+        let blank = state::Reader::at(wired.tree, FRAME_SIZE as u32)
+            .map_err(|_| Trouble::StateTree(0).why())?;
+        let mut words = [0u64; WORDS];
+        for (slot, id) in words.iter_mut().zip(node::WRITTEN) {
+            // `u64::MAX` for an id the schema does not carry, so a manifest and
+            // `routing::node` that disagree fail this half's *blank* clause
+            // rather than passing it with a zero nobody wrote.
+            *slot = blank.value(id).unwrap_or(u64::MAX);
+        }
+
+        // --- what the component is told ---------------------------------------
+        let board =
+            Window::at(wired.board, routing::BYTES).map_err(|_| Trouble::Channel(0).why())?;
+        for (offset, value) in [
+            (at::CONTROL_AT, crate::process::SPAWN_CONTROL),
+            (at::CONTROL_LEN, u64::from(bytes)),
+            (at::DATA_AT, crate::process::BLK_DATA),
+            (at::DATA_LEN, u64::from(bytes)),
+            (at::TREE_AT, crate::process::SPAWN_TREE),
+            (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
+            (at::NEGOTIATED_FEATURES, 0),
+            (at::IDLE_SPINS, IDLE_SPINS),
+            // What the component needs to pace a frame, and none of it is
+            // something a component could have found out for itself: RFC 0004
+            // gives it no clock, nothing tells it about a display, and the
+            // margin is a policy. The clock reading is a placeholder the client
+            // overwrites before every entry.
+            (at::TICK_NANOS, 0),
+            (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
+            (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
+            // What this half says the machine reports, and the same word
+            // `admit_backend` was given above — one function, so a boot cannot
+            // admit one machine and describe another.
+            (at::BACKEND_CAPABILITIES, reported),
+            // **Whether this frame will ring, which is a statement about the
+            // frame and not a mode of the component.** Only the wake half
+            // rings; whether an interrupt reaches that core is a fact about a
+            // vector, an interrupt controller and a second core, and all three
+            // are on this side of the boundary.
+            (at::DOORBELL, if self.half == Half::Wake { bell::RING } else { bell::POLL }),
+        ] {
+            board.write64(offset, value).map_err(|_| Trouble::Channel(0).why())?;
+        }
+        // The magic last, which is the whole of the discipline: a component that
+        // reads a page this loop never finished finds a zero rather than a
+        // plausible address.
+        board.write64(at::MAGIC, routing::MAGIC).map_err(|_| Trouble::Channel(0).why())?;
+
+        self.before = Some(Before {
+            nodes: blank.nodes(),
+            blank: blank.snapshot(),
+            words,
+            counts: counts(wired.cpu),
+            epoch: wired.epoch,
+            tree_at: wired.tree_physical,
+            cpu: wired.cpu,
+        });
+        Ok(())
+    }
+
+    fn drive(
+        &mut self,
+        _frames: &mut FrameAllocator,
+        wired: crate::component::Wired,
+        _killer: &mut dyn crate::component::Killer,
+    ) -> Result<crate::component::Drove, &'static str> {
+        let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0).why())?;
+        self.client = crate::arch::x86_64::current_cpu();
+        // Both ends adopted rather than described, because this client is not
+        // the grantor of either: `spawn` wrote the control ring's header out of
+        // the occupant's own account, and `prepare` wrote the data ring's before
+        // the core was told anything. A second `describe` would reset a ring the
+        // occupant has already adopted.
+        //
+        // SAFETY: `wired.control` and `wired.data` are kernel addresses of two
+        // frames the occupant's account paid for, each `FRAME_SIZE` long,
+        // frame-aligned and reachable through the direct map; each has exactly
+        // one other end and it is the occupant's. Every accessor hands out
+        // atomics and `UnsafeCell`s rather than references.
+        let control = unsafe {
+            Mapping::adopt(
+                wired.control as *mut u8,
+                bytes,
+                feature::CONTROL_EVENTS,
+                feature::CONTROL_EVENTS,
+            )
+        };
+        let Ok(control) = control else { return Err(Trouble::Channel(0).why()) };
+        // SAFETY: as above.
+        let client_end = unsafe { Mapping::adopt(wired.data as *mut u8, bytes, 0, 0) };
+        let Ok(client_end) = client_end else { return Err(Trouble::Channel(0).why()) };
+        let Ok(board) = Window::at(wired.board, routing::BYTES) else {
+            return Err(Trouble::Channel(0).why());
+        };
+        let (Some(reaper), Some(mut producer), Some(notices)) = (
+            Collector::new(client_end.completions()),
+            Producer::new(client_end.channel()),
+            Poster::new(control.completions()),
+        ) else {
+            return Err(Trouble::Channel(0).why());
+        };
+        let arena = client_end.arena();
+
+        // --- the doorbell -----------------------------------------------------
+        //
+        // Selected the way `f_ring::doorbell::Path` says and not by this half's
+        // name: what this half varies is the *hardware* half — whether one core
+        // may interrupt another — because that is the honest description of the
+        // difference between a boot that rings and one that does not.
+        let hardware =
+            Hardware { user_interrupts: false, cross_core_interrupts: self.half == Half::Wake };
+        let path = Path::select(client_end.negotiated(), hardware);
+        let Ok(mut doorbell) = Bell::new(path, hardware, crate::doorbell::Ipi::to(wired.cpu))
+        else {
+            return Err(Trouble::Channel(0).why());
+        };
+
+        // This boot's own clock, and the only one the component will ever see.
+        // `PACING_SEED` is the whole of what decides the readings below, which
+        // is what lets a pacing estimate be printed in a boot log at all.
+        let mut env = SeededEnv::new(PACING_SEED, 0);
+        let ends = Wire { reaper: &reaper, arena: &arena, board: &board };
+        let tsc_khz = wired.tsc_khz;
+        let driven = match self.half {
+            Half::Serve => drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false),
+            Half::Wake => {
+                // The script first, one entry at a time and each one waited for,
+                // so that every submission lands on a core this client has
+                // watched stop. Then the third frame, whole, as the one batch the
+                // second clause is about.
+                drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true).and_then(
+                    |mut seen| {
+                        self.batch = drive_batch(
+                            &mut producer,
+                            ends,
+                            &mut env,
+                            tsc_khz,
+                            &mut doorbell,
+                            &mut seen,
+                        )?;
+                        Ok(seen)
+                    },
+                )
+            }
+            // A starved component ends before it adopts anything, so a client
+            // that submitted would be waiting for a completion from a component
+            // that has already exited.
+            Half::Starved | Half::Mute | Half::Floorless => {
+                Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
+            }
+        };
+
+        // Told to stop whatever happened above, because a component left serving
+        // a client that has gone is a core this boot never gets back — and rung
+        // for, on the half where it may be asleep: a stop notice goes on the
+        // control ring, which has no wakeup flag of its own, and a doorbell says
+        // only *stop halting*.
+        let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
+        if self.half == Half::Wake {
+            doorbell.submitted(true);
+        }
+        self.rung = (
+            match doorbell.path() {
+                Path::Polling => "Polling",
+                Path::KernelIpi => "KernelIpi",
+                Path::UserInterrupt => "UserInterrupt",
+            },
+            doorbell.operations(),
+            doorbell.rings(),
+        );
+        self.seen = Some(driven);
+        if told.is_err() {
+            return Err(Trouble::Channel(0).why());
+        }
+        match driven {
+            Ok(_) => Ok(crate::component::Drove::Finished),
+            Err(why) => Err(why.why()),
+        }
+    }
+
+    /// Nothing: a compositor reaches no device, so there is nothing it can ask
+    /// the frame for while it runs.
+    fn serve(&mut self, _frames: &mut FrameAllocator) {}
+
+    /// Nothing: every page this client touched is the occupant's account's, and
+    /// it allocates none of its own.
+    fn retained(&mut self, _frames: &mut FrameAllocator) -> u64 {
+        0
+    }
+
+    fn ended(&mut self, wired: crate::component::Wired) {
+        // **After the join and not before it, and that is what makes reading
+        // another core's counters legal rather than lucky.** The mailbox word
+        // the join waits on is stored with `Release` by the worker and loaded
+        // with `Acquire` here, so everything that core wrote before it reported
+        // finished is visible to this one.
+        let counts = counts(wired.cpu);
+        let Ok(board) = Window::at(wired.board, routing::BYTES) else { return };
+        let Ok(reader) = state::Reader::at(wired.tree, FRAME_SIZE as u32) else { return };
+        let mut words = [0u64; WORDS];
+        for (slot, id) in words.iter_mut().zip(node::WRITTEN) {
+            *slot = reader.value(id).unwrap_or(0);
+        }
+        self.after = Some(After {
+            board: Board::of(&board),
+            reported: board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0),
+            fold: reader.snapshot(),
+            words,
+            counts,
         });
     }
-
-    // What the manifest declares, or — on the starved half — two pages, which is
-    // the one number in this plan the component is asked to disbelieve.
-    let described = match half {
-        Half::Starved => STARVED_HEAP_BYTES,
-        Half::Serve | Half::Mute | Half::Floorless | Half::Wake => routing::HEAP_BYTES,
-    };
-    let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0))?;
-
-    // The data ring. The frame writes the header and takes the *client's* end;
-    // the server's end is the component's, at ring 3. Two ends of one region on
-    // two sides of a privilege boundary, which is the whole shape.
-    //
-    // Allocated here rather than inside `prepare_server` for `ServerPlan::data`'s
-    // reason: the frame holds the far end, so this page must not be handed to
-    // `reap`.
-    let wire = frames.alloc_zeroed(crate::mem::Order::FRAME).ok_or(Trouble::Channel(0))?;
-    let at = frames.virt(wire);
-    // SAFETY: `wire` was allocated zeroed just above, is frame-aligned — stronger
-    // than the cache line the layout asks for — and is `FRAME_SIZE` bytes with no
-    // pointer into it held anywhere else.
-    let _ = unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
-    // SAFETY: as above; two ends over one region is what a channel is, and every
-    // accessor hands out atomics and `UnsafeCell`s rather than references.
-    let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
-
-    // SAFETY: the caller's guarantee about `kernel`, `frames` and `cpu`, plus
-    // `wire` being a frame this function allocated and holds the far end of.
-    let (prepared, pages) = unsafe {
-        process::prepare_server(
-            frames,
-            kernel,
-            features,
-            ServerPlan {
-                image,
-                selector: life::SERVE,
-                tree,
-                hz,
-                target,
-                cpu,
-                data: wire.addr(),
-                // No client buffer region, and the zero is the manifest's
-                // declaration made real: this component's ring carries its
-                // payloads `inline`, in the channel's own arena, so a registered
-                // region would be a page nobody ever addresses.
-                buffers: 0,
-                buffer_bytes: 0,
-                // What the manifest declares, or — on the starved half — two
-                // pages, which is the one number in this plan the component is
-                // asked to disbelieve.
-                heap_bytes: described,
-                // The page this task is about. RFC 0065: the schema is the
-                // frame's and the words are the component's.
-                own_tree: true,
-            },
-        )
-    }
-    .map_err(Trouble::Process)?;
-
-    // The component's own tree, written before its first instruction, out of its
-    // own manifest and through the same function the spawn path uses. A
-    // component that is prepared and never scheduled still reads as *this
-    // component has done nothing* rather than as *this component cannot be read*,
-    // which is RFC 0065's distinction and the reason the blank snapshot below is
-    // worth taking.
-    let tree_nodes = crate::component::publish_tree(pages.own_tree as *mut u8, record)
-        .map_err(|_| Trouble::StateTree(0))?;
-    let blank = state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
-    let tree_blank = blank.snapshot();
-    let mut tree_before = [0u64; WORDS];
-    for (slot, id) in tree_before.iter_mut().zip(node::WRITTEN) {
-        // `u64::MAX` for an id the schema does not carry, so a manifest and
-        // `routing::node` that disagree fail this half's *blank* clause rather
-        // than passing it with a zero nobody wrote.
-        *slot = blank.value(id).unwrap_or(u64::MAX);
-    }
-
-    // SAFETY: `pages.control` is the kernel address of a frame `prepare_server`
-    // allocated zeroed for this run and handed to nobody else.
-    let control = unsafe {
-        Mapping::describe(
-            pages.control as *mut u8,
-            bytes,
-            ENTRIES,
-            0,
-            feature::CONTROL_EVENTS,
-            feature::CONTROL_EVENTS,
-        )
-    }
-    .map_err(Trouble::Channel)?;
-
-    // --- what the component is told -----------------------------------------
-    let board = Window::at(pages.board, routing::BYTES).map_err(Trouble::Channel)?;
-    for (offset, value) in [
-        (at::CONTROL_AT, crate::process::SPAWN_CONTROL),
-        (at::CONTROL_LEN, u64::from(bytes)),
-        (at::DATA_AT, crate::process::BLK_DATA),
-        (at::DATA_LEN, u64::from(bytes)),
-        (at::TREE_AT, crate::process::SPAWN_TREE),
-        (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
-        (at::NEGOTIATED_FEATURES, 0),
-        (at::IDLE_SPINS, IDLE_SPINS),
-        // What the component needs to pace a frame, and none of it is something
-        // a component could have found out for itself: RFC 0004 gives it no
-        // clock, nothing tells it about a display, and the margin is a policy.
-        // The clock reading below is a placeholder the client overwrites before
-        // every entry — it is written here so that a component whose first entry
-        // somehow arrived before the first tick reads a number rather than
-        // whatever the page held.
-        (at::TICK_NANOS, 0),
-        (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
-        (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
-        // What this half says the machine reports, and the same word
-        // `admit_backend` was given above — one function, so a boot cannot
-        // admit one machine and describe another.
-        (at::BACKEND_CAPABILITIES, reported),
-        // **Whether this frame will ring, which is a statement about the frame
-        // and not a mode of the component.** On every half but one it says
-        // *nobody rings*, which is what every boot before `E3-B01g` did and is
-        // what keeps those halves' numbers comparable with the runs that
-        // produced them. On the wake half it says the frame rings, and the
-        // component may then stop its core.
-        //
-        // A component that believed this on a frame that did not ring would
-        // hang, which is why it is written here rather than assumed at ring 3:
-        // whether an interrupt reaches that core is a fact about a vector, an
-        // interrupt controller and a second core, and all three are on this side
-        // of the boundary.
-        (at::DOORBELL, if half == Half::Wake { bell::RING } else { bell::POLL }),
-    ] {
-        board.write64(offset, value).map_err(Trouble::Channel)?;
-    }
-    // The magic last, which is the whole of the discipline: a component that
-    // reads a page this loop never finished finds a zero rather than a plausible
-    // address.
-    board.write64(at::MAGIC, routing::MAGIC).map_err(Trouble::Channel)?;
-
-    // SAFETY: the caller vouched `cpu` is started and idle, and `prepare_server`
-    // has written its job. Interrupts are enabled on it, which `run_on`'s
-    // contract requires so that a shootdown can be answered.
-    unsafe { crate::smp::start_on(cpu) }.map_err(Trouble::Scheduled)?;
-
-    let reaper = Collector::new(client_end.completions()).ok_or(Trouble::Channel(0))?;
-    let mut producer = Producer::new(client_end.channel()).ok_or(Trouble::Channel(0))?;
-    let notices = Poster::new(control.completions()).ok_or(Trouble::Channel(0))?;
-    let arena = client_end.arena();
-
-    // --- the doorbell -------------------------------------------------------
-    //
-    // **The path is selected the way `f_ring::doorbell::Path` says and not by
-    // this half's name.** A feature bit is a statement about the protocol and
-    // the hardware is a statement about the silicon; conflating them is how a
-    // channel gets negotiated into an instruction that faults. What this half
-    // varies is the *hardware* half — whether one core may interrupt another —
-    // because that is the honest description of the difference between a boot
-    // that rings and one that does not: the polling halves are the same code
-    // over a machine that cannot ring, which is `Path::Polling`'s own sentence.
-    //
-    // The ringer carries the core, which is why `f_ring` takes an implementor
-    // rather than a function: that crate has no idea what an APIC identifier is
-    // and should not acquire one.
-    let hardware = Hardware { user_interrupts: false, cross_core_interrupts: half == Half::Wake };
-    let path = Path::select(client_end.negotiated(), hardware);
-    let mut doorbell = Bell::new(path, hardware, crate::doorbell::Ipi::to(cpu))
-        .map_err(|_| Trouble::Channel(0))?;
-
-    // The client, on the half that has one. A starved component ends before it
-    // adopts anything, so a client that submitted would be waiting for a
-    // completion from a component that has already exited — which is this
-    // harness measuring its own bound rather than the refusal it came for.
-    // This boot's own clock, and the only one the component will ever see.
-    // `PACING_SEED` is the whole of what decides the readings below, which is
-    // what lets a pacing estimate be printed in a boot log at all.
-    let mut env = SeededEnv::new(PACING_SEED, 0);
-    // Named `ends` rather than `wire`, which in this function is already the
-    // page the channel lives in. Two things called the same thing one scope
-    // apart is how a frame gets freed instead of a struct.
-    let ends = Wire { reaper: &reaper, arena: &arena, board: &board };
-    let mut batch_seen = Batched::default();
-    let driven = match half {
-        Half::Serve | Half::Mute => drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false),
-        Half::Wake => {
-            // The script first, one entry at a time and each one waited for, so
-            // that every submission lands on a core this client has watched stop.
-            // Then the third frame, whole, as the one batch the second clause is
-            // about.
-            drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true).and_then(|mut seen| {
-                batch_seen =
-                    drive_batch(&mut producer, ends, &mut env, tsc_khz, &mut doorbell, &mut seen)?;
-                Ok(seen)
-            })
-        }
-        Half::Starved | Half::Floorless => {
-            Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
-        }
-    };
-
-    // Told to stop whatever happened above, because a component left serving a
-    // client that has gone is a core this boot never gets back.
-    let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
-    // **And rung for, on the half where the component may be asleep.** A stop
-    // notice goes on the *control* ring, which has no wakeup flag of its own and
-    // needs none: a doorbell says only *stop halting*, and which ring had
-    // something on it is a question the component answers by looking. A frame
-    // that posted the notice and did not ring would leave a parked component
-    // holding a core nobody ever gets back — which is the one hang this half can
-    // produce, and it would be reported as `Trouble::Overdue` three hundred
-    // lines further down with nothing naming the cause.
-    //
-    // Unconditionally rather than on a `wanted`: there is nothing to suppress,
-    // because this is the last thing the client says and the component is
-    // required to have ended before the join returns.
-    if half == Half::Wake {
-        doorbell.submitted(true);
-    }
-    // SAFETY: `start_on` was called for this core and nothing else has joined it.
-    // The closure serves nothing: a compositor reaches no device, so there is
-    // nothing it can ask the frame for while it runs.
-    let joined = unsafe { crate::smp::join_serviced(cpu, tsc_khz, EXIT_MICROS, &mut || {}) };
-
-    // --- what the other core saw, read once it has stopped running ----------
-    //
-    // **After the join and not before it, and that is what makes reading another
-    // core's counters legal rather than lucky.** `crate::doorbell::delivered_at`
-    // is the long form: the mailbox word the join waits on is stored with
-    // `Release` by the worker and loaded with `Acquire` here, so everything that
-    // core wrote before it reported finished — these four counts included — is
-    // visible to this one. No new cross-core word was needed; the rendezvous
-    // RFC 0016 already pays for is the rendezvous this reads behind.
-    let bells = Bells {
-        path: match doorbell.path() {
-            Path::Polling => "Polling",
-            Path::KernelIpi => "KernelIpi",
-            Path::UserInterrupt => "UserInterrupt",
-        },
-        worker: cpu,
-        client: crate::arch::x86_64::current_cpu(),
-        operations: doorbell.operations(),
-        rings: doorbell.rings(),
-        batch_entries: batch_seen.entries,
-        batch_operations: batch_seen.operations,
-        batch_rings: batch_seen.rings,
-        delivered: crate::doorbell::delivered_at(cpu),
-        parks: crate::doorbell::parks_at(cpu),
-        woken: crate::doorbell::woken_at(cpu),
-        spared: crate::doorbell::spared_at(cpu),
-    };
-
-    // What the page carries now, which is not what this function wrote into it:
-    // `drive` promotes the report after the first frame closes. Read before the
-    // address space goes back to the allocator, for the tree's reason.
-    let page_reported = board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0);
-    let reported_board = Board::of(&board);
-    // The tree, read before `reap` gives the page back. RFC 0013's *read, never
-    // delivered*, with the frame on the reading end.
-    let reader =
-        state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
-    let tree_after = reader.snapshot();
-    let mut tree = [0u64; WORDS];
-    for (slot, id) in tree.iter_mut().zip(node::WRITTEN) {
-        *slot = reader.value(id).unwrap_or(0);
-    }
-
-    if told.is_err() {
-        return Err(Trouble::Channel(0));
-    }
-    // **Checked before anything is torn down, and that is the order rather than a
-    // preference.** A join that did not return is a core still inside this
-    // component, and `reap` would give its address space back to the allocator
-    // while an instruction pointer was in it. So a boot whose component did not
-    // stop leaks one instance and says `Overdue`; the alternative is a frame that
-    // frees memory a core is executing in, which is a worse failure and a much
-    // quieter one.
-    joined.map_err(|_| Trouble::Overdue)?;
-
-    // SAFETY: on the core that prepared it, after the core that ran it reported
-    // finished — which is what the join above returning `Ok` means.
-    let _ended = unsafe { process::reap(frames, prepared) }.map_err(Trouble::Process)?;
-    // SAFETY: allocated by this function, the component that was lent it has
-    // exited — the join is what says so — and nothing else holds a pointer into
-    // it.
-    unsafe { frames.free(wire) };
-
-    let seen = driven?;
-    let board = reported_board.ok_or(Trouble::BadReport)?;
-
-    Ok(Report {
-        half,
-        submitted: seen.submitted,
-        completed: seen.completed,
-        refused: seen.refused,
-        board,
-        tree_nodes,
-        tree_blank,
-        tree_before,
-        tree_after,
-        tree,
-        submitted_deadline: seen.deadline,
-        last_tick: seen.last_tick,
-        // Not this half's question. Nothing here admitted anything —
-        // `prepare_server` is not a spawn — and claiming otherwise would put a
-        // true-looking word in a report that had not earned it.
-        admitted: false,
-        muted: 0,
-        // The machine this half described was admitted a compositor, which is
-        // what makes this the positive half of the pair the floorless half
-        // completes: the same function, in the same build, over one word.
-        backend_admitted,
-        floorless: 0,
-        reported: page_reported,
-        image: image.len() as u64,
-        heap: described,
-        bells,
-    })
 }
 
 /// What the client itself saw.
+#[derive(Clone, Copy)]
 struct Seen {
     /// Entries it put on the ring. Unit: entries.
     submitted: u64,

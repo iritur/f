@@ -1051,6 +1051,31 @@ pub mod reported {
     /// to be the graph's own count — a fold of an empty walk agrees with itself
     /// about nothing. Unit: nodes.
     pub const LATCH_WALKED: u32 = super::REPORT + 520;
+
+    /// Which occupant of its place this instance is, as **this instance** read it
+    /// off the header of the control ring it adopted, plus one.
+    ///
+    /// `E3-B05e`, and the one word on this page that is about identity rather
+    /// than about work. The frame writes a channel's `epoch` into the header when
+    /// it builds the instance — `kernel/src/component.rs`'s `spawn` puts the
+    /// place's occupant count there — and the component reads it back through
+    /// `f_ring::adopt::Adopted::epoch` and never through anything the frame put
+    /// on this page. So a frame that copies a reading off one instance and stops
+    /// another has two numbers that disagree: the occupant it stopped, and the
+    /// one this word says published. `kernel/src/compositor.rs` requires them
+    /// equal, and `cargo xtask compositor` holds the log to the same equality
+    /// from outside.
+    ///
+    /// Plus one, because an epoch counts from zero and a zero here is what a
+    /// component that never adopted a control ring writes — a page that refused
+    /// its routing would otherwise read as *the first occupant*. `f_abi::swap`
+    /// makes the same choice for the same reason: *`generation` is an ordinal
+    /// counting from one*.
+    ///
+    /// *What would reverse this:* an identity the frame mints per instance and
+    /// no two instances share, at which point this word carries that rather than
+    /// an ordinal a second place could also be at. Unit: none — an epoch plus one.
+    pub const EPOCH: u32 = super::REPORT + 528;
 }
 
 /// Why the component's loop ended.

@@ -79,7 +79,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `4`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `5`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -151,6 +151,14 @@ name.
 | `features_required` | list | no | The subset of `features` this component cannot proceed without. A bit required and not offered is refused here for the same reason `ChannelHeader::negotiate` refuses it at setup. |
 | `clients` | integer | iff `role = "server"` | The most simultaneous clients: 1 to 64. One SPSC ring per client, always, bounded at creation — `ring-scene-boot` section 06 says why a shared producer slot is not acceptable across a trust boundary. Refused on a client ring, which has one peer. |
 | `to` | string | iff `role = "client"` | The `name` of a `[[capability]]` in this manifest of type `endpoint` carrying `write`, because `write` on an endpoint is the right to connect (RFC 0008). Refused on a server ring, which names nobody: its clients hold *its* endpoint. |
+| `deltas_per_frame_max` | integer | iff a server speaking `scene` | The most scene deltas one frame may carry across this ring: 1 to 64. Past it each further delta is refused `RESOURCE/QUOTA_EXHAUSTED` and not applied, and the commit that closes the frame is never counted, so a pathological frame loses changes and never the frame. At most 64 because that is the batch a compositor sizes its frame for, and a cap above it is reached only after the batch has refused the frame. Refused on every other ring: no other protocol has a frame to count in. Unit: deltas per frame. RFC 0128. |
+
+A component serving `scene` is also refused `class = "hard"` in
+`[reservation]`. RFC 0128: section 10 makes the compositor the lowest-ranked
+deadline task on the machine, which in this vocabulary is `soft` — a hard
+reservation holds whole cores and their exclusion domains, first come first
+served, and can be granted ahead of the deadline workload the compositor must
+yield to.
 
 Where the protocol version travels on the wire is not this document's to say.
 `ChannelHeader` versions the ABI, not the vocabulary; the connect handshake of
@@ -449,7 +457,7 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 4.
+- A `schema` other than 5.
 - A missing `name`, `image`, `domain`, `[restart]`, `[reservation]`,
   `[transfer]` or `[[state]]`.
 - A field this document does not list, anywhere.
@@ -470,6 +478,9 @@ For a reviewer, in one place:
   with a zero or an inverted floor; a client ring naming a missing, non-endpoint
   or non-connectable capability; a server ring naming one at all; `clients`
   outside 1..=64 or on a client ring.
+- A `scene` server with no `deltas_per_frame_max`, or one outside 1..=64; a
+  `deltas_per_frame_max` on any other ring; `class = "hard"` beside a `scene`
+  server.
 - Restart quantities under `never`; a zero first backoff; a max below the first;
   zero restarts; a zero window, or one below the longest backoff.
 - CPU fields in the soft class; memory not in the class's grain; a budget above

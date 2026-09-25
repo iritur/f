@@ -560,6 +560,36 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // decoding, nothing is the consumer and the row goes red for that too.
     // RFC 0125.
     ("kernel/", "Event::decode(", "user/compositor/"),
+    // The eighth, and the seventh's needle closed the way the sixth's was.
+    // `<f_abi::input::Event>::decode(` has no `Event::decode(` in it, and nor do
+    // `use f_abi::input::Event as E;` then `E::decode(`, or `Event :: decode`
+    // with a space — every one of them a frame decoding an input entry with
+    // `lint-datapath: ok`. What each route does spell, once, in a `use` or a
+    // path, is the type's name, and comments and strings are stripped before
+    // this looks; so the needle is `Event`, and its cost is that the frame may
+    // not name anything called that in code, which today it does not.
+    //
+    // The seventh row stays beside it, because its **third** field is a
+    // different property: that the compositor decodes. This row's third field
+    // only needs something to define the name, and `abi/src/input.rs` is where
+    // the type is declared.
+    //
+    // What neither can see: a crate the frame links re-exporting the type under
+    // another name, a function pointer to the decoder handed across, or the
+    // frame decoding the bytes by hand without calling any decoder. The first
+    // two need a `pub use` or a `pub const` in a crate the frame links, which
+    // today nothing has; the third is a parser in `kernel/`, which is a review
+    // finding the size of a file. RFC 0125.
+    ("kernel/", "Event", "abi/src/input.rs"),
+    // The ninth, and the route the eighth leaves open without it. The frame
+    // links `f-compositor` for its routing page, and `pub mod inbound` is
+    // compiled everywhere, so `f_compositor::inbound::Inbound::default().take(
+    // entry, payload)` decodes an input entry *inside the frame* while spelling
+    // neither `Event` nor `decode` — it is the compositor's own drain, which is
+    // exactly the component code this table exists to keep out. The module's
+    // name for the sixth row's reason: every route to it spells it once, and
+    // nothing re-exports it at the crate root.
+    ("kernel/", "inbound", "user/compositor/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -994,6 +1024,7 @@ fn main() -> ExitCode {
         "lint-registries" => lint_registries(),
         "lint-owed" => lint_owed(),
         "lint-decomposition" => lint_decomposition(),
+        "lint-exits" => lint_exits(),
         "lint-token-pair" => lint_token_pair(),
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
@@ -1283,6 +1314,10 @@ cargo xtask <command>
                      epoch whose `E<n>-00` is ticked. Five ids extending its own
                      id is what a decomposition is; an epoch still waiting to be
                      decomposed is held out, because that wait is the task
+  lint-exits         Every task has one `*exit:*` line, and in an epoch whose
+                     `E<n>-00` names a decomposition spec, every line is in
+                     both files and each exit carries the spec's words — a
+                     verdict may go in front and evidence after. RFC 0127
   lint-token-pair    No type outside interface/src/token.rs holds an `Rgb`
                      without the `Token` pair it was checked against, and
                      nothing outside it computes readability. RFC 0079's last
@@ -13272,9 +13307,11 @@ compositor: ok — all five halves held. A component held the machine's scene gr
 /// readings against anything; the frame copies two words onto a supervisor's
 /// row and prints what the supervisor says it read, and this is where the
 /// supervisor's account is held against the numbers the compositor's own tree
-/// published a stage earlier. Two derivations of one number: the kernel's
-/// compositor stage prints the tree at fixed indices, and `main::liveness_of`
-/// picks the carried words by node id.
+/// published. Two derivations of one number: the kernel's compositor client
+/// prints the tree at fixed indices, and `component::copied` picks the words by
+/// node id through the frame's own mount of the occupant's tree. And since RFC
+/// 0129, whose numbers they are: [`identity_held`] requires the instance that
+/// published, the instance copied from and the instance stopped to be one.
 ///
 /// # Why three answers and five halves
 ///
@@ -13287,9 +13324,9 @@ compositor: ok — all five halves held. A component held the machine's scene gr
 /// compositor for a late frame and goes red there. `wake` is the one that
 /// carries weight: `starved`'s component writes none of its nodes, so its two
 /// words are the manifest's declared zeroes rather than a zero it computed —
-/// `kernel/src/main.rs`'s `liveness_of` says so at the carry. `mute` and `floorless` never
-/// stood the component up, so a reading carried for them is a reading nobody
-/// published.
+/// and it is served from the place all the same, so its reading is its own
+/// occupant's. `mute` and `floorless` never stood the component up, so a reading
+/// carried for them is a reading nobody published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Liveness {
     /// Stopped for a timeout and restarted under the place's own policy.
@@ -13310,8 +13347,8 @@ fn liveness_expected(half: &str) -> Result<Liveness, String> {
         other => Err(format!(
             "`compositor={other}` is a half `liveness_expected` does not name. Say whether it\n\
              stands the component up — and so carries a liveness reading to the supervisor —\n\
-             and what the supervisor must do with it; `kernel/src/main.rs`'s `liveness_of` is\n\
-             the other half of the same answer."
+             and what the supervisor must do with it; `kernel/src/main.rs`'s `compositor_boot`\n\
+             is the other half of the same answer."
         )),
     }
 }
@@ -13329,6 +13366,104 @@ fn digits_after(text: &str, marker: &str) -> Option<u64> {
     tail.get(..end)?.parse().ok()
 }
 
+/// The `0x`-prefixed hexadecimal number immediately after `marker` in `text`.
+fn hex_after(text: &str, marker: &str) -> Option<u64> {
+    let tail = text.get(text.find(marker)? + marker.len()..)?;
+    let tail = tail.strip_prefix("0x")?;
+    let end = tail.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(tail.len());
+    u64::from_str_radix(tail.get(..end)?, 16).ok()
+}
+
+/// Which instance ran, and whether the one the lifecycle copied from and
+/// stopped is that instance. `E3-B05e`'s subject, RFC 0129.
+///
+/// # Why two words and not one
+///
+/// An epoch alone repeats: every place's first occupant is epoch zero, and the
+/// compositor RFC 0126 recorded — stood up *beside* its place — described its
+/// rings at epoch zero too, so an epoch check would have passed over exactly the
+/// gap it is here to refuse. A page alone is reused by the next allocation. The
+/// two together name one instance for the length of a boot: the occupant count
+/// the frame wrote into *that* instance's control ring header, which the
+/// component read back itself, and the physical page *that* instance's tree is,
+/// which the frame's root mounts and its teardown unmounts.
+///
+/// So the served line (the client's, with the component's own reading of its
+/// ring), the liveness line (the lifecycle's, at the copy — the page the
+/// occupant keeps and the page the root's mount named) and, on the restarting
+/// half, the timeout line (the lifecycle's, at the teardown) must name one
+/// epoch and one page, and the place's next spawn must be the epoch after it.
+fn identity_held(expected: Liveness, log: &str) -> Result<(), String> {
+    let served = log
+        .lines()
+        .find(|line| line.starts_with("  compositor    served in its place: occupant epoch "))
+        .ok_or(
+            "no `served in its place` line: nothing says the compositor that published ran in \
+             its place, so the reading may be any compositor's",
+        )?;
+    let epoch = digits_after(served, "occupant epoch ").ok_or("the served line names no epoch")?;
+    let own =
+        digits_after(served, "control ring says epoch ").ok_or("the served line names no ring")?;
+    let page = hex_after(served, "the page at ").ok_or("the served line names no tree page")?;
+    if own != epoch {
+        return Err(format!(
+            "the lifecycle served occupant epoch {epoch} and the component's own control ring \
+             says epoch {own}, so the instance that published is not the one in the place"
+        ));
+    }
+    let line = log
+        .lines()
+        .find(|line| line.starts_with("  liveness      place compositor"))
+        .ok_or("no `liveness` line for the compositor's place")?;
+    let copied_epoch =
+        digits_after(line, "place compositor epoch ").ok_or("the liveness line names no epoch")?;
+    let kept = hex_after(line, "keeps its tree at ").ok_or("the liveness line names no page")?;
+    let mounted = hex_after(line, "root's mount of ").ok_or("the liveness line names no mount")?;
+    if (copied_epoch, kept, mounted) != (epoch, page, page) {
+        return Err(format!(
+            "the reading was copied from occupant epoch {copied_epoch}, tree {kept:#x}, through a \
+             mount naming {mounted:#x}, and the compositor that published was epoch {epoch}, \
+             tree {page:#x}: the words on the supervisor's row are not that instance's"
+        ));
+    }
+    if expected != Liveness::Restarted {
+        return Ok(());
+    }
+    let ended = log
+        .lines()
+        .find(|line| line.starts_with("  timeout       place compositor"))
+        .ok_or("no `timeout` line for the compositor's place")?;
+    let ended_epoch =
+        digits_after(ended, "place compositor epoch ").ok_or("the timeout line names no epoch")?;
+    let unmounted = hex_after(ended, "its tree at ").ok_or("the timeout line names no page")?;
+    if (ended_epoch, unmounted) != (epoch, page) {
+        return Err(format!(
+            "the supervisor stopped occupant epoch {ended_epoch}, tree {unmounted:#x}, and the \
+             one that timed out was epoch {epoch}, tree {page:#x}: the compositor restarted is \
+             not the compositor that timed out"
+        ));
+    }
+    // The refill after the restart line, and one epoch on. A spawn line for the
+    // compositor's place earlier in the log is the occupant that was served; the
+    // one that matters is the one the restart produced.
+    let after = log
+        .find("  restart       place compositor")
+        .and_then(|at| log.get(at..))
+        .ok_or("no restart line for the compositor's place")?;
+    let next = after
+        .lines()
+        .find(|line| line.starts_with("  spawn         place compositor epoch "))
+        .and_then(|line| digits_after(line, "place compositor epoch "))
+        .ok_or("the compositor's place was restarted and no spawn line follows")?;
+    if next != epoch + 1 {
+        return Err(format!(
+            "the occupant that timed out was epoch {epoch} and the restart spawned epoch {next}, \
+             which is not the place's next occupant"
+        ));
+    }
+    Ok(())
+}
+
 /// The pure half of [`liveness_held`], so that fixtures can drive it.
 fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
     let line = log.lines().find(|line| line.starts_with("  liveness      place compositor"));
@@ -13337,8 +13472,8 @@ fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
     if expected == Liveness::NotCarried {
         if line.is_some() || ended.is_some() || restart.is_some() {
             return Err("a liveness reading reached the supervisor from a half that never stood \
-                        the component up, so it is a reading nobody published — \
-                        `main::liveness_of` should have carried none"
+                        the component up, so it is a reading nobody published — the lifecycle \
+                        should have served no place for it"
                 .into());
         }
         return Ok(());
@@ -13370,11 +13505,15 @@ fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
         return Err(format!(
             "the supervisor heard waits {}, abandoned {} and the compositor's own tree says \
              waits {}, timeouts {}. Either the frame copied the wrong nodes onto the row \
-             (`kernel/src/main.rs`'s `liveness_of`, `kernel/src/component.rs`'s `write_board`) \
-             or the supervisor read the wrong offsets (`user/supervisor/src/routing.rs`).",
+             (`kernel/src/component.rs`'s `copied` and `write_board`, with the ids \
+             `kernel/src/compositor.rs`'s `Placed::liveness` names) or the supervisor read the \
+             wrong offsets (`user/supervisor/src/routing.rs`).",
             heard.0, heard.1, published.0, published.1
         ));
     }
+    // **And whose words they are**, before anything the supervisor did with them
+    // is looked at: a right fate on somebody else's reading is RFC 0126's gap.
+    identity_held(expected, log)?;
     match expected {
         Liveness::Restarted => {
             if !line.contains("named timed out") {
@@ -13444,18 +13583,28 @@ mod liveness_tests {
     const TREE: &str =
         "  compositor    state tree waits outstanding 1, timeline reached 1, timeout(s) 1; x\n";
 
+    /// The client's line: occupant epoch 0, its own ring saying 0, its tree at
+    /// one page. Every fixture below names the same instance unless it is the
+    /// fixture that says otherwise.
+    const SERVED: &str = "  compositor    served in its place: occupant epoch 0, whose own control \
+                          ring says epoch 0 (reported plus one: 1); its tree is the page at \
+                          0x1c9000\n";
+
     fn stuck(heard: &str, tail: &str) -> String {
         format!(
-            "{TREE}  liveness      place compositor epoch 0: the frame copied waits 1, abandoned \
-             1 from the tree its component published earlier in this boot; the supervisor heard \
-             {heard} and named timed out, 1 frame(s) abandoned — the frame answered 1\n{tail}"
+            "{SERVED}{TREE}  liveness      place compositor epoch 0: the occupant that ran keeps \
+             its tree at 0x1c9000, and the frame copied waits 1, abandoned 1 through its root's \
+             mount of 0x1c9000; the supervisor heard {heard} and named timed out, 1 frame(s) \
+             abandoned — the frame answered 1\n{tail}"
         )
     }
 
-    const ENDED: &str =
-        "  timeout       place compositor epoch 0 ended on the supervisor's word — timed out\n";
+    const ENDED: &str = "  timeout       place compositor epoch 0 ended on the supervisor's word \
+                         — timed out, detail 1; its tree at 0x1c9000 unmounted; 2 \
+                         capabilit(ies)\n";
     const RESTARTED: &str = "  restart       place compositor under on_fault — the supervisor heard \
-                             timed out and said restart; restart 1 of 8\n";
+                             timed out and said restart; restart 1 of 8\n  spawn         place \
+                             compositor epoch 1 — manifest 0x1\n";
 
     /// The exit as a log, and each of the ways it can be missing one part.
     #[test]
@@ -13505,18 +13654,62 @@ mod liveness_tests {
         assert!(why.contains("abandoned 3"), "{why}");
     }
 
+    /// **RFC 0129's identity, each way it can part.** The shape RFC 0126
+    /// recorded first: a compositor that published at epoch 0 on one page while
+    /// the place's occupant, also epoch 0, is on another — the epochs agree by
+    /// coincidence and only the page tells them apart. Then the component's own
+    /// ring naming a different occupant, the stop reaching a different page, and
+    /// the refill not being the next occupant.
+    #[test]
+    fn a_reading_off_one_instance_and_a_stop_of_another_is_refused() {
+        let whole = stuck("waits 1, abandoned 1", &format!("{ENDED}{RESTARTED}"));
+
+        let beside = whole.replacen("the page at 0x1c9000", "the page at 0x2a4000", 1);
+        let why = liveness_verdict(Liveness::Restarted, &beside).expect_err("two instances");
+        assert!(why.contains("not that instance's"), "{why}");
+
+        let ring = whole.replace("ring says epoch 0", "ring says epoch 3");
+        let why = liveness_verdict(Liveness::Restarted, &ring).expect_err("another ring");
+        assert!(why.contains("not the one in the place"), "{why}");
+
+        let mount = whole.replace("mount of 0x1c9000", "mount of 0x2a4000");
+        let why = liveness_verdict(Liveness::Restarted, &mount).expect_err("another mount");
+        assert!(why.contains("not that instance's"), "{why}");
+
+        let other =
+            whole.replace("its tree at 0x1c9000 unmounted", "its tree at 0x2a4000 unmounted");
+        let why = liveness_verdict(Liveness::Restarted, &other).expect_err("another stopped");
+        assert!(why.contains("not the compositor that timed out"), "{why}");
+
+        let refill =
+            whole.replace("compositor epoch 1 — manifest", "compositor epoch 4 — manifest");
+        let why = liveness_verdict(Liveness::Restarted, &refill).expect_err("not the next");
+        assert!(why.contains("not the place's next occupant"), "{why}");
+
+        let unsaid = whole.replace(SERVED, "");
+        let why = liveness_verdict(Liveness::Restarted, &unsaid).expect_err("no served line");
+        assert!(why.contains("served in its place"), "{why}");
+    }
+
     /// The controls: a restart on a half whose reading is not stuck is red, and
     /// a reading carried for a half that never ran is red.
     #[test]
     fn a_control_that_restarts_or_a_half_that_never_ran_is_refused() {
-        let late = "  compositor    state tree waits outstanding 0, timeline reached 3, timeout(s) 1\n\
-                    \x20 liveness      place compositor epoch 0: …; the supervisor heard waits 0, \
-                    abandoned 1 and named no fate — the frame answered 0\n";
-        assert_eq!(liveness_verdict(Liveness::Left, late), Ok(()));
+        let late = format!(
+            "{SERVED}  compositor    state tree waits outstanding 0, timeline reached 3, \
+             timeout(s) 1\n  liveness      place compositor epoch 0: the occupant that ran keeps \
+             its tree at 0x1c9000, and the frame copied waits 0, abandoned 1 through its root's \
+             mount of 0x1c9000; the supervisor heard waits 0, abandoned 1 and named no fate — the \
+             frame answered 0\n"
+        );
+        assert_eq!(liveness_verdict(Liveness::Left, &late), Ok(()));
         assert!(liveness_verdict(Liveness::Left, &format!("{late}{ENDED}{RESTARTED}")).is_err());
-        assert!(liveness_verdict(Liveness::NotCarried, late).is_err());
+        assert!(liveness_verdict(Liveness::NotCarried, &late).is_err());
         assert_eq!(liveness_verdict(Liveness::NotCarried, TREE), Ok(()));
         assert!(liveness_expected("a-sixth-half").is_err());
+        // A control copied off another instance is refused as the exit is.
+        let beside = late.replace("mount of 0x1c9000", "mount of 0x2a4000");
+        assert!(liveness_verdict(Liveness::Left, &beside).is_err());
     }
 }
 
@@ -15254,6 +15447,13 @@ fn lint_all() -> Result<(), String> {
     // without a decomposition* as their exit and nothing could observe any of
     // them, so all four were plans — which is R01 applied to `TODO.md`. E3-B08.
     lint_decomposition()?;
+    // And the question one level down: not whether a coarse line names its
+    // children, but whether each child's exit still says what the
+    // decomposition agreed. A record script pasted a verdict over three E3
+    // exits and nothing noticed; RFC 0084 puts a narrowing in the spec, and
+    // this is the file read that makes the spec the only place one can land.
+    // RFC 0127.
+    lint_exits()?;
     // One level below `PORTABILITY`, and the level that table cannot see: a crate
     // can be on both runners while a test inside it compiles on one. `test-host`
     // would stay green through that, because a smaller test count is not a failure
@@ -22659,6 +22859,16 @@ struct Task {
     needs: Vec<String>,
     epoch: String,
     standing: bool,
+    /// Every `*exit:*` paragraph under the line, with the marker taken off and
+    /// a wrapped paragraph joined back into one — see [`parse_todo_text`] for
+    /// what counts as a wrap. A list and not an option, because *two* is a
+    /// state the file has been in and [`lint_exits`] has to be able to see it.
+    exits: Vec<String>,
+    /// Every continuation line, trimmed. `lint-exits` reads an `E<n>-00`'s to
+    /// find which spec is its epoch's decomposition.
+    body: Vec<String>,
+    /// One-based, so that a finding can name the line a reader should open.
+    line: usize,
 }
 
 /// Does this token have the shape of a task id?
@@ -22704,8 +22914,33 @@ fn parse_todo() -> Result<Vec<Task>, String> {
 fn parse_todo_text(text: &str) -> Vec<Task> {
     let mut tasks: Vec<Task> = Vec::new();
     let mut epoch = String::from("(none)");
+    // Whether the line above was an `*exit:*` paragraph, or a wrap of one.
+    let mut in_exit = false;
 
-    for line in text.lines() {
+    for (n, line) in text.lines().enumerate() {
+        // A wrapped exit is joined before anything else looks at the line.
+        // The rule is Markdown's own lazy continuation, narrowed to what this
+        // file writes: an indented line that does not open a paragraph of its
+        // own — no `*field:*`, no bold lead, no list item, no fence — continues
+        // the exit above it. It matters in one direction only: a spec whose
+        // exit wrapped and was read as its first line alone would be compared
+        // on half its words, and `lint-exits` would be green over a changed
+        // second half. Joining too much fails the other way — a spec sentence
+        // longer than the tracker's is a red finding, not a silent one.
+        if in_exit
+            && line.starts_with("  ")
+            && !opens_paragraph(line.trim_start())
+            && let Some(task) = tasks.last_mut()
+        {
+            if let Some(exit) = task.exits.last_mut() {
+                exit.push(' ');
+                exit.push_str(line.trim());
+            }
+            task.body.push(line.trim().to_string());
+            continue;
+        }
+        in_exit = false;
+
         if let Some(heading) = line.strip_prefix("## ") {
             epoch = heading.split(char::is_whitespace).next().unwrap_or(heading).to_string();
             if heading.starts_with("Always") {
@@ -22722,6 +22957,12 @@ fn parse_todo_text(text: &str) -> Vec<Task> {
                     task.needs.extend(ids_in(rest));
                 } else if trimmed.starts_with("*cadence:*") {
                     task.standing = true;
+                } else if let Some(rest) = trimmed.strip_prefix("*exit:*") {
+                    task.exits.push(rest.trim().to_string());
+                    in_exit = true;
+                }
+                if !trimmed.is_empty() {
+                    task.body.push(trimmed.trim_end().to_string());
                 }
             }
             continue;
@@ -22749,10 +22990,32 @@ fn parse_todo_text(text: &str) -> Vec<Task> {
             needs: Vec::new(),
             epoch: epoch.clone(),
             standing: false,
+            exits: Vec::new(),
+            body: Vec::new(),
+            line: n + 1,
         });
     }
 
     tasks
+}
+
+/// Does this continuation line start a paragraph of its own, rather than wrap
+/// the one above it?
+///
+/// A field is `*word:*` with a lower-case word — `*exit:*`, `*needs:*`,
+/// `*cadence:*` — and an emphasised phrase that merely *starts* a wrapped line,
+/// `*Identical to the tick*`, is not one, which is why this reads the shape and
+/// not the first character.
+fn opens_paragraph(trimmed: &str) -> bool {
+    let field =
+        trimmed.strip_prefix('*').and_then(|r| r.split_once(":*")).is_some_and(|(word, _)| {
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase() || c == ' ')
+        });
+    trimmed.is_empty()
+        || field
+        || trimmed.starts_with("**")
+        || trimmed.starts_with("```")
+        || trimmed.starts_with("- ")
 }
 
 /// How many subtasks a decomposition names before it counts as one.
@@ -23032,6 +23295,627 @@ mod decomposition_tests {
         assert!(empty.is_empty(), "the fixture must parse to nothing for this to mean anything");
         let refusal = decomposition_report(&empty).expect_err("an empty task list is not green");
         assert!(refusal.contains("no task lines were found"), "{refusal}");
+    }
+}
+
+/// One epoch's decomposition: the spec its `E<n>-00` names, read as task lines.
+struct Decomposition {
+    /// `E3`, and not the heading it sits under — an id prefix, for
+    /// [`undecomposed_xl`]'s reason.
+    epoch: String,
+    /// Repository-relative, so a finding names a file a reader can open.
+    spec: String,
+    tasks: Vec<Task>,
+}
+
+/// Every `intent/NNNN-name/` directory a task's own lines name.
+///
+/// The four digits are required so that `intent/README.md` is not a directory
+/// and `intent/` in a sentence about the directory is not a pointer.
+fn named_intents(task: &Task) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    for text in std::iter::once(&task.title).chain(task.body.iter()) {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("intent/") {
+            rest = &rest[at + "intent/".len()..];
+            let dir: String =
+                rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+            let numbered = dir.len() > 4 && dir.bytes().take(4).all(|b| b.is_ascii_digit());
+            if numbered && rest[dir.len()..].starts_with('/') {
+                named.insert(dir);
+            }
+        }
+    }
+    named
+}
+
+/// The decompositions the tracker says exist, and what is wrong with the
+/// pointers to them.
+///
+/// # How the tree says which spec is an epoch's decomposition
+///
+/// On the line that closes it, and nowhere else. `E3-00` reads *`intent/0012-
+/// the-interface/` is the decomposition and the argument for it*. The other
+/// candidate was the intent's `todo:` field, which `intent/README.md` requires,
+/// and it answers a different question: 0012's names nine lines, because it
+/// lists every line the intent became work for, so it says which lines an
+/// intent touches and not which epoch it decomposes. Hard-coding `E3` here
+/// would have been a second statement of the pairing, and the next epoch to be
+/// decomposed would have been unchecked from the day it was.
+///
+/// Only a ticked `E<n>-00` is read, for [`decomposed_epochs`]' reason: until the
+/// box is ticked the spec is a draft of lines nobody has pasted, and a check
+/// that the tracker carries them would be red on work that has not started. A
+/// ticked one that names no spec, or two, or one with no `spec.md` in it, is a
+/// finding — each is this check going quietly vacuous for that epoch.
+///
+/// `read` is the seam a fixture uses; [`lint_exits`] passes the file system.
+fn decompositions(
+    tasks: &[Task],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<Decomposition>, Vec<String>) {
+    let mut found = Vec::new();
+    let mut findings = Vec::new();
+    for task in tasks.iter().filter(|t| t.status == 'x') {
+        let Some(epoch) = task.id.strip_suffix("-00") else { continue };
+        let named = named_intents(task);
+        let dir = match named.len() {
+            1 => named.into_iter().next().unwrap_or_default(),
+            0 => {
+                findings.push(format!(
+                    "  {} (TODO.md:{}) is ticked and names no `intent/NNNN-name/` directory, so \
+                     nothing says which spec is {epoch}'s decomposition and its exits are \
+                     compared against nothing",
+                    task.id, task.line
+                ));
+                continue;
+            }
+            _ => {
+                findings.push(format!(
+                    "  {} (TODO.md:{}) names {} intent directories — {} — and a decomposition \
+                     is one spec",
+                    task.id,
+                    task.line,
+                    named.len(),
+                    named.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+                ));
+                continue;
+            }
+        };
+        let spec = format!("intent/{dir}/spec.md");
+        let Some(text) = read(&spec) else {
+            findings.push(format!(
+                "  {} (TODO.md:{}) names `intent/{dir}/` as {epoch}'s decomposition and \
+                 {spec} cannot be read",
+                task.id, task.line
+            ));
+            continue;
+        };
+        found.push(Decomposition { epoch: epoch.to_string(), spec, tasks: parse_todo_text(&text) });
+    }
+    (found, findings)
+}
+
+/// Is this id a line's child rather than a line?
+///
+/// A coarse line is a letter and a number after the epoch — `E3-B07`, `E3-00`,
+/// `A-06` — and a child is its parent's id with something after it: `E3-B07h`,
+/// `E3-B03e0`. That is [`undecomposed_xl`]'s *extends its own id*, read off the
+/// one id rather than against a parent, so that a child whose parent line is
+/// missing is still a child. The coarse lines are the exception the tree
+/// already allows: `E3-D01`, `E3-P02` and `E3-B08` are the epoch's own lines,
+/// not the decomposition's, and a spec that decomposes eight lines says nothing
+/// about the other twelve.
+fn is_subtask(id: &str) -> bool {
+    let Some((_, tail)) = id.split_once('-') else { return false };
+    let after_letters = tail.trim_start_matches(|c: char| c.is_ascii_uppercase());
+    let after_digits = after_letters.trim_start_matches(|c: char| c.is_ascii_digit());
+    after_digits.len() != after_letters.len() && !after_digits.is_empty()
+}
+
+/// An exit's words, for comparing two copies of them: every run of whitespace
+/// is one space, and nothing else is touched.
+///
+/// # What is normalised, and why each is safe
+///
+/// Each normalisation is a class of edit this check cannot see, so the list is
+/// short on purpose.
+///
+/// - **Whitespace, including a line wrap.** Markdown renders a run of spaces, a
+///   tab and a newline the same, so no reader of either file can see a
+///   difference this erases. The one place whitespace is a word is inside a
+///   code span, and an exit that changed `a  b` to `a b` in a code span has not
+///   changed what anybody must observe.
+/// - **The sentence's own final full stop**, in [`carries_exit`] and not here.
+///   Evidence is allowed to follow the sentence, and the tracker's shape for it
+///   is *sentence — evidence*, which replaces the stop with a dash. A stop is not
+///   a word; a boundary check stands in its place so that dropping it cannot
+///   let `seed` match `seedless`.
+///
+/// # What is not, and why
+///
+/// **Emphasis.** `*every*` against `every` is a red finding. Stripping `*` would
+/// also strip it from `*const T` and `2*n` inside code spans, and the edit that
+/// only moves emphasis is rare and costs one paste to repair, where a
+/// normaliser that erases a character is permanent. **Case**, **dashes** and
+/// **quotes** likewise: a capital after a verdict is a style the tracker does
+/// not use today, and admitting it would admit every other case change with it.
+///
+/// Reversal: an emphasis-only or case-only finding that a reviewer judges was
+/// the right edit, twice. Then the rule is costing more than it holds and this
+/// function gains that normalisation with the reason beside it.
+fn exit_words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Leading bold spans — a verdict — taken off one at a time; every stage is a
+/// place the sentence may begin.
+fn verdict_stages(line: &str) -> Vec<&str> {
+    let mut stages = vec![line];
+    let mut rest = line;
+    while let Some((_, tail)) = rest.strip_prefix("**").and_then(|open| open.split_once("**")) {
+        rest = tail.trim_start();
+        stages.push(rest);
+    }
+    stages
+}
+
+/// Does a tracker's exit line carry the decomposition's sentence, with at most
+/// a verdict in front of it?
+///
+/// **Starts with, after bold, and not *contains*.** A verdict may precede the
+/// words — `**met.**`, `**not met.**`, any bold — and evidence or a dated
+/// parenthetical may follow them. But *contains* would also pass `no longer
+/// required: <the sentence>`, which is a narrowing written in front of the
+/// words instead of in the spec; so what comes first may be bold spans and
+/// nothing else. What follows is not checked and cannot be: evidence is free
+/// text, and *— except on AArch64* after the sentence is a narrowing this
+/// function cannot tell from evidence. That residue is RFC 0127's, named there.
+fn carries_exit(line: &str, sentence: &str) -> bool {
+    let whole = exit_words(sentence);
+    let want = whole.strip_suffix('.').unwrap_or(&whole);
+    if want.is_empty() {
+        return false;
+    }
+    let line = exit_words(line);
+    verdict_stages(&line).into_iter().any(|stage| {
+        stage.strip_prefix(want).is_some_and(|after| !after.starts_with(char::is_alphanumeric))
+    })
+}
+
+/// Where two copies of an exit stop agreeing, as a reader would want it
+/// quoted: forty characters of each from the start of the first word that
+/// differs.
+fn exit_difference(line: &str, sentence: &str) -> String {
+    let want = exit_words(sentence);
+    let line = exit_words(line);
+    let stage = verdict_stages(&line).last().copied().unwrap_or_default();
+    let common: Vec<char> =
+        stage.chars().zip(want.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+    // Back to the word's start, so `each` against `every` is quoted as two
+    // words rather than as `ach` against `very`.
+    let agree = if common.len() == want.chars().count() {
+        common.len()
+    } else {
+        common.iter().rposition(|c| *c == ' ').map_or(0, |at| at + 1)
+    };
+    let tail = |s: &str| -> String {
+        let rest: String = s.chars().skip(agree).take(40).collect();
+        if rest.is_empty() { String::from("(end)") } else { rest }
+    };
+    let before: String = want.chars().take(agree).collect();
+    let before: String = {
+        let n = before.chars().count();
+        before.chars().skip(n.saturating_sub(30)).collect()
+    };
+    let from = if before.is_empty() {
+        String::from("from the first word")
+    } else {
+        format!("after «…{before}»")
+    };
+    format!("{from} the spec reads «{}» and TODO.md reads «{}»", tail(&want), tail(stage))
+}
+
+/// The reading itself, over parsed lines and a reader of specs.
+///
+/// Three rules, in the order a reader of the findings wants them: every task
+/// has one exit; every line of a decomposition is in the tracker and every
+/// child in the tracker is in the decomposition; and each tracker exit carries
+/// its decomposition's words. [`lint_exits`] says why.
+fn exits_report(tasks: &[Task], read: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    // The same refusal `decomposition_report` makes, for the same reason: a
+    // reader that has stopped matching the file reports nothing.
+    if tasks.is_empty() {
+        return Err("no task lines were found in TODO.md, which cannot be right and means \
+                    this check's reader no longer matches the file it reads"
+            .into());
+    }
+
+    let mut findings = Vec::new();
+
+    // One exit, on every line that closes. `*cadence:*` lines are the standing
+    // rules under *Always*, which never close and carry a mechanism instead.
+    let mut one = 0usize;
+    let standing = tasks.iter().filter(|t| t.standing).count();
+    for task in tasks.iter().filter(|t| !t.standing) {
+        match task.exits.len() {
+            1 => one += 1,
+            0 => findings.push(format!(
+                "  {} (TODO.md:{}) has no `*exit:*` line — a task with no exit is a wish",
+                task.id, task.line
+            )),
+            n => findings.push(format!(
+                "  {} (TODO.md:{}) has {n} `*exit:*` lines, so which one a verdict answers is \
+                 a reader's guess",
+                task.id, task.line
+            )),
+        }
+    }
+
+    let (decomposed, pointers) = decompositions(tasks, read);
+    if decomposed.is_empty() && pointers.is_empty() {
+        return Err("no ticked `E<n>-00` names a decomposition spec, so there is nothing to \
+                    compare TODO.md's exits against — and E3-00 is ticked and names one, so \
+                    this reader no longer matches the line it reads"
+            .into());
+    }
+    findings.extend(pointers);
+
+    let tracker: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+    let mut compared = 0usize;
+    let mut verdicts = 0usize;
+    let mut summary = Vec::new();
+    for d in &decomposed {
+        if d.tasks.is_empty() {
+            findings.push(format!(
+                "  {}  holds no line in TODO.md's format, so {}'s decomposition is compared \
+                 against nothing — the spec's lines moved out of that format, or were deleted",
+                d.spec, d.epoch
+            ));
+            continue;
+        }
+        let mut in_spec = BTreeSet::new();
+        let mut held = 0usize;
+        for s in &d.tasks {
+            if !in_spec.insert(s.id.as_str()) {
+                findings.push(format!(
+                    "  {} ({}:{}) is written twice in the decomposition",
+                    s.id, d.spec, s.line
+                ));
+                continue;
+            }
+            if s.exits.len() != 1 {
+                findings.push(format!(
+                    "  {} ({}:{}) has {} `*exit:*` lines in the decomposition, and one is the \
+                     sentence the tracker is held to",
+                    s.id,
+                    d.spec,
+                    s.line,
+                    s.exits.len()
+                ));
+                continue;
+            }
+            let Some(t) = tracker.get(s.id.as_str()) else {
+                findings.push(format!(
+                    "  {} ({}:{}) is in the decomposition and not in TODO.md",
+                    s.id, d.spec, s.line
+                ));
+                continue;
+            };
+            let [exit] = t.exits.as_slice() else { continue };
+            compared += 1;
+            if carries_exit(exit, &s.exits[0]) {
+                held += 1;
+                if exit.trim_start().starts_with("**") {
+                    verdicts += 1;
+                }
+            } else {
+                findings.push(format!(
+                    "  {} (TODO.md:{}) does not carry the exit {}:{} gives it: {}",
+                    s.id,
+                    t.line,
+                    d.spec,
+                    s.line,
+                    exit_difference(exit, &s.exits[0])
+                ));
+            }
+        }
+        let prefix = format!("{}-", d.epoch);
+        for t in tasks.iter().filter(|t| t.id.starts_with(&prefix)) {
+            if is_subtask(&t.id) && !in_spec.contains(t.id.as_str()) {
+                findings.push(format!(
+                    "  {} (TODO.md:{}) is a child line in {} and is not in {}, which is that \
+                     epoch's decomposition",
+                    t.id, t.line, d.epoch, d.spec
+                ));
+            }
+        }
+        summary.push(format!("{} from {}: {held} line(s)", d.epoch, d.spec));
+    }
+
+    if findings.is_empty() {
+        // Counts rather than the word `ok` alone, because the way this rots is
+        // silent: a reader that stops seeing exits, or a spec that stops
+        // parsing, leaves it green over nothing, and a zero here is the only
+        // place that shows.
+        return Ok(format!(
+            "lint-exits: ok  ({one} task(s) with one `*exit:*` each and {standing} standing; \
+             {} — {compared} exit(s) carrying the decomposition's words, {verdicts} of them \
+             behind a verdict)",
+            summary.join(", ")
+        ));
+    }
+
+    Err(format!(
+        "{} exit finding(s):\n{}\n\n\
+         An exit line may gain a verdict and never change its words. A verdict goes in\n\
+         front in bold — `**met.**`, `**not met.**` — and evidence or a date may follow;\n\
+         the words between are the decomposition's, compared after whitespace is\n\
+         collapsed and the final full stop dropped, and nothing else. RFC 0084 puts a\n\
+         narrowing in the spec: if the tracker's words are one an RFC made, the spec is\n\
+         stale and is the file to edit, with the RFC cited on the line. If they are a\n\
+         paraphrase, copy the spec's sentence back. A child line belongs in both files\n\
+         or in neither. RFC 0127.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// Every task has one exit, and every exit in a decomposed epoch carries its
+/// decomposition's words.
+///
+/// # The defect this was written against
+///
+/// `TODO.md` is the tracker and a decomposition spec is the epoch's agreed
+/// breakdown; RFC 0084 says a narrowing of an exit is a reversal and lands in
+/// the spec. Both files were edited by hand and by a coordinator's record
+/// script, and nothing compared them. On 2026-09-25 an audit found three E3
+/// lines whose exits had drifted — one with **no exit line at all** for two
+/// days, two with the exit sentence replaced by a verdict — all by a script
+/// pasting a proposed block over a task; and two lines, `E3-B04f` and
+/// `E3-B04g`, in the tracker and not in the spec. The first run of this check
+/// found fourteen more: eleven exits reworded as they were marked met, one
+/// child line (`E3-B07h`) filed in the tracker four days earlier and never in
+/// the spec, and one line elsewhere carrying two exits. `CLAUDE.md` already
+/// carries the scar *a task with no exit is a wish*; this is the machine that
+/// holds it.
+///
+/// # Why in `lint_all`
+///
+/// Because a relation between two files is a file read, and a file read belongs
+/// in `verify` — RFC 0122's argument. And `lint-gate` then requires the
+/// workflow to run it, so it is a red merge rather than a reader's discovery.
+///
+/// # What it does not check
+///
+/// What follows the sentence. Evidence is free text, so a narrowing written as
+/// evidence after the words — *…on both architectures — on x86-64* — passes.
+/// Titles, sizes and `needs:` are not compared either; the exit is the line's
+/// contract and the rest is how it is scheduled.
+///
+/// # Errors
+///
+/// Any finding above, or a tracker or spec this cannot read as task lines.
+fn lint_exits() -> Result<(), String> {
+    let read = |rel: &str| std::fs::read_to_string(root().join(rel)).ok();
+    println!("{}", exits_report(&parse_todo()?, &read)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod exits_tests {
+    use super::*;
+
+    /// A decomposed epoch with one child, a coarse line the spec did not split,
+    /// and a standing rule with no exit.
+    const TRACKER: &str = "\
+## E9 — a fixture epoch
+- [x] **E9-00** `M` Decompose this epoch. `intent/0099-a-fixture/` is the decomposition.
+  *exit:* no `XL` without a decomposition.
+- [ ] **E9-B01** `L` A coarse line.
+  *exit:* the parent's own sentence.
+  *needs:* E9-B01a
+- [x] **E9-B01a** `M` A child.
+  **Met, and this paragraph is evidence rather than the exit.**
+  *exit:* **met.** one frame's trace names every wait, and is byte-identical for one seed — asserted twice.
+  *needs:* E9-00
+- [ ] **E9-P02** `M` A coarse line the decomposition did not split.
+  *exit:* published either way.
+
+## Always
+- [ ] **A-01** A standing rule.
+  *mechanism:* a lint.
+  *cadence:* every pull request.
+";
+
+    const SPEC: &str = "\
+# Spec: a fixture
+
+```
+- [ ] **E9-B01a** `M` A child.
+  *exit:* one frame's trace names every wait, and is byte-identical for one seed.
+  *needs:* E9-00
+```
+";
+
+    const EXIT: &str = "one frame's trace names every wait, and is byte-identical for one seed";
+
+    fn report(tracker: &str, spec: &str) -> Result<String, String> {
+        let spec = spec.to_string();
+        let read = move |rel: &str| (rel == "intent/0099-a-fixture/spec.md").then(|| spec.clone());
+        exits_report(&parse_todo_text(tracker), &read)
+    }
+
+    fn red(tracker: &str, spec: &str, naming: &str) -> String {
+        let why = report(tracker, spec).expect_err("this fixture must be refused");
+        assert!(why.contains(naming), "the refusal must name {naming}: {why}");
+        why
+    }
+
+    #[test]
+    fn a_tracker_that_carries_the_words_is_green() {
+        let ok = report(TRACKER, SPEC).expect("the fixture is green");
+        assert!(ok.contains("1 exit(s) carrying"), "{ok}");
+        assert!(ok.contains("1 of them behind a verdict"), "{ok}");
+    }
+
+    #[test]
+    fn a_changed_word_is_what_this_check_is_for() {
+        let why = red(&TRACKER.replace("names every wait", "names each wait"), SPEC, "E9-B01a");
+        assert!(why.contains("the spec reads «every wait"), "the difference is quoted: {why}");
+    }
+
+    #[test]
+    fn a_dropped_clause_is_a_changed_exit() {
+        // The shape eleven of E3's lines had: the sentence cut where the
+        // evidence began, so the words that were not met never appear.
+        let cut = TRACKER.replace(", and is byte-identical for one seed — asserted", " — asserted");
+        red(&cut, SPEC, "E9-B01a");
+    }
+
+    #[test]
+    fn a_verdict_before_and_evidence_after_are_what_the_words_may_gain() {
+        for line in [
+            format!("  *exit:* {EXIT}."),
+            format!("  *exit:* **not met.** {EXIT}; the second half is owed."),
+            format!("  *exit:* **met on 2026-09-25.** **(restored)** {EXIT} (2026-09-25)"),
+            format!("  *exit:*   **met.**\t{EXIT}   — with   spaces"),
+        ] {
+            let tracker =
+                TRACKER.replace(&format!("  *exit:* **met.** {EXIT} — asserted twice."), &line);
+            assert_ne!(tracker, TRACKER, "the fixture's exit line was not found");
+            report(&tracker, SPEC).unwrap_or_else(|e| panic!("{line}\n{e}"));
+        }
+    }
+
+    #[test]
+    fn whitespace_inside_the_words_is_not_a_difference() {
+        // The first normalisation, pinned from inside the sentence. The wrap
+        // test above cannot hold it: a join writes one space by construction.
+        let spaced = TRACKER.replace("names every wait", "names  every\twait");
+        report(&spaced, SPEC).expect("two spaces and a tab render as one space");
+        let spec = SPEC.replace("names every wait", "names   every wait");
+        report(TRACKER, &spec).expect("and from the spec's side too");
+    }
+
+    #[test]
+    fn what_goes_in_front_of_the_words_may_only_be_bold() {
+        // The attack on *contains*: a narrowing written in front of the words
+        // rather than in the spec. `contains` passes every one of these.
+        for front in ["met. ", "no longer required: ", "*met.* "] {
+            let tracker = TRACKER.replace("**met.** one frame", &format!("{front}one frame"));
+            red(&tracker, SPEC, "E9-B01a");
+        }
+    }
+
+    #[test]
+    fn only_the_full_stop_is_dropped_and_a_word_boundary_stands_in_for_it() {
+        // `seed.` is compared as `seed`, and without the boundary `seedless`
+        // would carry it.
+        red(&TRACKER.replace("for one seed —", "for one seedless run —"), SPEC, "E9-B01a");
+    }
+
+    #[test]
+    fn emphasis_is_a_difference() {
+        // The decision, pinned: `lint-exits` does not strip emphasis.
+        red(&TRACKER.replace("names every wait", "names *every* wait"), SPEC, "E9-B01a");
+    }
+
+    #[test]
+    fn a_wrapped_spec_exit_is_compared_whole() {
+        // The attack on the join. Read as its first line alone, the wrapped
+        // sentence is `…names every wait,` and the tracker below — which lost
+        // the second half — would be green.
+        let wrapped = SPEC.replace(
+            "names every wait, and is byte-identical",
+            "names every wait,\n    and is byte-identical",
+        );
+        report(TRACKER, &wrapped).expect("a wrap is whitespace");
+        let lost = TRACKER.replace(", and is byte-identical for one seed — asserted", ", asserted");
+        red(&lost, &wrapped, "E9-B01a");
+    }
+
+    #[test]
+    fn a_field_after_the_exit_is_not_a_wrap() {
+        let tasks = parse_todo_text(TRACKER);
+        let child = tasks.iter().find(|t| t.id == "E9-B01a").expect("the child");
+        assert_eq!(child.exits.len(), 1);
+        assert!(!child.exits[0].contains("needs"), "{}", child.exits[0]);
+        assert_eq!(child.needs, vec!["E9-00".to_string()]);
+    }
+
+    #[test]
+    fn a_line_in_one_file_and_not_the_other_is_red_both_ways() {
+        // In the spec and not the tracker.
+        red(&TRACKER.replace("**E9-B01a**", "**E9-B01z**"), SPEC, "E9-B01a (intent/");
+        // A child in the tracker and not the spec: the shape `E3-B04f`, `g` and
+        // `h` had.
+        let extra =
+            format!("{TRACKER}- [ ] **E9-P02a** `S` A child nobody decomposed.\n  *exit:* x.\n");
+        red(&extra, SPEC, "E9-P02a");
+        // A child whose parent line does not exist is still a child.
+        let orphan = format!("{TRACKER}- [ ] **E9-B07h** `S` An orphan.\n  *exit:* x.\n");
+        red(&orphan, SPEC, "E9-B07h");
+        // A coarse line is the epoch's own, and is allowed.
+        let coarse = format!("{TRACKER}- [ ] **E9-B08** `S` A tooling line.\n  *exit:* x.\n");
+        report(&coarse, SPEC).expect("a coarse line is not the decomposition's");
+    }
+
+    #[test]
+    fn a_task_has_exactly_one_exit() {
+        red(&TRACKER.replace("  *exit:* published either way.\n", ""), SPEC, "E9-P02");
+        let twice = TRACKER.replace(
+            "  *exit:* published either way.\n",
+            "  *exit:* published either way.\n\n  *exit:* met, later.\n",
+        );
+        red(&twice, SPEC, "has 2 `*exit:*` lines");
+        // A standing rule carries a cadence, and `A-01` has no exit in the
+        // green fixture.
+    }
+
+    #[test]
+    fn the_pointer_to_the_spec_is_checked_rather_than_assumed() {
+        red(&TRACKER.replace("`intent/0099-a-fixture/` is", "the spec is"), SPEC, "names no");
+        red(&TRACKER.replace("0099-a-fixture", "0098-elsewhere"), SPEC, "cannot be read");
+        let two = TRACKER.replace("is the decomposition", "and `intent/0098-b/` are");
+        red(&two, SPEC, "names 2 intent directories");
+        // Unticked, the epoch is not held — and with no decomposed epoch at
+        // all, the check refuses rather than passing over nothing.
+        red(&TRACKER.replace("- [x] **E9-00**", "- [ ] **E9-00**"), SPEC, "no ticked");
+    }
+
+    #[test]
+    fn a_spec_with_no_lines_in_it_is_refused() {
+        red(TRACKER, "# a spec whose lines moved into a table\n", "holds no line");
+    }
+
+    #[test]
+    fn a_line_and_its_children_are_told_apart_by_the_id() {
+        for coarse in ["E3-00", "E3-B07", "E3-P01", "A-06", "E3-D04"] {
+            assert!(!is_subtask(coarse), "{coarse}");
+        }
+        for child in ["E3-B07h", "E3-B03e0", "E3-B01a", "E9-P02a"] {
+            assert!(is_subtask(child), "{child}");
+        }
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_is_green() {
+        lint_exits().expect("an exit in TODO.md has drifted from its decomposition");
+    }
+
+    #[test]
+    fn one_word_of_one_real_exit_is_enough() {
+        // Driven against the real files, so that the green run above is green
+        // because of what they say and not because nothing was read.
+        let text = std::fs::read_to_string(root().join("TODO.md")).expect("reading TODO.md");
+        let needle = "every opcode round-trips through fixed-width bytes";
+        assert_eq!(text.matches(needle).count(), 1, "E3-B01a's exit, once");
+        let changed = text.replace(needle, "most opcodes round-trip through fixed-width bytes");
+        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).ok();
+        let why = exits_report(&parse_todo_text(&changed), &read)
+            .expect_err("a changed word in E3-B01a's exit must be refused");
+        assert!(why.contains("E3-B01a (TODO.md:"), "{why}");
     }
 }
 
@@ -29217,6 +30101,43 @@ mod tests {
         }
         let prose = "// `f_supervisor::policy` decides\nfn f() { let _ = \"policy\"; }\n";
         assert!(frame_findings("kernel/x.rs", prose, row.1).is_empty());
+    }
+
+    #[test]
+    fn the_frame_may_not_decode_an_input_entry_by_any_spelling() {
+        // RFC 0125's row, attacked the way RFC 0126's was: the seventh row read
+        // `Event::decode(` and `<f_abi::input::Event>::decode(` walked past it.
+        // Every line below is a route from `kernel/` to decoding an input entry,
+        // and each must be named by at least one of the rows that face
+        // `kernel/` — the test asks the table, not one row, so that the answer
+        // does not depend on which row happens to hold it.
+        let rows: Vec<&str> = crate::NOT_THE_FRAME
+            .iter()
+            .filter(|(prefix, _, _)| *prefix == "kernel/")
+            .map(|(_, needle, _)| *needle)
+            .collect();
+        let named =
+            |route: &str| rows.iter().any(|n| !frame_findings("kernel/x.rs", route, n).is_empty());
+        for route in [
+            "fn f(e: &Sqe, p: &P) { let _ = f_abi::input::Event::decode(e, p); }\n",
+            "fn f(e: &Sqe, p: &P) { let _ = <f_abi::input::Event>::decode(e, p); }\n",
+            "use f_abi::input::Event as E;\nfn f(e: &Sqe, p: &P) { let _ = E::decode(e, p); }\n",
+            "use f_abi::input::{Crossing, Event as E};\n",
+            "use f_abi::input::*;\nfn f(e: &Sqe, p: &P) { let _ = <Event>::decode(e, p); }\n",
+            "fn f(e: &Sqe, p: &P) { let _ = f_abi::input::Event :: decode (e, p); }\n",
+            "fn f() { let d = f_abi::input::Event::decode; }\n",
+            "type E = f_abi::input::Event;\n",
+            "use f_abi::input as i;\nfn f(e: &Sqe, p: &P) { let _ = i::Event::decode(e, p); }\n",
+            "fn f(e: &Sqe, p: &P) { let _ = f_compositor::inbound::Inbound::default().take(e, p); }\n",
+            "use f_compositor::{routing, inbound as drain};\n",
+        ] {
+            assert!(named(route), "a route to decoding in the frame went unnamed: {route}");
+        }
+        // And the exclusions, so the rows do not fire on the sentence explaining
+        // them — nor on the frame's own words that merely contain the letters.
+        let prose = "// `f_abi::input::Event::decode` is the compositor's now\n\
+                     fn f() { let _ = \"Event inbound\"; let events = 0; let bound = 1; }\n";
+        assert!(!named(prose), "prose, strings and lower-case words are not a route");
     }
 
     #[test]

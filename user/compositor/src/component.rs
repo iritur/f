@@ -124,14 +124,21 @@ fn serve() -> ! {
     // like, and a zero length taken for a length reads as a peer problem rather
     // than as a frame that did not speak.
     if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_ROUTING);
+        report(&board, None, None, &Inbound::UNCONNECTED, stopped::NO_ROUTING);
         end(stopped::NO_ROUTING)
     }
 
     let Some(parts) = laid_out(&board) else {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::BAD_ROUTING);
+        report(&board, None, None, &Inbound::UNCONNECTED, stopped::BAD_ROUTING);
         end(stopped::BAD_ROUTING)
     };
+    // Which occupant of its place this is, as the control ring's own header says
+    // and nothing on the board does. Taken once, here, and reported on every
+    // ending after this line — including the starved one, whose reading a
+    // supervisor judges exactly as it judges a serving one's, so it owes the same
+    // answer to *which instance published this*. `reported::EPOCH` is the long
+    // form.
+    let epoch = parts.epoch;
 
     // --- the graph ----------------------------------------------------------
     //
@@ -150,7 +157,7 @@ fn serve() -> ! {
     // reachable outcome rather than a name for something that aborts.
     let heap = Heap::COMPONENT;
     if !heap.valid() || (heap.bytes() as usize) < crate::HELD_BYTES + crate::HEAP_OVERHEAD {
-        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_GRAPH);
+        report(&board, None, Some(epoch), &Inbound::UNCONNECTED, stopped::NO_GRAPH);
         end(stopped::NO_GRAPH)
     }
     // **Two boxes and not one, and `crate::tree::Held`'s own comment is the
@@ -367,7 +374,7 @@ fn serve() -> ! {
         }
     };
 
-    report(&board, Some(&held), &inbound, outcome);
+    report(&board, Some(&held), Some(epoch), &inbound, outcome);
     end(outcome)
 }
 
@@ -408,6 +415,9 @@ fn drain_input(input: Server, inbound: &mut Inbound, held: &mut Held<'_>) -> Res
 /// Everything the routing page said, in the types that use it.
 struct Parts {
     control: Client,
+    /// The `epoch` the frame wrote into the control ring's header, read back
+    /// through the adoption rather than off the board. `reported::EPOCH`.
+    epoch: u32,
     data: Server,
     /// The input driver's data channel, whose consumer end this component
     /// holds, or `None` where the frame connected none — `input=withheld`, and
@@ -443,8 +453,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
         feature::CONTROL_EVENTS,
         feature::CONTROL_EVENTS,
     )
-    .ok()?
-    .client();
+    .ok()?;
+    // Read off the header before the adoption becomes a client end, because the
+    // header is where the frame said which occupant this is and the client end
+    // does not carry it. `reported::EPOCH` says why it is this word and not one
+    // the frame writes on the board.
+    let epoch = control.epoch();
+    let control = control.client();
 
     // The data ring offers nothing and requires nothing. A scene delta's payload
     // travels in the channel's own arena — `payload = "inline"` in the manifest
@@ -520,7 +535,7 @@ fn laid_out(board: &Window) -> Option<Parts> {
         Some(Adopted::at(input_at, len, 0, 0).ok()?.server())
     };
 
-    Some(Parts { control, data, input, spins, plan, doorbell })
+    Some(Parts { control, epoch, data, input, spins, plan, doorbell })
 }
 
 /// Write what this component did into the half of the routing page that is its
@@ -530,8 +545,17 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// a page this function never finished finds a zero rather than a plausible
 /// tally. RFC 0013's *read, never delivered* — the frame takes these numbers out
 /// of memory it granted, and this component is never asked for them.
-fn report(board: &Window, held: Option<&Held>, inbound: &Inbound, outcome: u64) {
+fn report(
+    board: &Window,
+    held: Option<&Held>,
+    epoch: Option<u32>,
+    inbound: &Inbound,
+    outcome: u64,
+) {
     let mut published = 0;
+    // Which instance wrote everything below, plus one, or zero for a run that
+    // never adopted a control ring. Before the magic like every other word here.
+    let _ = board.write64(reported::EPOCH, epoch.map_or(0, |epoch| u64::from(epoch) + 1));
     // The input ring, `E3-B04g`, on every ending and whether or not a graph was
     // ever held: a component that refused its routing page still says it was
     // not connected, which is the true sentence about that run.

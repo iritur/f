@@ -22,7 +22,7 @@
 # address space but the frame's. A capability here would be a grant of something
 # to address, and what this component holds is something to *do*.
 
-schema = 4
+schema = 5
 name   = "panel"
 image  = "user/panel"
 

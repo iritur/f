@@ -937,12 +937,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // reason: an ordinary boot has no scene to commit, and a default boot that
     // ran it would stop being the fixture `cargo xtask trace` hashes.
     //
-    // Kept rather than dropped since `E3-B05e`: the two words a compositor
-    // published about its own progress are what the component lifecycle below
-    // copies onto the supervisor's row for the compositor's place. `liveness_of`
-    // says which halves carry one and why the other two do not.
-    let composited = compositor_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
-    let carried = composited.as_ref().and_then(liveness_of);
+    // **Only the two halves that stand nothing up are judged here.** The three
+    // that stand a compositor up are served from the compositor's own place by
+    // the component lifecycle below, with this client — RFC 0129 — so the
+    // occupant a supervisor stops for a timeout is the occupant whose tree the
+    // reading was copied from. Their verdict is printed after the lifecycle
+    // returns, by `compositor_verdict`.
+    let mut composing = compositor_boot(&boot, &mut frames);
 
     // E3-B06c. An application that declares an interface across a ring and dies,
     // leaving what it declared in a page the frame holds and a handle that no
@@ -1167,7 +1168,12 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             &routing,
             serving,
             generation.map(|(_, bytes, root)| component::Generation { bytes, root }),
-            carried,
+            composing.as_mut().map(|client| component::Served {
+                label: compositor::Placed::label(),
+                life: compositor::Placed::life(),
+                liveness: compositor::Placed::liveness(),
+                client,
+            }),
         )
     } {
         Ok(report) => {
@@ -1209,6 +1215,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             kprintln!("FAIL: the component lifecycle: {}", why.message());
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
+    }
+
+    // The compositor's serving halves, judged now that the lifecycle has served
+    // its place. A client the lifecycle never ran is red by name
+    // (`compositor::Trouble::NotServed`) rather than a verdict over zeroes.
+    if let Some(placed) = composing.as_ref() {
+        compositor_verdict(placed);
     }
 
     // The device's domain, given back now that the demonstration has counted its
@@ -3115,11 +3128,7 @@ fn admission_demonstration(boot: &BootInfo) {
 fn compositor_boot(
     boot: &BootInfo,
     frames: &mut mem::FrameAllocator,
-    space: &paging::AddressSpace,
-    features: paging::Features,
-    clocks: arch::x86_64::apic::Clocks,
-    tree: u64,
-) -> Option<compositor::Report> {
+) -> Option<compositor::Placed> {
     let half = if boot.has_parameter(b"compositor=serve") {
         compositor::Half::Serve
     } else if boot.has_parameter(b"compositor=starved") {
@@ -3134,108 +3143,95 @@ fn compositor_boot(
         return None;
     };
 
-    // Another core for the serving half, always. A server and its client are two
-    // ends of a ring and this frame is the client, so a machine with one core has
-    // nowhere to put the server — `objects_datapath`'s sentence, and the same
-    // refusal rather than a fallback that would be measuring something else.
-    //
-    // The refusal half needs none: it spawns nothing and runs no component, which
-    // is why it is a *record* probe and not a boot that stands one up. A machine
-    // with one core can still say whether a manifest declaring no tree is
-    // refused.
-    let me = arch::x86_64::current_cpu();
-    let worker = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me);
-    let Some(worker) = worker.or(match half {
-        // Neither of these two stands a component up: `mute` probes a record and
-        // `floorless` is refused before a page is spent, so both can say what
-        // they came to say on a machine with one core.
-        compositor::Half::Mute | compositor::Half::Floorless => Some(me),
-        // And the wake half least of all: its whole subject is a doorbell
-        // crossing from one core to another, so a machine with one core has
-        // nothing to prove rather than a smaller thing to prove.
-        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => None,
-    }) else {
-        kprintln!(
-            "FAIL: the compositor boot needs a second core — the component holds the graph at              ring 3 and the frame is its client"
-        );
-        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-    };
-
-    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
-    // `frames` rebound onto its direct map, the direct map covering every boot
-    // module, and `worker` a core that is up and idle — or, on the half that
-    // schedules nothing, this one, which that half never gives a job to.
-    let outcome = unsafe {
-        compositor::demonstrate(
-            frames,
-            space,
-            features,
-            half,
-            boot,
-            compositor::Scheduling {
-                tree,
-                cpu: worker,
-                hz: TIMER_HZ,
-                target: RUNTIME_TICKS,
-                tsc_khz: clocks.tsc_khz,
-            },
-        )
-    };
-
-    let report = match outcome {
-        Ok(report) => report,
-        Err(why) => {
-            kprintln!("FAIL: the compositor boot: {}", why.why());
-            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    match half {
+        // Neither of these stands a component up: `mute` probes a record and
+        // `floorless` is refused before a page is spent, so both are judged here
+        // and both can say what they came to say on a machine with one core.
+        compositor::Half::Mute | compositor::Half::Floorless => {
+            // SAFETY: the boot processor, with the kernel's address space in
+            // `CR3`, `frames` rebound onto its direct map, the direct map
+            // covering every boot module, and nothing running.
+            match unsafe { compositor::demonstrate(frames, half, boot) } {
+                Ok(report) => compositor_judged(&report),
+                Err(why) => {
+                    kprintln!("FAIL: the compositor boot: {}", why.why());
+                    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+                }
+            }
+            None
         }
-    };
-    compositor::report_lines(&report);
+        // **Served from the compositor's own place, by the lifecycle below.**
+        // RFC 0129: until it, this stood a compositor up beside its place, and
+        // the reading a supervisor judged was that instance's while the one it
+        // stopped and restarted was the place's, which had never run.
+        //
+        // Another core, always. A server and its client are two ends of a ring
+        // and this frame is the client, so a machine with one core has nowhere
+        // to put the server — `objects_datapath`'s sentence, and the same
+        // refusal rather than a fallback that would be measuring something
+        // else. The wake half least of all: its whole subject is a doorbell
+        // crossing from one core to another.
+        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => {
+            let me = arch::x86_64::current_cpu();
+            if !(smp::started() > 1 && smp::first_worker() != me) {
+                kprintln!(
+                    "FAIL: the compositor boot needs a second core — the component holds the \
+                     graph at ring 3 and the frame is its client"
+                );
+                arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+            }
+            // SAFETY: the direct map is live and covers every boot module —
+            // `reserved_ranges` put them all in the reserved list before the
+            // allocator was populated.
+            match unsafe { compositor::Placed::new(half, boot) } {
+                Ok(placed) => {
+                    kprintln!(
+                        "  compositor    the {} half is served in the compositor's own place, \
+                         by the component lifecycle below — no instance is stood up beside it",
+                        half.name(),
+                    );
+                    Some(placed)
+                }
+                Err(why) => {
+                    kprintln!("FAIL: the compositor boot: {}", why.why());
+                    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+                }
+            }
+        }
+    }
+}
+
+/// Print one compositor half's report and hold it to its verdict.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
+/// `objects`' are: it knows which half it asked for, what it submitted, and what
+/// came back out of the tree the component published.
+fn compositor_judged(report: &compositor::Report) {
+    compositor::report_lines(report);
     if let Err(why) = report.verdict() {
         kprintln!("FAIL: the compositor boot: {why}");
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     }
     kprintln!("  compositor    verdict: the {} half held", report.half.name());
-    Some(report)
 }
 
-/// The two words a compositor half published about its own progress, for the
-/// supervisor's row: waits outstanding and frames abandoned, read by node id out
-/// of the fifteen the frame read back from the component's tree.
+/// The serving halves' verdict, after the component lifecycle served the
+/// compositor's place with `placed` as its client. RFC 0129.
 ///
-/// **Only for a half that stood the component up.** `serve`, `starved` and
-/// `wake` ran it and the frame read its tree after it ended; `mute` and
-/// `floorless` never started it, so carrying their `tree` onto a row would be
-/// the frame handing a supervisor a reading of a component that never ran.
-/// Matched without a wildcard, so a sixth half is a compile error here rather
-/// than a default.
-///
-/// **`starved` is the weak one of the three, and it is said here because the
-/// first version of this comment said otherwise.** Its component refuses before
-/// it serves and its log says `0 written by the component`: the two words it
-/// carries are the manifest's declared zeroes, true of a compositor that closed
-/// no frame and abandoned none, but not a zero the component computed. So it
-/// holds a policy that fires on every reading, and it does not hold one that
-/// fires on a *written* zero. No half in this build writes one — `serve`
-/// abandons its last frame and `wake` its middle one — and `wake` is the control
-/// that carries weight: a real reading, a frame given up, nothing outstanding.
-///
-/// By id and not by position, because `kernel/src/compositor.rs` prints the same
-/// words at fixed indices and `cargo xtask compositor` compares the supervisor's
-/// account against that print: two derivations of one number, which is what lets
-/// a wrong one show. `E3-B05e`, RFC 0126.
-fn liveness_of(report: &compositor::Report) -> Option<component::Reading> {
-    match report.half {
-        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => {}
-        compositor::Half::Mute | compositor::Half::Floorless => return None,
+/// **A client the lifecycle never ran is red, by name.** The lifecycle refuses a
+/// place it cannot serve — `component::Failure::Unserved`, for a manifest that
+/// declares no `board` or `data` need, or no such place, or no supervisor — and
+/// ends the boot there; this is the line under it, for a boot that somehow got
+/// past without serving. Either way there is no fallback to a compositor stood
+/// up beside the place: that was the gap, and a fallback would put it back green.
+fn compositor_verdict(placed: &compositor::Placed) {
+    match placed.report() {
+        Ok(report) => compositor_judged(&report),
+        Err(why) => {
+            kprintln!("FAIL: the compositor boot: {}", why.why());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
     }
-    use f_compositor::routing::node;
-    let word = |id: u32| {
-        node::WRITTEN.iter().position(|written| *written == id).and_then(|at| report.tree.get(at))
-    };
-    Some(component::Reading {
-        label: b"compositor",
-        words: [*word(node::WAITS)?, *word(node::TIMEOUTS)?],
-    })
 }
 
 /// `E3-B06c`'s boot: an application declares an interface, dies, and the frame

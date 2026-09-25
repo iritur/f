@@ -307,6 +307,66 @@ impl Demand {
             0
         }
     }
+
+    /// Would admitting this demand first cost `then` a reservation that `then`
+    /// is granted on this machine when this demand is absent?
+    ///
+    /// **The arithmetic behind *the lowest-ranked deadline task on the
+    /// machine*.** RFC 0128. This table has no priority to rank by: a hard
+    /// reservation holds whole physical cores that nothing else runs on, so two
+    /// grants never contend for a core and the only order admission knows is
+    /// *who asked first*. What a demand can do to a deadline workload is
+    /// therefore exactly one thing — be granted capacity that workload would
+    /// otherwise have been granted — and a demand that can never do that is
+    /// ranked below every one of them in the only sense this arithmetic has.
+    /// `docs/design/ring-scene-boot.html` section 10 asks that of the
+    /// compositor, and `crate::manifest::Ring::check_frame_cap` is where a
+    /// compositor file is refused a class that could.
+    ///
+    /// Two fresh tables, not one table and a release, so the answer is about
+    /// the machine and the two demands and nothing a previous caller granted.
+    /// A demand this machine refuses displaces nothing, because it holds
+    /// nothing. A `then` this machine refuses on its own is not displaced
+    /// either, because nothing was taken from it.
+    ///
+    /// What this does not see, and it is written here rather than discovered:
+    /// the table's own size. Every grant takes a row, soft ones included, and a
+    /// table one row from full would refuse `then` after any demand at all.
+    /// [`RESERVATIONS_MAX`] is sized to twice the frame's places for that
+    /// reason, and a row is not capacity a deadline could have run on.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotSchedulable`] for a machine the table cannot describe.
+    pub fn displaces(&self, machine: Machine, then: &Demand) -> Result<bool, Refusal> {
+        let alone = Table::new(machine)?.admit(then).is_ok();
+        let mut table = Table::new(machine)?;
+        if table.grant(self).is_err() {
+            return Ok(false);
+        }
+        Ok(alone && table.admit(then).is_err())
+    }
+
+    /// This demand as the hard class would have to state it: the cores, period
+    /// and budget given, and the memory rounded up to the huge-page grain the
+    /// hard class is pre-faulted in.
+    ///
+    /// For asking a question about a component that did not declare the hard
+    /// class — what admission would have said if it had — without assembling a
+    /// demand out of nothing, which [`Demand`]'s own comment refuses. The
+    /// memory is rounded rather than kept because a hard demand off the grain
+    /// is refused `MEMORY` before the core half is reached, and a variant
+    /// refused for its grain would answer a question nobody asked.
+    #[must_use]
+    pub const fn hardened(&self, cores: u32, period_ns: u64, budget_ns: u64) -> Self {
+        let over = self.memory_bytes % HUGE_BYTES;
+        let memory_bytes = if over == 0 {
+            self.memory_bytes
+        } else {
+            self.memory_bytes.saturating_add(HUGE_BYTES - over)
+        };
+        Self { cores, period_ns, budget_ns, memory_bytes, class: class::HARD, domain: self.domain }
+    }
 }
 
 /// Why admission said no.
@@ -1417,6 +1477,98 @@ mod tests {
         }
         assert_eq!(table.grant(&soft()).err(), Some(Refusal::NoCore));
         assert_eq!(table.admissions(), RESERVATIONS_MAX as u32);
+    }
+
+    /// The compositor's demand as `user/compositor/manifest.toml` declares it:
+    /// soft, private, sixty-four kibibytes. `xtask::manifest`'s
+    /// `the_compositor_is_the_lowest_ranked_deadline_task` asks the same
+    /// questions of the record that file actually compiles to; this is the
+    /// arithmetic with no file in the way.
+    const COMPOSITOR: Demand = Demand {
+        cores: 0,
+        period_ns: 0,
+        budget_ns: 0,
+        memory_bytes: 65_536,
+        class: class::SOFT,
+        domain: domain::PRIVATE,
+    };
+
+    /// A sixty-hertz frame, and a quarter of it: the hard-class variant of the
+    /// compositor RFC 0128 was asked to build and refused.
+    const FRAME_NS: u64 = 16_666_666;
+    const FRAME_BUDGET_NS: u64 = 4_166_666;
+
+    /// A machine shaped the way `kernel::admit::machine` describes QEMU as
+    /// `cargo xtask` boots it — `-smp 2`, no sibling level, and nothing
+    /// partitioned — so the one contention domain is the whole part and the
+    /// frame's own core poisons it.
+    const QEMU_SHAPED: Machine = Machine {
+        physical_cores: 2,
+        threads_per_core: 1,
+        cores_per_cache: 2,
+        cores_per_bandwidth: 2,
+        cache: Offers::Exclusion,
+        bandwidth: Offers::Exclusion,
+        partitions: 0,
+        frame_cores: 1,
+        reservable_bytes: 8 * HUGE_BYTES,
+        tick_ns: 1_000_000,
+    };
+
+    #[test]
+    fn the_soft_compositor_displaces_no_deadline_workload() {
+        // Each machine that can grant at all, against the smallest workload and
+        // the largest one it grants alone. The second is the one that would
+        // notice a compositor holding a single core, because it is the demand
+        // with no room left for anybody — and each is required to fit alone
+        // first, because a workload refused on its own cannot be displaced and
+        // a test over one would pass whatever the compositor held.
+        for machine in [RICH, POOR] {
+            let fits = |n: u32| Table::new(machine).unwrap().admit(&hard(n, 4_000_000, 1_500_000));
+            let largest = (1..=machine.offerable())
+                .rev()
+                .find(|n| fits(*n).is_ok())
+                .expect("a machine in this list grants some hard reservation");
+            for workload in [hard(1, 4_000_000, 1_500_000), hard(largest, 4_000_000, 1_500_000)] {
+                assert!(Table::new(machine).unwrap().admit(&workload).is_ok());
+                assert_eq!(
+                    COMPOSITOR.displaces(machine, &workload),
+                    Ok(false),
+                    "the soft compositor cost a deadline workload its reservation on {machine:?}"
+                );
+            }
+        }
+        // And it is admitted — a rank that is honoured, not a demand refused
+        // into having no effect.
+        for machine in [RICH, POOR, QEMU_SHAPED] {
+            assert!(Table::new(machine).unwrap().admit(&COMPOSITOR).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_hard_compositor_displaces_the_workload_it_must_yield_to() {
+        // RFC 0128's reason for not building what was asked. On a part that
+        // cannot partition, one hard reservation takes a whole four-core domain
+        // and an eight-core machine has exactly one to give — so a compositor
+        // admitted first as `hard` is the workload's refusal. Section 10's
+        // sentence, inverted by the class that looked like it would honour it.
+        let hardened = COMPOSITOR.hardened(1, FRAME_NS, FRAME_BUDGET_NS);
+        assert_eq!(hardened.memory_bytes, HUGE_BYTES, "the variant is off the hard grain");
+        assert_eq!(hardened.displaces(POOR, &hard(1, 4_000_000, 1_500_000)), Ok(true));
+        // The control, on the part RFC 0007 was written for: with partitions to
+        // spare nothing is displaced, which is what stops the assertion above
+        // being a function that always answers yes.
+        assert_eq!(hardened.displaces(RICH, &hard(1, 4_000_000, 1_500_000)), Ok(false));
+    }
+
+    #[test]
+    fn a_hard_compositor_is_refused_on_a_machine_shaped_like_qemu() {
+        // `kernel::admit`'s own finding, asked about this component: the
+        // variant is refused for cores, not for memory or the arithmetic, so
+        // the refusal is the machine's size and not the variant's shape.
+        let hardened = COMPOSITOR.hardened(1, FRAME_NS, FRAME_BUDGET_NS);
+        let table = Table::new(QEMU_SHAPED).unwrap();
+        assert_eq!(table.admit(&hardened).err(), Some(Refusal::NoCore));
     }
 
     #[test]

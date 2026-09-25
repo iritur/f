@@ -208,6 +208,9 @@ jobs:
       - run: cargo xtask lint-registries
       - run: cargo xtask lint-owed
       - run: cargo xtask lint-decomposition
+      # Every exit in a decomposed epoch carries its spec's words; a verdict may
+      # go in front and never change them. RFC 0127.
+      - run: cargo xtask lint-exits
       - run: cargo xtask lint-token-pair
       - run: cargo xtask lint-reproduce
       - run: cargo xtask lint-remap

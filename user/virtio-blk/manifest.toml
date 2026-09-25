@@ -13,7 +13,7 @@
 # whose payload never passes through the ring; restarted on a fault and not on
 # an exit; in the soft class, with two mebibytes for everything it is made of.
 
-schema = 4
+schema = 5
 name   = "virtio-blk"
 image  = "user/virtio-blk"
 

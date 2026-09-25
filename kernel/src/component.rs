@@ -378,6 +378,17 @@ pub enum Failure {
     /// it did not arrive, which is the defect RFC 0126 records and which every
     /// ring-level check in this file passed.
     Unheard,
+    /// A place whose occupant this boot was asked to serve **in its place** could
+    /// not be served there. Carries the sentence that says which part was
+    /// missing.
+    ///
+    /// Its own variant and not a [`Self::WrongPlace`], because the refusal is the
+    /// point rather than a bug: `E3-B05e`'s subject is the occupant a supervisor
+    /// stops being the one whose tree the frame copied from, and a boot that
+    /// could not serve the occupant and fell back to a component stood up beside
+    /// the place would be the gap RFC 0126 recorded, green. So the boot fails,
+    /// by name, and the name says which declaration or which place is missing.
+    Unserved(&'static str),
 }
 
 impl Failure {
@@ -405,6 +416,7 @@ impl Failure {
             Self::Unheard => {
                 "a supervisor heard a different cause for a death than the frame posted"
             }
+            Self::Unserved(why) => why,
         }
     }
 }
@@ -1010,7 +1022,9 @@ struct Place {
     /// statement about one occupant and a place outlives it: carried past the
     /// teardown, it would be a dead instance's words on its successor's row.
     /// Zero for every place whose occupant published nothing of the kind, which
-    /// is every place but the one a boot carried a reading for.
+    /// is every place but the one a boot serves in place — and for that one, the
+    /// words of the occupant that ran there, copied through the root's mount of
+    /// its tree ([`copied`]).
     ///
     /// RFC 0123's reversal condition is a line in `kernel/` that compares these.
     /// There is none; `cargo xtask lint-datapath` refuses the frame naming the
@@ -1306,7 +1320,7 @@ pub struct Report {
               given, what this boot found that a place cannot carve for itself, what it \
               found that only the frame can tell that occupant, and the client that occupant \
               is to be given something to answer, and the generation this machine was asked to be, \
-              and the liveness reading an earlier stage of this boot took off a component's tree. \
+              and the place this boot serves in its place, with the client that serves it. \
               Bundling them \
               would be a type that exists so a lint passes, which `runtime::demonstrate` \
               already declined for this reason"
@@ -1323,7 +1337,7 @@ pub unsafe fn demonstrate(
     routing: &[(u32, u64)],
     datapath: Option<&mut dyn Datapath>,
     generation: Option<Generation>,
-    carried: Option<Reading>,
+    served: Option<Served<'_>>,
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -2913,196 +2927,264 @@ pub unsafe fn demonstrate(
     // ------------------------------------------------------------- the timeout
     //
     // **`E3-B05e`'s third clause: a compositor restarted for a timeout, with the
-    // policy that decided it above the frame.** On the one kind of boot that
-    // carried a reading — an earlier stage stood a compositor up and read two
-    // words out of its tree — and on no other, so an ordinary boot prints
+    // policy that decided it above the frame — and the compositor restarted is
+    // the compositor that timed out.** On the one kind of boot that asks for a
+    // place to be served in place, and on no other, so an ordinary boot prints
     // exactly what it printed before.
     //
-    // Two runs of the supervisor, and the frame's part in both is to copy and to
+    // Three steps, and the frame's part in each is to run, to copy and to
     // perform:
     //
-    // 1. **The reading goes onto the row and the supervisor reads it.** If
-    //    `f_supervisor::policy::fate` names a timeout it submits `op::STOP`
-    //    against the place with the word in `ext[0]`, and the frame performs
-    //    that stop — a kill, because its deadline is the consultation's own
-    //    tick — carrying the named word onto the notice as the cause.
+    // 0. **The place's own occupant is handed a core and a client.** Not a
+    //    component stood up beside the place — that was RFC 0126's narrowing,
+    //    and this is its first reversal (RFC 0129). The occupant is the instance
+    //    `fill` spawned into the place, entered at the life the caller named, and
+    //    served by the caller's client exactly as the block place's occupant is.
+    // 1. **Its reading goes onto the row and the supervisor reads it.** The two
+    //    words are copied out of the tree the frame's **own root** names for this
+    //    place — the mount word, followed — so they are that occupant's by
+    //    construction rather than by label. If `f_supervisor::policy::fate`
+    //    names a timeout it submits `op::STOP` against the place with the word in
+    //    `ext[0]`, and the frame performs that stop, carrying the word onto the
+    //    notice as the cause.
     // 2. **The death comes back as a notice carrying that word**, and
     //    `policy::decide` restarts the place under the manifest's own policy.
-    //    The restart is decided on the word the wire carried, not on the word
-    //    the first run named: that is the only form in which *the supervisor
-    //    reads the fate off the wire* is a fact about a machine.
     //
     // Nothing here compares the two words, and the stop is performed because a
-    // stop was asked for with a deadline that has passed — which is a deadline
-    // compared, the frame's own kind of fact. RFC 0126 states what the reading
-    // is and is not: the manifest's, taken off an instance stood up outside
-    // this place, and not this occupant's own. [`Reading`] carries that.
-    if let Some(reading) = carried {
+    // stop was asked for with a deadline that has passed — a deadline compared,
+    // the frame's own kind of fact. What is compared is identity, which is
+    // transport and not judgement: the lines below print the occupant's epoch
+    // and the physical page its tree is, at the copy and at the teardown, and
+    // the client prints the epoch its component read off its own control ring.
+    // `cargo xtask compositor` requires the three to name one instance.
+    //
+    // **What the occupant has done by the time it is stopped, said rather than
+    // implied.** Its core came back before the supervisor ran: it served its
+    // client, was told to stop by that client, and ended — a place's occupant
+    // in this frame runs in bounded runs on a core it is lent, and the store's is
+    // the same. So *stopped* here is *ended and torn down under the named cause*,
+    // on the instance whose tree the words came from; it is not an interrupt of
+    // a core still inside it. *What would reverse this:* an occupant that holds
+    // its core across a consultation — a second worker, or a scheduler — at
+    // which point the stop is a kill of a running instance and `Killing` is how.
+    if let Some(Served { label, life, liveness, client }) = served {
         let found = (1..PLACES_MAX).find(|index| {
             extras.get(*index).and_then(Option::as_ref).is_some_and(|extra| {
-                Record::read(extra.place.module).is_ok_and(|r| r.label() == reading.label)
+                Record::read(extra.place.module).is_ok_and(|r| r.label() == label)
             })
         });
-        match (consulting.as_mut(), found) {
-            (Some((_, cpu, tsc_khz, extra)), Some(index)) => {
-                let Some(mut subject) = extras.get_mut(index).and_then(Option::take) else {
-                    return Err(Failure::WrongPlace);
-                };
-                let record = Record::read(subject.place.module).map_err(Failure::Manifest)?;
-                let epoch = subject.place.occupant.as_ref().map_or(0, |occupant| occupant.epoch);
-                // The frame's whole part in the judgement, and it is a copy.
-                subject.place.liveness = reading.words;
+        // Refused by name rather than skipped. A boot asked to serve a place and
+        // finding none is the one this section exists to make red: a log that
+        // said nothing would read the same as a boot that asked for nothing.
+        let Some(index) = found else {
+            crate::kprintln!(
+                "  unserved      place {} was to be served in place and this boot built no such \
+                 place",
+                Name(label),
+            );
+            return Err(Failure::Unserved("a place to be served in place was never built"));
+        };
+        let Some((_, cpu, tsc_khz, extra)) = consulting.as_mut() else {
+            crate::kprintln!(
+                "  unserved      place {} was to be served in place and no supervisor is running \
+                 to hear what it published",
+                Name(label),
+            );
+            return Err(Failure::Unserved(
+                "a place was to be served in place and no supervisor is running to hear it",
+            ));
+        };
+        let on = (*cpu, *tsc_khz);
+        let Some(mut subject) = extras.get_mut(index).and_then(Option::take) else {
+            return Err(Failure::WrongPlace);
+        };
+        let record = Record::read(subject.place.module).map_err(Failure::Manifest)?;
 
-                let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-                let watches = watch(occupant, frames)?;
-                let consulted = {
-                    let mut asking = Consulting {
-                        generation,
-                        frames,
-                        kernel,
-                        features,
-                        supervisor: &mut supervisor,
-                        reservations: &reservations,
-                        on: (*cpu, *tsc_khz),
-                    };
-                    // SAFETY: `cpu` is the core `main` vouched is started and
-                    // idle — every consultation above ran to completion on it —
-                    // and the supervisor's address space is live until the loop
-                    // at the end of this function.
-                    unsafe {
-                        consult(
-                            &mut asking,
-                            occupant,
-                            &mut subject.place,
-                            &subject.account,
-                            watches,
-                            now,
-                        )
-                    }?
-                };
-                subject.place.budget = consulted.budget;
-                subject.place.seen = consulted.heard.seen;
-                report.scheduled += 1;
-                let named = subject.place.occupant.as_ref().map_or(0, |occupant| occupant.named);
-                let promised = subject
-                    .place
-                    .occupant
-                    .as_ref()
-                    .and_then(|occupant| occupant.table.stop_deadline());
-                liveness_line(record, epoch, reading.words, &consulted, named);
-
-                // The stop it asked for, if it asked for one this boot can
-                // perform. A deadline still ahead is left pending, and the
-                // occupant goes at the teardown below as every place does —
-                // this frame has no scheduler to let a deadline arrive.
-                if let Some(deadline) = promised
-                    && deadline <= f_abi::control::at_once(now)
-                {
-                    // Published before the teardown, for the scripted stop's
-                    // reason: a stop notice a component is never told is a stop
-                    // it cannot obey.
-                    publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
-                    // A fresh endpoint in the supervisor's table, minted now —
-                    // after the run that asked for the stop and before the death
-                    // — for RFC 0076's reason and one this path found: the run
-                    // just finished was reaped, `Table::clear_all` emptied every
-                    // slot it held, and the handle the first run was given names
-                    // nothing. The first boot of this section noted the death on
-                    // it, discarded the refusal, and the supervisor was told of 0
-                    // deaths and refilled the place by the never-filled branch;
-                    // `heard_what_was_posted` is what went red. The store's
-                    // restart above mints its handle at the same point for the
-                    // same reason.
-                    let watches = {
-                        let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-                        watch(occupant, frames)?
-                    };
-                    let why =
-                        if named != 0 { named } else { cause::pack(cause::STOPPED, deadline) };
-                    let torn = tear_down(
-                        frames,
-                        &mut subject.place,
-                        &mut supervisor,
-                        &subject.account,
-                        why,
-                        &mut report,
-                        tree,
-                    )?;
-                    let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-                    // Refused loudly rather than discarded: a death noted on a
-                    // handle that names nothing is a supervisor never told, and
-                    // the `let _` this replaced is how that went unseen.
-                    occupant.table.note_peer_gone(watches).map_err(Failure::Notice)?;
-                    ended_line(record, epoch, why, torn);
-                    publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
-
-                    // The second run: told of the death, with the cause on it.
-                    publish_only(
-                        &mut extra.place,
-                        &mut supervisor,
-                        &ledger_ring,
-                        &mut report,
-                        &[(watches, subject.place.gone)],
-                    )?;
-                    let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-                    let consulted = {
-                        let mut asking = Consulting {
-                            generation,
-                            frames,
-                            kernel,
-                            features,
-                            supervisor: &mut supervisor,
-                            reservations: &reservations,
-                            on: (*cpu, *tsc_khz),
-                        };
-                        // SAFETY: as the run above; the core came back from it.
-                        unsafe {
-                            consult(
-                                &mut asking,
-                                occupant,
-                                &mut subject.place,
-                                &subject.account,
-                                watches,
-                                now,
-                            )
-                        }?
-                    };
-                    subject.place.budget = consulted.budget;
-                    subject.place.seen = consulted.heard.seen;
-                    report.scheduled += 1;
-                    supervised_line(&consulted, u32::from(subject.place.occupant.is_some()));
-                    heard_what_was_posted(&consulted, subject.place.gone)?;
-                    // A supervisor that heard the death and left the place is
-                    // not a failure here — `never` is a policy — and the log says
-                    // which it was. `cargo xtask compositor` is what requires a
-                    // restart on the half whose reading is stuck, and none on the
-                    // halves whose reading is not.
-                    if subject.place.occupant.is_some() {
-                        subject.place.restarts += 1;
-                        report.restarts += 1;
-                        report.spawns += 1;
-                        restart_line(record, &subject.place, &consulted);
-                        spawned_line(record, &subject.place, consulted.spawned);
-                        mounted_line(
-                            record,
-                            &subject.place,
-                            mount(tree, &subject.place, &mut report)?,
-                        );
-                        publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
-                    }
-                }
-                let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
-                *back = Some(subject);
+        // --- 0. the occupant, served in its place ------------------------------
+        let (epoch, served_tree) = {
+            let occupant = subject.place.occupant.as_mut().ok_or(Failure::Unserved(
+                "a place to be served in place had no occupant to serve",
+            ))?;
+            // **The reason this component ran beside its place until now, and
+            // it is answered here rather than routed around.** A spawn maps a
+            // routing page and ring memory only for a manifest that declares a
+            // `board` and a `data` need — `spawn` says why the frame maps them
+            // rather than granting them — and a component told nothing has
+            // nowhere to learn where its rings are, so its serving life ends
+            // `NO_ROUTING` before it looks. `user/virtio-blk` hit the same wall
+            // and answered it by declaring both; so must any manifest served
+            // here. There is no fallback: a frame that stood a second instance
+            // up beside the place when the declaration was missing would put the
+            // gap RFC 0126 recorded back, green.
+            if occupant.board == 0 || occupant.data == 0 {
+                crate::kprintln!(
+                    "  unserved      place {} declares no `board` or no `data` need, so its \
+                     occupant has no routing page or no ring memory and cannot be served in \
+                     its place — board {}, data {}",
+                    Name(record.label()),
+                    if occupant.board == 0 { "absent" } else { "mapped" },
+                    if occupant.data == 0 { "absent" } else { "mapped" },
+                );
+                return Err(Failure::Unserved(
+                    "a place to be served in place declares no board or no data need; declare \
+                     both, as user/virtio-blk/manifest.toml does",
+                ));
             }
-            // Said rather than skipped: a reading that reached nobody is the
-            // failure this whole section exists to make visible, and a log with
-            // no line about it would read the same as a boot that carried none.
-            _ => crate::kprintln!(
-                "  liveness      a reading was carried for place {} and there is no supervisor \
-                 running, or no such place, to put it on",
-                Name(reading.label),
-            ),
+            // SAFETY: `cpu` is the core `main` vouched is started and idle — every
+            // consultation above ran to completion on it — and `occupant` is the
+            // instance `fill` spawned into this place with its address space
+            // live and no core inside it. `client` serves nothing on the
+            // occupant's control ring that the occupant writes: a component that
+            // asks the frame for nothing has nothing to answer.
+            let ran =
+                unsafe { serve_ring3(occupant, frames, features, on, life, &mut *client, None) };
+            let (announced, death, driven) = ran?;
+            report.scheduled += 1;
+            scheduled_line(Name(record.label()), on.0, life, announced, death);
+            let after = tree_after(occupant);
+            if state_after_line(Name(record.label()), occupant.tree_snapshot, after) {
+                report.moved = report.moved.saturating_add(1);
+            }
+            retained = retained.saturating_add(client.retained(frames));
+            // The client's news, after the join and never instead of it.
+            driven.map_err(Failure::Datapath)?;
+            (occupant.epoch, occupant.tree_physical)
+        };
+
+        // --- 1. the reading, copied out of the tree the root names -------------
+        let (mounted, words) = copied(tree, &subject.place, liveness, frames)?;
+        // The frame's whole part in the judgement, and it is a copy.
+        subject.place.liveness = words;
+
+        let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+        let watches = watch(occupant, frames)?;
+        let consulted = {
+            let mut asking = Consulting {
+                generation,
+                frames,
+                kernel,
+                features,
+                supervisor: &mut supervisor,
+                reservations: &reservations,
+                on,
+            };
+            // SAFETY: `cpu` is the core `main` vouched is started and idle — the
+            // occupant's run above ran to completion on it — and the
+            // supervisor's address space is live until the loop at the end of
+            // this function.
+            unsafe {
+                consult(&mut asking, occupant, &mut subject.place, &subject.account, watches, now)
+            }?
+        };
+        subject.place.budget = consulted.budget;
+        subject.place.seen = consulted.heard.seen;
+        report.scheduled += 1;
+        let named = subject.place.occupant.as_ref().map_or(0, |occupant| occupant.named);
+        let promised =
+            subject.place.occupant.as_ref().and_then(|occupant| occupant.table.stop_deadline());
+        liveness_line(record, epoch, (served_tree, mounted), words, &consulted, named);
+
+        // --- 2. the stop it asked for, and the restart -------------------------
+        //
+        // A deadline still ahead is left pending, and the occupant goes at the
+        // teardown below as every place does — this frame has no scheduler to
+        // let a deadline arrive.
+        if let Some(deadline) = promised
+            && deadline <= f_abi::control::at_once(now)
+        {
+            // Published before the teardown, for the scripted stop's reason: a
+            // stop notice a component is never told is a stop it cannot obey.
+            publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
+            // A fresh endpoint in the supervisor's table, minted now — after the
+            // run that asked for the stop and before the death — for RFC 0076's
+            // reason and one this path found: the run just finished was reaped,
+            // `Table::clear_all` emptied every slot it held, and the handle the
+            // first run was given names nothing. The store's restart above mints
+            // its handle at the same point for the same reason.
+            let watches = {
+                let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+                watch(occupant, frames)?
+            };
+            // The instance about to go, named before it goes: the page its tree
+            // is, which `tear_down` unmounts. Read off the place rather than
+            // carried from step 0, so a place whose occupant had changed in
+            // between would print a different page than the copy did.
+            let ending = subject
+                .place
+                .occupant
+                .as_ref()
+                .map_or((u32::MAX, 0), |occupant| (occupant.epoch, occupant.tree_physical));
+            let why = if named != 0 { named } else { cause::pack(cause::STOPPED, deadline) };
+            let torn = tear_down(
+                frames,
+                &mut subject.place,
+                &mut supervisor,
+                &subject.account,
+                why,
+                &mut report,
+                tree,
+            )?;
+            let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            // Refused loudly rather than discarded: a death noted on a handle
+            // that names nothing is a supervisor never told, and the `let _` this
+            // replaced is how that went unseen.
+            occupant.table.note_peer_gone(watches).map_err(Failure::Notice)?;
+            ended_line(record, ending, why, torn);
+            publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
+
+            // The second run: told of the death, with the cause on it.
+            publish_only(
+                &mut extra.place,
+                &mut supervisor,
+                &ledger_ring,
+                &mut report,
+                &[(watches, subject.place.gone)],
+            )?;
+            let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            let consulted = {
+                let mut asking = Consulting {
+                    generation,
+                    frames,
+                    kernel,
+                    features,
+                    supervisor: &mut supervisor,
+                    reservations: &reservations,
+                    on,
+                };
+                // SAFETY: as the run above; the core came back from it.
+                unsafe {
+                    consult(
+                        &mut asking,
+                        occupant,
+                        &mut subject.place,
+                        &subject.account,
+                        watches,
+                        now,
+                    )
+                }?
+            };
+            subject.place.budget = consulted.budget;
+            subject.place.seen = consulted.heard.seen;
+            report.scheduled += 1;
+            supervised_line(&consulted, u32::from(subject.place.occupant.is_some()));
+            heard_what_was_posted(&consulted, subject.place.gone)?;
+            // A supervisor that heard the death and left the place is not a
+            // failure here — `never` is a policy — and the log says which it
+            // was. `cargo xtask compositor` is what requires a restart on the
+            // half whose reading is stuck, and none on the halves whose reading
+            // is not.
+            if subject.place.occupant.is_some() {
+                subject.place.restarts += 1;
+                report.restarts += 1;
+                report.spawns += 1;
+                restart_line(record, &subject.place, &consulted);
+                spawned_line(record, &subject.place, consulted.spawned);
+                mounted_line(record, &subject.place, mount(tree, &subject.place, &mut report)?);
+                publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
+            }
         }
+        let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
+        *back = Some(subject);
     }
 
     // ------------------------------------------------- the other places, back
@@ -3396,34 +3478,48 @@ pub struct Generation {
     pub root: [u8; 32],
 }
 
-/// Two words a synchronising component published about its own progress, read
-/// by the frame out of that component's state tree, to be copied onto the row a
-/// supervisor reads for the place its manifest names.
+/// Two words a served occupant published about its own progress, copied out of
+/// the tree **the frame's own root names for its place**.
 ///
-/// `E3-B05e`'s delivery, and the type says as little as it can: two words and a
-/// label. The frame does not know which is which beyond the slot each is copied
-/// into, and it never compares either with anything — `Place::liveness` carries
-/// that argument and RFC 0123 is the reversal it guards.
+/// The mount word is followed rather than the instance's own field, and that is
+/// the point of the function rather than a detour: [`mount`] wrote the physical
+/// address of the occupant's page into the root when the occupant was spawned,
+/// and [`tear_down`] zeroes it when the occupant goes, so what the root names at
+/// this moment is the place's current occupant and nothing else. A reading taken
+/// that way cannot be a second instance's — which is what `E3-B05e`'s delivery
+/// was until RFC 0129, when the words came from a compositor stood up beside the
+/// place and were put on the row of one that had never run.
 ///
-/// # Whose reading it is, which is the narrowing RFC 0126 states
+/// Answers the page it followed as well as the words, so the log can print the
+/// identity beside the copy. Neither word is read beyond being copied:
+/// `Place::liveness` carries that argument and RFC 0123 is the reversal it
+/// guards.
 ///
-/// The compositor that published these was stood up by `kernel/src/compositor.rs`
-/// **outside** its place, which is `CHAOS_GAP`'s shape: no compositor in this
-/// build is served from the place [`demonstrate`] builds for it. So the reading is
-/// the manifest's — the same component file, the same label — and not the place's
-/// current occupant's, which has never run. What the supervisor then ends and
-/// refills is that occupant. The day the compositor is served from its place, the
-/// frame copies the words out of the occupant's own mounted tree and this type
-/// goes; until then the label is what binds a reading to a place and the log
-/// says where the words came from.
-#[derive(Clone, Copy, Debug)]
-pub struct Reading {
-    /// The manifest label of the place whose row the words go on.
-    pub label: &'static [u8],
-    /// Waits outstanding and frames abandoned, in that order — the order
-    /// `f_supervisor::routing::at::LIVE` names them in. Copied, never read.
-    /// Unit: as published — waits, then frames.
-    pub words: [u64; 2],
+/// # Errors
+///
+/// [`Failure::Unserved`] for a place the root names no page for, or a page that
+/// does not validate, or a tree that carries no node for a word it was to copy —
+/// each is a reading that does not exist, and a zero on the row in its place
+/// would be a reading nobody published.
+fn copied(
+    tree: &crate::state::Tree,
+    place: &Place,
+    liveness: [u32; 2],
+    frames: &FrameAllocator,
+) -> Result<(u64, [u64; 2]), Failure> {
+    let unread =
+        Failure::Unserved("the tree the frame's root names for a served place is unreadable");
+    let id = crate::state::node::mount(place.slot).ok_or(unread)?;
+    let mounted = tree.value(id).filter(|physical| *physical != 0).ok_or(unread)?;
+    // The direct map is how this build follows a physical mount word, and the
+    // two naming one frame is `FrameAllocator::virt`'s whole contract — the same
+    // step [`mount`] takes to read the tree back when it first mounts it.
+    let at = frames.virt(Frame::from_addr(mounted)) as u64;
+    let reader = f_abi::state::Reader::at(at, FRAME_SIZE as u32).map_err(|_| unread)?;
+    let [waits, abandoned] = liveness;
+    let missing =
+        Failure::Unserved("a served place's tree carries no node for a word it was to copy");
+    Ok((mounted, [reader.value(waits).ok_or(missing)?, reader.value(abandoned).ok_or(missing)?]))
 }
 
 /// Build a place from one component file, stake it with an account its own
@@ -4782,6 +4878,66 @@ pub trait Datapath {
     fn abandons(&self) -> bool {
         false
     }
+
+    /// Say everything the occupant must be told before its first instruction.
+    ///
+    /// **Called before the core is given the job, which is the whole of why it
+    /// exists.** A component that reads its routing page to know where its
+    /// rings are has no instruction it could execute before the page is
+    /// complete, and [`Self::drive`] is called after the core has started. The
+    /// block client does not need it: its page is written by [`write_routing`]
+    /// out of what the bus walk found, one layer up, and the default here
+    /// changes nothing for it. A client whose protocol owns the page — a
+    /// compositor's board is `f_compositor::routing`'s, not the frame's — writes
+    /// it here, magic last.
+    ///
+    /// # Errors
+    ///
+    /// A message for the boot log. The core is not started on an error: an
+    /// occupant told half of what it needs would refuse its routing and end,
+    /// which reads from outside exactly like a component that chose to.
+    fn prepare(&mut self, _wired: Wired, _frames: &FrameAllocator) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// The occupant's core has reported finished; take what it left.
+    ///
+    /// Called once per generation, after the join and before anything of the
+    /// instance is torn down — the only window in which its pages are both
+    /// quiet and still mapped. What the client reads here is the client's own
+    /// business; this file hands over where the pages are and reads nothing.
+    fn ended(&mut self, _wired: Wired) {}
+}
+
+/// A place whose occupant this boot serves **from the place**, and the client
+/// that serves it.
+///
+/// `E3-B05e`'s delivery, second form. The first was a `Reading`: two words the
+/// frame took off a compositor stood up *beside* its place and copied onto the
+/// row of an occupant that had never run, so the instance a supervisor stopped
+/// was not the instance that published. RFC 0126's first reversal is this type —
+/// the place's own occupant is handed a core and a client, and the words are
+/// copied out of **its** tree, through the frame's own mount of it, so the
+/// instance the supervisor then stops is the instance that published them.
+/// RFC 0129.
+///
+/// The type says as little as the one it replaces. A label binds it to a place,
+/// a life selector says which of the component's lives to enter, and two node
+/// ids say which words to copy — in the order `f_supervisor::routing::at::LIVE`
+/// names its two slots. The frame does not know which is which beyond the slot
+/// each is copied into, and compares neither with anything: `Place::liveness`
+/// carries that argument and RFC 0123 is the reversal it guards.
+pub struct Served<'a> {
+    /// The manifest label of the place whose occupant is served.
+    pub label: &'static [u8],
+    /// Which of the component's lives the occupant is entered with. Unit: none —
+    /// a selector ordinal, the low half of `f_abi::door::Entry`.
+    pub life: u32,
+    /// The node ids whose words go onto the supervisor's row: waits
+    /// outstanding, then frames abandoned. Unit: none — state node ids.
+    pub liveness: [u32; 2],
+    /// The client the frame runs against the occupant while it holds a core.
+    pub client: &'a mut dyn Datapath,
 }
 
 /// Where a serving occupant's two rings and its board are, as kernel addresses.
@@ -4805,6 +4961,25 @@ pub struct Wired {
     /// This machine's timestamp-counter rate, for bounding a wait.
     /// Unit: kilohertz.
     pub tsc_khz: u64,
+    /// The occupant's own published state tree, as a kernel address — the page
+    /// [`spawn`] charged to its account and [`mount`] put under the frame's root.
+    ///
+    /// Handed over so a client can take the readings it owes *before* the core
+    /// runs — a blank tree is only evidence if it is read while blank — and
+    /// after it ends, without being a second thing that knows where a
+    /// component's tree lives. Unit: bytes, a kernel address.
+    pub tree: u64,
+    /// The same page's physical address, which is what the frame's root mount
+    /// word carries. The identity a log can print on both sides of a copy: the
+    /// client says which page its component wrote into, and the lifecycle says
+    /// which page it copied from and which it unmounted. Unit: bytes, physical.
+    pub tree_physical: u64,
+    /// The occupant's heap, as a kernel address, or zero for a component that
+    /// declared none. Unit: bytes, a kernel address.
+    pub heap: u64,
+    /// Which occupant of the place this is — the `epoch` [`spawn`] wrote into
+    /// its control ring's header. Unit: instances, counting from zero.
+    pub epoch: u32,
 }
 
 /// Map the transfer window into an occupant's address space.
@@ -5194,7 +5369,15 @@ unsafe fn serve_ring3(
         board: occupant.board,
         cpu,
         tsc_khz,
+        tree: occupant.tree,
+        tree_physical: occupant.tree_physical,
+        heap: occupant.heap,
+        epoch: occupant.epoch,
     };
+    // Everything the occupant must be told before its first instruction, while
+    // no core is inside it. Refused before a job is published, so an error here
+    // leaves nothing to join and no table to take back.
+    client.prepare(wired, frames).map_err(Failure::Datapath)?;
     // SAFETY: the caller's guarantee.
     let previous = unsafe { post_ring3(occupant, features, cpu, selector) };
     // SAFETY: `cpu` is a core the caller vouched is started and idle, and the
@@ -5284,6 +5467,10 @@ unsafe fn serve_ring3(
         };
         joined.map_err(|_| Failure::NoAnswer)?;
     }
+    // The core is out and the pages are still mapped: the one window in which a
+    // client can read what the occupant left without racing it or reading memory
+    // that has gone back to the account.
+    client.ended(wired);
 
     // SAFETY: the core reported finished, which is what `Ok` above means.
     let (announced, death) = unsafe { collect_ring3(occupant, cpu, previous) };
@@ -5489,31 +5676,38 @@ fn restart_line(record: &Record, place: &Place, consulted: &Consulted) {
 /// **Two columns from two sides of the boundary, printed and not compared.** The
 /// frame's column is what it copied; the supervisor's is its own board. `cargo
 /// xtask compositor` holds the supervisor's column against the numbers the
-/// compositor's own tree published a stage earlier — a check outside the frame,
-/// because comparing an occupant's readings is the one thing RFC 0123 forbids
-/// this side. A frame that copied the wrong node, or a supervisor that read the
-/// wrong offset, is a line whose heard column is not the tree's.
+/// compositor's own tree published — a check outside the frame, because
+/// comparing an occupant's readings is the one thing RFC 0123 forbids this side.
+/// A frame that copied the wrong node, or a supervisor that read the wrong
+/// offset, is a line whose heard column is not the tree's.
 ///
-/// Where the words came from is said rather than implied: an earlier stage of
-/// this boot, and not the occupant named here, which has not run. [`Reading`]
-/// says why.
+/// **And which instance, twice.** `trees` is the page the occupant that ran
+/// writes its tree into, as the instance says it, and the page the frame's root
+/// names for the place, which is where the words were copied from. They are one
+/// page or the copy was taken off somebody else; the frame prints both and the
+/// harness requires them equal and equal to the page the client says its
+/// component published into. RFC 0129.
 fn liveness_line(
     record: &Record,
     epoch: u32,
-    carried: [u64; 2],
+    trees: (u64, u64),
+    copied: [u64; 2],
     consulted: &Consulted,
     named: u64,
 ) {
-    let [waits, abandoned] = carried;
+    let [waits, abandoned] = copied;
+    let (served, mounted) = trees;
     crate::kprintln!(
-        "  liveness      place {} epoch {}: the frame copied waits {}, abandoned {} from the \
-         tree its component published earlier in this boot; the supervisor heard waits {}, \
-         abandoned {} and named {}, detail {} — told of {} death(s), decided {}; the frame \
-         answered {}, last refusal {:#010x}",
+        "  liveness      place {} epoch {}: the occupant that ran keeps its tree at {:#x}, and \
+         the frame copied waits {}, abandoned {} through its root's mount of {:#x}; the \
+         supervisor heard waits {}, abandoned {} and named {}, detail {} — told of {} death(s), \
+         decided {}; the frame answered {}, last refusal {:#010x}",
         Name(record.label()),
         epoch,
+        served,
         waits,
         abandoned,
+        mounted,
         consulted.heard.waits,
         consulted.heard.abandoned,
         if named == 0 { "no fate" } else { cause::label(cause::of(named)) },
@@ -5525,15 +5719,20 @@ fn liveness_line(
     );
 }
 
-/// An occupant ended by a stop a supervisor asked for, with the cause it went by.
-fn ended_line(record: &Record, epoch: u32, why: u64, torn: (u32, u32, u32, u32)) {
+/// An occupant ended by a stop a supervisor asked for, with the cause it went by
+/// and the page its tree was — read off the instance as it goes, so a stop that
+/// reached a different occupant than the copy did prints a different page.
+fn ended_line(record: &Record, ending: (u32, u64), why: u64, torn: (u32, u32, u32, u32)) {
+    let (epoch, tree_at) = ending;
     crate::kprintln!(
-        "  timeout       place {} epoch {} ended on the supervisor's word — {}, detail {}; {} \
-         capabilit(ies) revoked, {} frame(s) refunded to its account, {} peer-gone notice(s)",
+        "  timeout       place {} epoch {} ended on the supervisor's word — {}, detail {}; its \
+         tree at {:#x} unmounted; {} capabilit(ies) revoked, {} frame(s) refunded to its \
+         account, {} peer-gone notice(s)",
         Name(record.label()),
         epoch,
         cause::label(cause::of(why)),
         cause::detail(why),
+        tree_at,
         torn.0,
         torn.2,
         torn.3,
