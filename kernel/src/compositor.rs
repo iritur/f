@@ -918,6 +918,44 @@ pub struct Board {
     /// One where that position was an extrapolation rather than the last
     /// position the device reported. Unit: none — a flag.
     pub latch_extrapolated: u64,
+
+    // --- the input ring, `E3-B04g` ------------------------------------------
+    //
+    // What the component took off the input driver's ring **itself**, with this
+    // frame holding neither end of it. Read here and judged in
+    // `kernel/src/input.rs`, which is the one boot that connects the ring; every
+    // other boot reads `input_connected` zero and the rest zero beside it.
+    /// One where the component adopted an input ring. Unit: none — a flag.
+    pub input_connected: u64,
+    /// Entries it took that were not the driver's attestation. Unit: entries.
+    pub input_entries: u64,
+    /// Of those, entries the decoder took. Unit: entries.
+    pub input_decoded: u64,
+    /// Of those, entries the decoder refused. Unit: entries.
+    pub input_refused: u64,
+    /// Of the decoded ones, pointer motion. Unit: entries.
+    pub input_motions: u64,
+    /// The component's fold over what it drained. Unit: none — a checksum.
+    pub input_crossing: u64,
+    /// How many entries went into it. Unit: entries.
+    pub input_crossed: u64,
+    /// Attestations it took off the ring. Unit: entries.
+    pub input_attestations: u64,
+    /// The driver's word as it arrived on the ring. Unit: none — a checksum.
+    pub input_attested: u64,
+    /// The count the driver attested beside it. Unit: entries.
+    pub input_attested_count: u64,
+    /// Entries taken after the attestation. Unit: entries.
+    pub input_unattested: u64,
+    /// One where the component's own comparison agreed. Unit: none — a flag.
+    pub input_agreed: u64,
+    /// The last latched frame's graph, folded with the pointer's translation
+    /// masked, before the patch. Unit: none — a checksum.
+    pub latch_unmoved_before: u64,
+    /// The same fold after it. Unit: none — a checksum.
+    pub latch_unmoved_after: u64,
+    /// How many nodes that fold walked. Unit: nodes.
+    pub latch_walked: u64,
 }
 
 impl Board {
@@ -984,6 +1022,21 @@ impl Board {
             latch_lead_nanos: board.read64(reported::LATCH_LEAD_NANOS).ok()?,
             latch_aim_nanos: board.read64(reported::LATCH_AIM_NANOS).ok()?,
             latch_extrapolated: board.read64(reported::LATCH_EXTRAPOLATED).ok()?,
+            input_connected: board.read64(reported::INPUT_CONNECTED).ok()?,
+            input_entries: board.read64(reported::INPUT_ENTRIES).ok()?,
+            input_decoded: board.read64(reported::INPUT_DECODED).ok()?,
+            input_refused: board.read64(reported::INPUT_REFUSED).ok()?,
+            input_motions: board.read64(reported::INPUT_MOTIONS).ok()?,
+            input_crossing: board.read64(reported::INPUT_CROSSING).ok()?,
+            input_crossed: board.read64(reported::INPUT_CROSSED).ok()?,
+            input_attestations: board.read64(reported::INPUT_ATTESTATIONS).ok()?,
+            input_attested: board.read64(reported::INPUT_ATTESTED).ok()?,
+            input_attested_count: board.read64(reported::INPUT_ATTESTED_COUNT).ok()?,
+            input_unattested: board.read64(reported::INPUT_UNATTESTED).ok()?,
+            input_agreed: board.read64(reported::INPUT_AGREED).ok()?,
+            latch_unmoved_before: board.read64(reported::LATCH_UNMOVED_BEFORE).ok()?,
+            latch_unmoved_after: board.read64(reported::LATCH_UNMOVED_AFTER).ok()?,
+            latch_walked: board.read64(reported::LATCH_WALKED).ok()?,
         })
     }
 }

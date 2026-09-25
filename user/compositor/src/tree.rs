@@ -716,8 +716,16 @@ impl<'a> Held<'a> {
         &self.latch
     }
 
-    /// One position the pointer reported, as the frame wrote it into this
-    /// component's routing page.
+    /// One position the pointer reported, handed over as a [`Reading`].
+    ///
+    /// **The harness's door and no longer the machine's.** It was how the frame
+    /// would have told this component where the pointer was, through three
+    /// words on the routing page that no frame ever wrote; `E3-B04g` retired
+    /// those words, because a frame writing them would be a frame holding a
+    /// reading. What a running component is handed is [`Held::drained`], off the
+    /// ring. This stays because the host tests reach the window through it and a
+    /// test that had to build a ring to report a position would be testing the
+    /// ring.
     ///
     /// `false` when the predictor refused it as not newer than the newest it
     /// holds. It is taken here rather than at latch time because a velocity
@@ -727,6 +735,14 @@ impl<'a> Held<'a> {
     /// has been handed.
     pub fn reported(&mut self, reading: Reading) -> bool {
         self.latch.observed(reading)
+    }
+
+    /// One event this component took off the input ring itself, `E3-B04g`.
+    ///
+    /// [`crate::latch::LateLatch::drained`] is where the reading is rebuilt,
+    /// and why it is rebuilt from the event rather than from a [`Reading`].
+    pub fn drained(&mut self, event: &f_abi::input::Event) -> bool {
+        self.latch.drained(event)
     }
 
     /// One completion reached the client's ring.

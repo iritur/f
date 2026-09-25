@@ -39,8 +39,8 @@ Measured by `cargo xtask claim rollback-comparisons` — one invocation of
   boots                                        6
   generations offered on the menu              2
   comparisons matched                          3
-  module bytes delivered                  217844
-  component files in the module                8
+  module bytes delivered                  236288
+  component files in the module                9
   leaves moved by the break                    1
   unknown roots refused                        1
   tampered modules folding to the honest root  1
@@ -49,9 +49,12 @@ Measured by `cargo xtask claim rollback-comparisons` — one invocation of
 
 **The two rows that move are dated, and both moved for the same honest reason.**
 `module_bytes_delivered` and `component_files_in_the_module` read 65 348 and 4
-when this claim was written and read 217 844 and 8 as measured on 2026-09-24.
-Nothing about the demonstration changed: E2 and E3 added component files —
-`objects`, `compositor`, `panel` — and every one of them travels in this module.
+when this claim was written, 217 844 and 8 as measured on 2026-09-24, and
+236 288 and 9 later the same day. Nothing about the demonstration changed: E2 and
+E3 added component files — `supervisor`, `objects`, `compositor`, `panel` — and
+every one of them travels in this module; the ninth is `virtio-input`, which every boot had
+placed since 2026-09-23 and `user/generation.toml` did not name until an audit
+read that file's own *exactly `COMPONENTS` as a set* against the table.
 Both are floors in `[threshold]` precisely so that this happens without a red
 build, which is why they were stale for four components with nothing to notice;
 what a stale number costs here is a reader comparing a published figure against
@@ -163,7 +166,7 @@ unknown_roots_refused                       = { min = 1 }
 tampered_modules_folding_to_the_honest_root = { min = 1, max = 1 }
 tampered_modules_caught_by_the_digest       = { min = 1, max = 1 }
 tampered_members_named_by_the_assembler     = { min = 1, max = 1 }
-# What was actually delivered. A floor rather than the measured 217 844, because
+# What was actually delivered. A floor rather than the measured 236 288, because
 # the number moves whenever a component image does and a claim that pinned it
 # would go red on every unrelated build; what it rules out is a module that has
 # lost its files — at which point the digest above covers a tree and some
@@ -180,7 +183,10 @@ module_bytes_delivered                      = { min = 4096 }
 # rule restated rather than rewritten, and the reversal is the one it always
 # was: a component leaving `user/generation.toml` is a diff naming it, and this
 # line moves down in that diff or the claim goes red for the right reason.
-component_files_in_the_module               = { min = 8 }
+#
+# **9 from 2026-09-24**, in the diff that added `virtio-input` to the generation,
+# which is the rule above being followed rather than repaired.
+component_files_in_the_module               = { min = 9 }
 
 [hardware]
 runner = "runner-class-A"       # pinned bare metal, thermally stable

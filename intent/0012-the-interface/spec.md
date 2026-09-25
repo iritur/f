@@ -445,6 +445,14 @@ seam nobody tests is a seam that drifts.
 - [ ] **E3-B04e** `M` Late-latch consumes the prediction.
   *exit:* the latched value is the predicted one, asserted from both sides of the seam — the input path's trace and the compositor's frame trace agree on the value and on how far it moved.
   *needs:* E3-B04c, E3-B01i
+- [ ] **E3-B04f** `M` What arrived is what was sent: the crossing attested on both sides of the input ring.
+  **Added on 2026-09-25, a day after `TODO.md` gained it.** Wave 13 put this line and the next into the tracker and not into this decomposition, which is the drift that comparing the two files exists to catch. RFC 0124.
+  *exit:* a boot shows the entries that arrived are the entries that were sent, as two words neither side computed from the other; a reading minted between the two stages turns it red with the counts agreeing; and the frame holds no reading and names none.
+  *needs:* E3-B04d
+- [ ] **E3-B04g** `M` The driver's entries reach a client: the compositor drains the input ring itself.
+  **Added on 2026-09-25 with `E3-B04f`.** RFC 0125.
+  *exit:* a boot in which `user/compositor` holds the other end of the driver's data channel, decodes every entry with `f_abi::input::Event::decode`, rebuilds the reading with `from_wire_nanos` passed a field read, and folds what it drained into a word required to equal the driver's — with the frame relaying no input entry at all.
+  *needs:* E3-B04f, E3-B01i
 ```
 
 ## E3-B05 — explicit synchronisation

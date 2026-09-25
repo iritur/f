@@ -179,11 +179,19 @@ jobs:
           cat alarm/jobs.tsv
           # Per job and not per run: the run-level log archive is not served
           # until the whole run has finished, and this job is part of the run.
+          #
+          # Every line tagged with its job's name and id, tab-separated, so that
+          # ops/alarm.sh can quote a headline and an excerpt from one job and say
+          # which. Untagged, two failures were one undifferentiated log and the
+          # excerpt could be about the other job.
           : > alarm/log.txt
-          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-                        --jq '.jobs[] | select(.conclusion == "failure") | .id' || true); do
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" >> alarm/log.txt || true
-          done
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | "\(.id)\t\(.name)"' \
+            > alarm/failed.tsv || true
+          while IFS=$'\t' read -r id name; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" |
+              awk -v job="$name" -v id="$id" '{ print job "\t" id "\t" $0 }' >> alarm/log.txt || true
+          done < alarm/failed.tsv
           ALARM_HEAD=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ALARM_BRANCH" --jq .sha || true) \
             bash ops/alarm.sh
           {

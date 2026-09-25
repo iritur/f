@@ -220,6 +220,13 @@ jobs:
       # which is a set of names against a list, and belongs here rather than at
       # three in the morning.
       - run: cargo xtask lint-schedules
+      # Its sibling, over every workflow rather than the scheduled ones: a job
+      # that runs in the private image and names `permissions:` must name
+      # `packages: read`, because naming the block replaces the default set.
+      # Three jobs lost their container that way and never ran a step —
+      # `nightly.yml`'s `sweep` for five red nights, and `weekly.yml`'s `runners`
+      # and `dates` from the day they were written.
+      - run: cargo xtask lint-pulls
       - run: cargo xtask lint-boundary
       - run: cargo xtask lint-gate
       # Formatting and clippy, by calling the definition rather than restating

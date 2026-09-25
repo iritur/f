@@ -195,8 +195,19 @@ jobs:
     needs: [environment, image, root]
     runs-on: ubuntu-latest
     container: ${{ needs.environment.outputs.image }}
+    # `packages: read` is what pulls the image on the line above, and it is here
+    # because naming `permissions:` *replaces* the default set rather than adding
+    # to it. `nightly.yml`'s `sweep` job measured exactly this on the same image:
+    # it failed at `Initialize containers` with `Error response from daemon:
+    # denied` before any step ran, on five red nights (`docs/postmortem/0002`).
+    # This job and `dates` below carried the same block from `c8513d4` until the
+    # 2026-09-24 audit, so by the same mechanism neither could have started and
+    # E2-P06's two-runner and across-dates halves asserted nothing in that time.
+    # Inferred from `sweep`'s measurement, not observed on these two jobs.
+    # `cargo xtask lint-pulls` now refuses the shape in every workflow.
     permissions:
       contents: read
+      packages: read
       issues: write
     steps:
       # A checkout, unlike E0-R01's `address` job, because the comparison here
@@ -281,8 +292,11 @@ jobs:
     needs: [environment, image, root]
     runs-on: ubuntu-latest
     container: ${{ needs.environment.outputs.image }}
+    # `packages: read` for `runners`' reason, above: without it this job could
+    # not pull its own container and never ran a step.
     permissions:
       contents: read
+      packages: read
       actions: read
       issues: write
     steps:
@@ -422,11 +436,19 @@ jobs:
           cat alarm/jobs.tsv
           # Per job and not per run: the run-level log archive is not served
           # until the whole run has finished, and this job is part of the run.
+          #
+          # Every line tagged with its job's name and id, tab-separated, so that
+          # ops/alarm.sh can quote a headline and an excerpt from one job and say
+          # which. Untagged, two failures were one undifferentiated log and the
+          # excerpt could be about the other job.
           : > alarm/log.txt
-          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-                        --jq '.jobs[] | select(.conclusion == "failure") | .id' || true); do
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" >> alarm/log.txt || true
-          done
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | "\(.id)\t\(.name)"' \
+            > alarm/failed.tsv || true
+          while IFS=$'\t' read -r id name; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" |
+              awk -v job="$name" -v id="$id" '{ print job "\t" id "\t" $0 }' >> alarm/log.txt || true
+          done < alarm/failed.tsv
           ALARM_HEAD=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ALARM_BRANCH" --jq .sha || true) \
             bash ops/alarm.sh
           {

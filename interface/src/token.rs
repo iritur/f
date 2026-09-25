@@ -2947,22 +2947,27 @@ mod tests {
         // where 0x1A is 1 033 hundred-thousandths of light and therefore 677 of
         // 65 535. A truncating rescale answers 676 there and the same on both
         // ends, which is why one of the three has to be off a round number.
-        let (resolved, _report) = resolve(&Theme::DEFAULT);
-        let mut white = Node::new(NodeId::new(1), NodeId::UNNAMED, Role::Surface);
-        white.style = TokenSet::EMPTY;
-        let paint = resolved.paint(&white);
-
         assert_eq!(linear_x65535(0x00), 0, "black is none of the channel");
         assert_eq!(linear_x65535(0xFF), 65_535, "white is all of it");
         assert_eq!(linear_x65535(0x1A), 677);
         assert_eq!(linear_x65535(0x76), 11_872);
+
+        // The order of the three channels, which needs an ink whose channels
+        // differ: on a grey every permutation is the same triple and a swap has
+        // nothing to show. `emphasis` is #0B3D91, three different bytes, worn by
+        // the settings panel's group. The expected side is literals from
+        // `LINEAR_X100000` — 335, 4 667 and 28 315 hundred-thousandths, rounded
+        // onto 65 535 — and not the method's body written again, because a
+        // restatement agrees with any body that calls `linear_x65535` on the
+        // three fields, whichever order it puts them in.
+        let (resolved, _report) = resolve(&Theme::DEFAULT);
+        let group = Node::new(NodeId::new(1), NodeId::UNNAMED, Role::Group)
+            .with_style(styled(&["surface-2", "emphasis"]));
+        let paint = resolved.paint(&group);
+        assert_eq!(paint.ink_rgb, Rgb::new(0x0B, 0x3D, 0x91), "the fixture is not emphasis");
         assert_eq!(
             paint.ink_linear_x65535(),
-            (
-                linear_x65535(paint.ink_rgb.r),
-                linear_x65535(paint.ink_rgb.g),
-                linear_x65535(paint.ink_rgb.b)
-            ),
+            (220, 3_059, 18_556),
             "the three channels are not in the order they are named"
         );
     }

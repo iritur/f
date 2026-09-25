@@ -318,6 +318,36 @@ pub mod reported {
     /// being hidden inside a word that would simply not match.
     /// Unit: entries.
     pub const CROSSED: u32 = super::REPORT + 96;
+    /// One where [`CROSSING`] also went onto the data ring as an attestation,
+    /// after the last event, and zero where it did not.
+    ///
+    /// `E3-B04g`. The consumer is a component now and not the frame, it never
+    /// sees this page, and on one worker core it runs after the frame has taken
+    /// this page back — so the word travels on the ring the entries travelled
+    /// on, under `f_abi::input::ATTEST`. Published here so that a consumer
+    /// that finds no attestation and a driver that never sent one are two
+    /// different sentences in the boot log. Unit: none — a flag.
+    pub const ATTESTED: u32 = super::REPORT + 104;
+    /// How many of the entries that crossed were pointer motion.
+    ///
+    /// A tally taken where [`CROSSING`] is taken, and for its reason: it is the
+    /// number of positions the consumer should have been handed, stated by the
+    /// side that sent them, so a boot can check the consumer's count without
+    /// asking the consumer. Unit: entries.
+    pub const MOTIONS: u32 = super::REPORT + 112;
+    /// Where the accumulator ended up, along x.
+    ///
+    /// The number the harness that moved the pointer checks its own injection
+    /// against, and the number the frame checks a compositor's latched
+    /// position against. It was the frame's until `E3-B04g`, taken from the
+    /// entries it drained; the frame drains nothing now, so it is the driver's
+    /// own word, from the far side of the emulator from the harness and the far
+    /// side of a ring from the compositor. Two's complement in a `u64` word.
+    /// Unit: device pixels from the origin, scaled by 65 536.
+    pub const POINTER_X_X65536: u32 = super::REPORT + 120;
+    /// And along y. See [`POINTER_X_X65536`].
+    /// Unit: device pixels from the origin, scaled by 65 536.
+    pub const POINTER_Y_X65536: u32 = super::REPORT + 128;
 }
 
 /// Why the component's loop ended.

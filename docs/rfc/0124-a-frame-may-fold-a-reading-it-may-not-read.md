@@ -99,8 +99,9 @@ than a design question, because the consumer half is written down and has a
 running example. See *What the consumer has to do*, below.
 
 **What it makes hard.** A stage that is *entitled* to rewrite what the device
-said cannot carry this word through. A coalescer, or the input router
-`E3-B04`'s parent owes, may legitimately hand on one motion where two arrived,
+said cannot carry this word through. A coalescer, or an input router —
+which no line in `TODO.md` owes yet; this sentence said `E3-B04` did until
+2026-09-24, and it does not — may legitimately hand on one motion where two arrived,
 and the honest repair is a second attestation with the arithmetic relating the
 two written down — not a fold that stops watching the body. `Crossing`'s own
 doc comment says so at the point somebody would otherwise widen it.
@@ -178,7 +179,7 @@ and looks right, which is why there is a lint and not a convention.
 ## What would reverse this
 
 - **A stage between the driver and the consumer that is entitled to rewrite what
-  the device said.** A coalescer or `E3-B04`'s router. Its arrival does not make
+  the device said.** A coalescer or an input router, which no line in `TODO.md` owes yet. Its arrival does not make
   this wrong; it makes one attestation insufficient, and the repair is a second
   word with a stated relation to the first. Watch for it arriving as a quiet
   widening of the fold to ignore the body, which is the same defect wearing this
@@ -197,3 +198,11 @@ and looks right, which is why there is a lint and not a convention.
   its fold moves to the component, and what is left in `kernel/src/input.rs` is
   a supervisor that no longer decodes anything. Nothing here should survive that
   unchanged except `Crossing` and the four steps above.
+  **Appended 2026-09-24: this reversal is paid, by RFC 0125.** The compositor
+  drains the ring and holds the fold; `kernel/src/input.rs` decodes nothing and
+  takes nothing off that ring; the driver's word reaches the compositor on the
+  ring itself, under `f_abi::input::ATTEST`, which is step 4's *a ring* rather
+  than its *state tree*. The decision above stands as written — the frame still
+  compares folds it did not compute, now the compositor's against the driver's
+  routing-page copy — and the four steps were followed as written, which is the
+  most a section written to be copied can be asked for.

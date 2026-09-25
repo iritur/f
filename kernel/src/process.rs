@@ -3192,6 +3192,53 @@ pub unsafe fn execute(kernel_root: u64) {
 /// has reported that it is finished — which is what makes reading that core's
 /// shards sound, and what makes the `&mut` on `frames` live again.
 pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Report, Error> {
+    // SAFETY: the caller's guarantee, passed down unchanged.
+    unsafe { reap_holding(frames, prepared, 0) }
+}
+
+/// [`reap`], for a caller that knows exactly how many frames were allocated
+/// during the run into something that **outlives the process**.
+///
+/// # Why this exists, which is a defect a boot found three subsystems away
+///
+/// The leak check below compares the allocator's free count against the one
+/// taken at [`prepare`], and that is only a statement about *the process* if
+/// nothing else allocated in between. A datapath's frame does allocate in
+/// between: it serves the driver's `DEVICE_MAP` asks, and an IOMMU domain grows
+/// its page tables lazily, from this allocator, when a mapped region crosses
+/// into a table the domain does not have yet. That table belongs to the domain
+/// and is given back when the domain is torn down, after this — so the count
+/// comes back one short and a driver that leaked nothing is reported as one
+/// that did.
+///
+/// Whether it fired depended on where in physical memory the driver's buffers
+/// happened to land. On 2026-09-24 `user/generation.toml` gained a component,
+/// the generation module grew by 18 KiB, every allocation after it moved four
+/// frames, and the block datapath's `deadline=ordered` boot started failing as
+/// *the driver could not be built as a process* — for a process that had been
+/// built, had run, and had given back everything it was given. Measured before
+/// the repair: the serve loop allocated no frame at the old layout and one at
+/// the new.
+///
+/// `frames_held_elsewhere` is a **count, not a tolerance**: the caller reads it off the
+/// structure that holds the frames — `Domain::tables()` before [`prepare`] and
+/// again now — so a process that also leaked one frame of its own still fails
+/// here. *What would reverse this:* a domain whose tables are built whole when a
+/// region is granted rather than when it is mapped, at which point nothing is
+/// allocated during a run and every caller passes zero again.
+///
+/// # Errors
+///
+/// As [`reap`].
+///
+/// # Safety
+///
+/// As [`reap`].
+pub unsafe fn reap_holding(
+    frames: &mut FrameAllocator,
+    prepared: Prepared,
+    frames_held_elsewhere: u64,
+) -> Result<Report, Error> {
     let cpu = prepared.cpu;
 
     // SAFETY: the slot of a core that has finished and said so, which is what
@@ -3225,7 +3272,7 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
         count += 1;
     }
 
-    if frames.free_count() != prepared.before {
+    if frames.free_count().saturating_add(frames_held_elsewhere) != prepared.before {
         return Err(Error::Leaked);
     }
 

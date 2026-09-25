@@ -4,8 +4,8 @@
 # What a red scheduled run says, and whether it should say anything.
 #
 # This is the half of the alarm that reaches no network. It is handed a table of
-# job results, a commit, a link and — when there was a failure — the failing
-# job's log, and it writes three files: a one-word decision, a title, and a body.
+# job results, a commit, a link and — when there was a failure — the failed
+# jobs' logs, and it writes three files: a one-word decision, a title, and a body.
 # The workflow step around it is what opens, comments on or closes an issue with
 # those three files; that half needs a token and cannot be run here.
 #
@@ -35,7 +35,11 @@
 #   ALARM_BRANCH    the default branch's name, e.g. `main`
 #   ALARM_HEAD      that branch's head when the alarm ran, or empty if unread
 #   ALARM_RUN_URL   a link to the run
-#   ALARM_LOG       path to the failing job's log, or a path that does not exist
+#   ALARM_LOG       path to the failed jobs' logs, or a path that does not exist.
+#                   Each line `job<TAB>id<TAB>text` — the shape `gh run view
+#                   --log-failed` prints and the alarm jobs write — so that what
+#                   the body quotes can name the job it came from. An untagged
+#                   line is read as text and its job as unknown.
 #   ALARM_OUT       directory to write `decision`, `title` and `body.md` into
 #
 # Nothing here reads a clock, a random source or an environment variable not on
@@ -83,6 +87,7 @@ mkdir -p "$out"
 # cancelling its siblings after one of them failed is still a failure.
 failed=$(awk -F'\t' '$2 == "failure" { print $1 }' "$jobs" | sort)
 cancelled=$(awk -F'\t' '$2 == "cancelled" { print $1 }' "$jobs" | sort)
+succeeded=$(awk -F'\t' '$2 == "success" { n++ } END { print n + 0 }' "$jobs")
 total=$(awk 'NF { n++ } END { print n + 0 }' "$jobs")
 
 if [ "$total" -eq 0 ]; then
@@ -92,9 +97,16 @@ if [ "$total" -eq 0 ]; then
 	exit 2
 fi
 
+# And a run in which nothing *succeeded* asserts nothing either. The count above
+# is of rows, not of anything having run, so a table of every job `skipped`
+# decided `green` — and green closes every open thread. That is the refusal just
+# above reached with a table that is not empty: a run reporting no measurement
+# must not be the thing that closes a finding. Latent today, because every
+# workflow's first job runs unconditionally; it is here so that stays true of
+# the alarm and not only of the workflows.
 if [ -n "$failed" ]; then
 	decision=red
-elif [ -n "$cancelled" ]; then
+elif [ -n "$cancelled" ] || [ "$succeeded" -eq 0 ]; then
 	decision=nothing
 else
 	decision=green
@@ -128,9 +140,10 @@ else
 fi
 printf '%s\n' "$title" > "$out/title"
 
-# The first failing line. `gh run view --log-failed` prefixes every line with
-# the job, the step and a timestamp, so the part worth reading starts after the
-# second tab — and when there is no tab, the line is already the text.
+# The first failing line. Every line of the log carries its job and a second
+# field before the text, tab-separated (see ALARM_LOG above), and the runner's
+# own timestamp after them, so the part worth reading starts after the second
+# tab and the stamp — and when there is no tab, the line is already the text.
 #
 # The patterns are this tree's own failure vocabulary rather than a general one:
 # `xtask` prints `FAIL:` and `xtask:` for a refusal, `cargo` prints `error:` and
@@ -139,16 +152,35 @@ printf '%s\n' "$title" > "$out/title"
 # matched. That last one is the fallback and is deliberately last: it names no
 # defect, so a run where it is the headline is a run whose failure this tree has
 # no vocabulary for, and that is worth seeing rather than hiding.
+#
+# The excerpt is taken from the **same job** as the headline, and both say
+# which. The log is every failed job's log one after another, so with two
+# failures the headline was the first job's line and the excerpt the second
+# job's last forty, under a label that said *the failing job* — one job's
+# failure and another's context handed over as one. When the log does not say
+# which job a line is from, that is said instead of guessed.
 strip='s/^[^\t]*\t[^\t]*\t//; s/^[0-9][0-9-]*T[0-9:.]*Z //'
 headline=
+headline_job=
 excerpt=
 if [ -f "$log" ]; then
-	headline=$(sed "$strip" "$log" |
-		grep -m1 -E '^(FAIL|xtask: |error(\[E[0-9]+\])?:|warning:|thread .* panicked|Error:)' || true)
-	if [ -z "$headline" ]; then
-		headline=$(sed "$strip" "$log" | grep -m1 -E 'Process completed with exit code' || true)
+	at=$(sed "$strip" "$log" |
+		grep -n -m1 -E '^(FAIL|xtask: |error(\[E[0-9]+\])?:|warning:|thread .* panicked|Error:)' |
+		cut -d: -f1 || true)
+	if [ -z "$at" ]; then
+		at=$(sed "$strip" "$log" | grep -n -m1 -E 'Process completed with exit code' |
+			cut -d: -f1 || true)
 	fi
-	excerpt=$(sed "$strip" "$log" | tail -40)
+	if [ -n "$at" ]; then
+		headline=$(sed "$strip" "$log" | sed -n "${at}p")
+		headline_job=$(sed -n "${at}p" "$log" | awk -F'\t' 'NF >= 3 { print $1 }')
+	fi
+	if [ -n "$headline_job" ]; then
+		excerpt=$(awk -F'\t' -v job="$headline_job" 'NF >= 3 && $1 == job' "$log" |
+			sed "$strip" | tail -40)
+	else
+		excerpt=$(sed "$strip" "$log" | tail -40)
+	fi
 fi
 if [ -z "$headline" ]; then
 	headline="(the log could not be read — open the run)"
@@ -173,7 +205,12 @@ fi
 
 if [ "$decision" = nothing ]; then
 	{
-		echo "Cancelled, so this run asserts nothing: no issue opened and none closed."
+		if [ -n "$cancelled" ]; then
+			echo "Cancelled, so this run asserts nothing: no issue opened and none closed."
+		else
+			echo "Every job was skipped and no job in this run succeeded, so it asserts"
+			echo "nothing: no issue opened and none closed."
+		fi
 		echo
 		echo "Run: $run_url"
 	} > "$body"
@@ -183,6 +220,14 @@ fi
 {
 	echo "The scheduled workflow \`$workflow\` failed at \`$sha\`."
 	echo
+	if [ -n "$headline_job" ]; then
+		echo "The first failing line, from \`$headline_job\`:"
+		echo
+	elif [ "$count" -gt 1 ]; then
+		echo "The first failing line in the $count failed jobs' logs, concatenated — the"
+		echo "log does not say which job it came from:"
+		echo
+	fi
 	echo '```'
 	echo "$headline"
 	echo '```'
@@ -218,7 +263,13 @@ fi
 	fi
 	echo
 	if [ -n "$excerpt" ]; then
-		echo "<details><summary>the last 40 lines of the failing job</summary>"
+		if [ -n "$headline_job" ]; then
+			echo "<details><summary>the last 40 lines of $headline_job, the job the line above is from</summary>"
+		elif [ "$count" -gt 1 ]; then
+			echo "<details><summary>the last 40 lines of the failed jobs' logs, concatenated — possibly not the job the line above is from</summary>"
+		else
+			echo "<details><summary>the last 40 lines of the failing job</summary>"
+		fi
 		echo
 		echo '```'
 		echo "$excerpt"

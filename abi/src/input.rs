@@ -1527,6 +1527,131 @@ impl Default for Crossing {
     }
 }
 
+/// The opcode a producer's [`Crossing`] crosses under, on the ring its events
+/// crossed.
+///
+/// # Why the attestation rides the ring and not a page
+///
+/// Because the ring is the one thing both ends of this crossing hold for as long
+/// as either of them needs it. `E3-B04f` published the producer's word on the
+/// driver's routing page and had the frame compare it, which works while the
+/// frame is the consumer: the frame reads the page before it takes the page
+/// back. `E3-B04g` makes the compositor the consumer, and the compositor is a
+/// component that never sees the driver's page and, on a machine with one worker
+/// core, runs after the frame has reaped it. RFC 0124's fourth step names the two
+/// routes that survive that — a ring or the driver's state tree — and this is
+/// the first of them. RFC 0125 is the decision and why not the second.
+///
+/// # Why it is outside the event space rather than a seventh event
+///
+/// An attestation is not something the device did. It carries no stamp — it is
+/// not a reading and must not look like one — so [`Event::decode`] refusing it
+/// as [`Refusal::UnknownOpcode`] is correct rather than an accident, and a
+/// consumer asks [`Crossing::attested`] first and hands everything else to the
+/// decoder. The high bit is the space's marker: every event opcode is below
+/// `0x80`, the assertion under this constant is what makes that true rather than
+/// a convention, and a seventh event is still one line in `events!`.
+///
+/// *What would reverse this:* a transport that can say *these entries end here*
+/// by itself — a sealed channel, or a completion the producer is owed on close.
+/// On that day the word travels in the transport's own close and this opcode is
+/// retired rather than reused.
+/// Unit: none — an opcode.
+pub const ATTEST: u8 = 0x80;
+
+// Not an event, and never able to become one quietly: a seventh event given this
+// number would be decoded as an event and attested as a crossing at once.
+const _: () = assert!(!op::known(ATTEST));
+const _: () = assert!(ATTEST & 0x80 != 0);
+
+/// What a producer says it sent, as the consumer reads it off the ring.
+///
+/// Two numbers and no constructor outside this module: the only way to hold one
+/// is [`Crossing::attested`] over an entry that arrived, so a consumer cannot
+/// build the thing it is about to be checked against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Attested {
+    /// The producer's fold. Unit: none — a checksum.
+    word: u64,
+    /// How many entries went into it, as the producer counted. Unit: entries.
+    absorbed: u64,
+}
+
+impl Attested {
+    /// The producer's fold. Unit: none — a checksum.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        self.word
+    }
+
+    /// How many entries the producer folded. Unit: entries.
+    #[must_use]
+    pub const fn absorbed(self) -> u64 {
+        self.absorbed
+    }
+}
+
+impl Crossing {
+    /// This fold as the entry a producer puts on the ring after its last event.
+    ///
+    /// The word in `user_data` and the count in `ext[0]`, every other field the
+    /// value [`Event::envelope`] would give it, `len` zero because there is no
+    /// payload, and `NO_CQE` because nobody answers an attestation. `class` is
+    /// the ring's field and is carried as the producer's events carry it, for
+    /// the reason [`Event::class`] gives.
+    ///
+    /// Written field by field, for [`Event::envelope`]'s reason: a field added
+    /// to [`Sqe`] stops this build here and asks whether an attestation reads it.
+    #[must_use]
+    pub const fn attestation(self, class: u16) -> Sqe {
+        Sqe {
+            opcode: ATTEST,
+            flags: flags::NO_CQE,
+            class,
+            cap: 0,
+            user_data: self.word,
+            deadline: NO_DEADLINE,
+            offset: 0,
+            buf_set: 0,
+            buf_index: 0,
+            len: 0,
+            _reserved: 0,
+            ext: [self.absorbed, 0],
+        }
+    }
+
+    /// Is this entry an attestation, and what does it say?
+    ///
+    /// `None` for any entry that is not **exactly** the entry
+    /// [`Crossing::attestation`] would have written for the word and count it
+    /// carries — the whole sixty-four bytes compared, which is
+    /// [`Event::decode`]'s own rule for the envelope. A malformed attestation is
+    /// therefore not a second kind of attestation: it falls through to the
+    /// decoder, which refuses it as an opcode it does not know, and the consumer
+    /// counts it where it counts every other entry it could not read.
+    #[must_use]
+    pub fn attested(entry: &Sqe) -> Option<Attested> {
+        if entry.opcode != ATTEST {
+            return None;
+        }
+        let said = Attested { word: entry.user_data, absorbed: entry.ext[0] };
+        let canonical = Self { word: said.word, absorbed: said.absorbed }.attestation(entry.class);
+        (sqe_bytes(&canonical) == sqe_bytes(entry)).then_some(said)
+    }
+
+    /// Does what crossed match, word and count, what the producer attested?
+    ///
+    /// [`Crossing::agrees_with`] and a count, in one call, so that a consumer
+    /// holding an [`Attested`] cannot check the word and forget the count. The
+    /// count is a separate sentence for the reason `E3-B04f` gives: a
+    /// disagreement about *how many* and one about *what* have different
+    /// repairs.
+    #[must_use]
+    pub const fn agrees_with_attested(self, attested: Attested) -> bool {
+        self.agrees_with(attested.word) && self.absorbed == attested.absorbed
+    }
+}
+
 /// One byte into the fold.
 fn mixed(word: u64, byte: u8) -> u64 {
     (word ^ u64::from(byte)).wrapping_mul(CROSSING_PRIME)
@@ -2067,6 +2192,86 @@ mod tests {
         assert!(!empty.agrees_with(0));
         assert_ne!(empty.word(), 0, "a page nobody wrote must not read as a fold of nothing");
         assert_eq!(empty, Crossing::default());
+    }
+
+    #[test]
+    fn an_attestation_says_what_the_fold_says_and_is_not_an_event() {
+        // The producer's word, onto the ring and back, through the only
+        // constructor a consumer has.
+        let sent = crossed();
+        let entry = sent.attestation(deadline::pack(class::SOFT, 1));
+        let said = Crossing::attested(&entry).expect("an attestation read back as one");
+        assert_eq!(said.word(), sent.word());
+        assert_eq!(said.absorbed(), sent.absorbed());
+        assert!(sent.agrees_with_attested(said));
+
+        // Not an event, whatever payload is beside it: the decoder refuses the
+        // opcode before it looks at a byte, so an attestation cannot be folded
+        // into the crossing it attests to.
+        assert_eq!(Event::decode(&entry, &[0xA5; PAYLOAD_BYTES]), Err(Refusal::UnknownOpcode));
+        // And no event is an attestation.
+        for body in Entry::SPECIMENS {
+            let (event, _) = event(body).encode();
+            assert_eq!(Crossing::attested(&event), None, "{}", op::label(body.opcode()));
+        }
+    }
+
+    #[test]
+    fn an_attestation_that_is_not_exactly_one_is_not_read_as_one() {
+        // Every byte of the envelope, one at a time, except the three the
+        // attestation reads — the word, the count, and the class the ring
+        // carries. A flipped byte anywhere else is a producer saying something
+        // this build does not read, and R04 says refuse rather than believe the
+        // half of it that parses.
+        let entry = crossed().attestation(0);
+        let read_at = [core::mem::offset_of!(Sqe, class), core::mem::offset_of!(Sqe, class) + 1];
+        let word_at = core::mem::offset_of!(Sqe, user_data);
+        let count_at = core::mem::offset_of!(Sqe, ext);
+        let said = Crossing::attested(&entry).expect("an attestation");
+        for at in 0..SQE_BYTES {
+            let carried = read_at.contains(&at)
+                || (word_at..word_at + 8).contains(&at)
+                || (count_at..count_at + 8).contains(&at);
+            let mut damaged = entry;
+            flip(&mut damaged, at);
+            let read = Crossing::attested(&damaged);
+            assert_eq!(
+                read.is_some(),
+                carried,
+                "byte {at} of an attestation was {} when it should not have been",
+                if carried { "refused" } else { "believed" }
+            );
+            // And a byte it does read is read: the word or the count moved, or
+            // it was the class, which is the ring's and is carried rather than
+            // attested.
+            if let Some(read) = read
+                && !read_at.contains(&at)
+            {
+                assert_ne!(read, said, "byte {at} of an attestation is read and then dropped");
+            }
+        }
+    }
+
+    #[test]
+    fn an_attestation_of_the_wrong_count_or_word_does_not_agree() {
+        let sent = crossed();
+        let mut short = Crossing::new();
+        for body in Entry::SPECIMENS.iter().skip(1) {
+            short.absorb(&event(*body));
+        }
+        // A consumer that missed one: the word and the count both move.
+        let said = Crossing::attested(&sent.attestation(0)).expect("an attestation");
+        assert!(!short.agrees_with_attested(said));
+        // A producer whose word was right and whose count was not: the count is
+        // checked on its own, because a count that disagrees is a different
+        // repair from a word that does.
+        let miscounted = Crossing { word: sent.word(), absorbed: sent.absorbed() + 1 };
+        let said = Crossing::attested(&miscounted.attestation(0)).expect("an attestation");
+        assert!(!sent.agrees_with_attested(said));
+        // And nothing attests to a fold of nothing.
+        let empty = Crossing::new();
+        let said = Crossing::attested(&empty.attestation(0)).expect("an attestation");
+        assert!(!empty.agrees_with_attested(said));
     }
 
     #[test]

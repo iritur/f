@@ -384,7 +384,11 @@ pub enum Trouble {
     /// is missing from the record, declares less than the driver's own layout
     /// needs, or declares fewer register pages than the device describes.
     Manifest,
-    /// The driver could not be built as a process, carrying which step.
+    /// The driver's process could not be built, or ran and did not come back
+    /// clean, carrying which step. Both `prepare_driver` and `reap` map here, so
+    /// the sentence is the inner error's and not a fixed one: until 2026-09-24
+    /// this said *could not be built* for a reap that found a leak, and sent the
+    /// reader to the half of the run that had worked.
     Process(crate::process::Error),
     /// The core the driver was given never took it, or never gave it back.
     Scheduled(usize),
@@ -418,7 +422,7 @@ impl Trouble {
             Self::Manifest => {
                 "the driver's manifest and this machine disagree about what has to be routed"
             }
-            Self::Process(_) => "the driver could not be built as a process",
+            Self::Process(inner) => inner.message(),
             Self::Scheduled(_) => {
                 "the core the driver was given never took it or never gave it back"
             }
@@ -1024,6 +1028,13 @@ unsafe fn run(
         queue_bytes: granted.bytes(),
         data: wire.addr(),
     };
+    // What the IOMMU domain already holds, read on the same side of `prepare` as
+    // the free count `reap` compares against. Serving the driver's `DEVICE_MAP`
+    // asks can grow the domain's tables from this allocator, and those frames
+    // outlive the process; `reap_holding` is told exactly how many, so a driver
+    // that leaked nothing is not reported as one that did. RFC 0101's shape: a
+    // free count is not a count of what one process owns.
+    let tables_before = domain.tables().len() as u64;
     // SAFETY: the caller's guarantee, passed down; `registers.base` is the first
     // page of a device window this boot mapped and nothing else is driving,
     // `granted` and `wire` are frames this call's caller allocated and holds, and
@@ -1151,7 +1162,14 @@ unsafe fn run(
 
     // SAFETY: on the core that prepared it, after the core that ran it reported
     // finished — which is what `join_serviced` returning `Ok` means.
-    let ended = unsafe { crate::process::reap(frames, prepared) }.map_err(Trouble::Process)?;
+    let ended = unsafe {
+        crate::process::reap_holding(
+            frames,
+            prepared,
+            (domain.tables().len() as u64).saturating_sub(tables_before),
+        )
+    }
+    .map_err(Trouble::Process)?;
     let exited = matches!(ended.death, crate::process::Death::Exited(_));
 
     if observed.is_err() {

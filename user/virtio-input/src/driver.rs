@@ -494,6 +494,19 @@ pub struct Outbound {
     /// `dropped`.
     /// Unit: none — an `f_abi::input::Crossing`.
     crossing: Crossing,
+    /// How many of the entries that crossed were pointer motion.
+    ///
+    /// Counted here for [`Outbound::crossing`]'s reason — this is the one place
+    /// that knows an entry reached the ring — and published so that a boot can
+    /// ask how many positions the consumer should have been handed without
+    /// asking the consumer. Unit: entries.
+    motions: u64,
+    /// Whether the fold has been put on the ring as an attestation.
+    ///
+    /// Once, and after the last event: `f_abi::input::ATTEST` is why the word
+    /// travels on the ring at all, and an attestation submitted twice would be
+    /// two answers to one question with the later one winning.
+    attested: bool,
 }
 
 impl Outbound {
@@ -515,7 +528,7 @@ impl Outbound {
         if slots == 0 {
             return Err(Trouble::Layout);
         }
-        Ok(Self { client, slots, next: 0, crossing: Crossing::new() })
+        Ok(Self { client, slots, next: 0, crossing: Crossing::new(), motions: 0, attested: false })
     }
 
     /// How many payload slots there are. Unit: slots.
@@ -567,7 +580,53 @@ impl Outbound {
         // offset this function chose — and the fold deliberately ignores that
         // offset, so the word survives being carried in a second channel.
         self.crossing.absorb(&event);
+        if matches!(event.body, Entry::PointerMotion(_)) {
+            self.motions = self.motions.saturating_add(1);
+        }
         self.next = (self.next + 1) % self.slots;
+        Ok(())
+    }
+
+    /// How many pointer-motion entries crossed. Unit: entries.
+    #[must_use]
+    pub const fn motions(&self) -> u64 {
+        self.motions
+    }
+
+    /// Whether the fold is on the ring.
+    #[must_use]
+    pub const fn attested(&self) -> bool {
+        self.attested
+    }
+
+    /// Put the fold on the ring, after the last event, for a consumer that is
+    /// not the frame.
+    ///
+    /// **The producer's half of `E3-B04g`.** `E3-B04f` published this word on
+    /// the routing page and the frame compared it, because the frame was the
+    /// consumer and reads that page before taking it back. The consumer is now
+    /// `user/compositor`, which never sees this component's page and — on one
+    /// worker core — runs after the frame has reaped it. So the word goes where
+    /// the entries went. It still goes on the page as well: the frame compares
+    /// the compositor's fold against that copy, so the word reaches the check
+    /// by two routes and a ring that carried it wrongly is a disagreement
+    /// between them.
+    ///
+    /// No payload and no arena slot, so the occupancy check is the ring's own:
+    /// a ring with no room refuses the submit and this answers
+    /// [`Trouble::NoRoom`], which the caller publishes as *not attested* rather
+    /// than retrying — a consumer that finds no attestation says so, and that is
+    /// the right sentence for a ring that was full.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NoRoom`] when the ring is full or the fold is already there.
+    pub fn attest(&mut self, class: u16) -> Result<(), Trouble> {
+        if self.attested {
+            return Err(Trouble::NoRoom);
+        }
+        self.client.submit(self.crossing.attestation(class)).map_err(|_| Trouble::NoRoom)?;
+        self.attested = true;
         Ok(())
     }
 }
@@ -709,14 +768,56 @@ impl Driver {
     /// [`Driver::clock_at_nanos`] goes, onto the routing page the frame reads
     /// after the run, and the `[[state]]` list is left alone.
     ///
-    /// *What would reverse this:* a consumer that wants to check the crossing
-    /// while the driver is still running, which cannot read a page the frame
-    /// takes back at the end. That consumer needs this word on a ring or in the
-    /// tree, and the tree is where a reader would look.
+    /// A consumer that is not the frame cannot read that page — the frame takes
+    /// it back when this component is reaped — and `E3-B04g`'s consumer is
+    /// `user/compositor`, so the same word also goes onto the ring after the
+    /// last event: [`Driver::attest`]. The ring and not the tree, and RFC 0125
+    /// says why; the page copy stays, because the frame compares the
+    /// compositor's fold against it, which makes the ring's copy checkable.
     /// Unit: none — an `f_abi::input::Crossing`.
     #[must_use]
     pub const fn crossing(&self) -> Crossing {
         self.out.crossing()
+    }
+
+    /// How many pointer-motion entries crossed. Unit: entries.
+    #[must_use]
+    pub const fn motions(&self) -> u64 {
+        self.out.motions()
+    }
+
+    /// Where the accumulator ended up.
+    ///
+    /// Published for the harness that moved the pointer, which holds the other
+    /// half of the comparison — how far it asked for — and for the frame, which
+    /// compares it against the position a compositor latched after taking the
+    /// entries off the ring itself. Neither of those two holds this number
+    /// except by reading it here, and neither of them is a stage on the input
+    /// path: a position is not a reading.
+    /// Unit: device pixels from the origin, scaled by [`SCALE`].
+    #[must_use]
+    pub const fn at(&self) -> (i32, i32) {
+        self.decoder.at()
+    }
+
+    /// Whether the fold went onto the ring as an attestation.
+    #[must_use]
+    pub const fn attested(&self) -> bool {
+        self.out.attested()
+    }
+
+    /// Put what crossed onto the ring as an attestation, after the last event.
+    ///
+    /// [`Outbound::attest`] is the argument. Called once, when the run ends,
+    /// and not per report: the consumer compares the word against a fold of
+    /// everything it drained, and a word covering half the run would be
+    /// compared against the other half.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NoRoom`], for a ring with no room or a second call.
+    pub fn attest(&mut self) -> Result<(), Trouble> {
+        self.out.attest(self.decoder.class)
     }
 
     /// Put the device back in reset, so that it stops writing into memory the

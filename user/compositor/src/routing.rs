@@ -280,38 +280,36 @@ pub mod at {
     /// Unit: none — a node identifier.
     pub const POINTER_NODE: u32 = 128;
 
-    /// When the device last reported a position.
-    ///
-    /// The stamp `f_input::stamp::at_interrupt` took in the driver, carried
-    /// across two rings unchanged. **This component never reads a clock and this
-    /// word is the reason it does not have to**: RFC 0004 gives a component
-    /// neither a timer nor a port to read one through, and a latch that decided
-    /// for itself when a report arrived would have replaced the driver's
-    /// measurement with the sum of that measurement and its own scheduling
-    /// delay — silently, in the direction that flatters the compositor.
-    ///
-    /// The three pointer words below are written **together and in this order**,
-    /// with the stamp last: a reader that saw a new position against an old
-    /// stamp would compute a velocity out of two reports, and the predictor
-    /// refuses a report that is not strictly newer than the newest it holds, so
-    /// a stamp that has not moved is a report that is dropped rather than a
-    /// velocity that is wrong. That is the conservative direction and it is why
-    /// this word is the last of the three.
-    /// Unit: nanoseconds, in the channel's epoch.
-    pub const POINTER_AT_NANOS: u32 = 136;
+    // 136, 144 and 152 were the pointer — a stamp and two coordinates the frame
+    // would write before submitting an entry and the component would read after
+    // taking it — and they are gone rather than kept, for `E3-B04g`'s reason.
+    // No frame ever wrote them: `kernel/` may not hold a reading, and a frame
+    // that wrote a stamp into this page would be exactly that. So they were
+    // three words the component read every turn and nobody could honestly fill,
+    // and the pointer reaches this component now the way the RFC 0124 steps
+    // say it should: off the driver's own ring, at [`INPUT_AT`], decoded here.
+    // The numbers are not reused, for the reason 48 and 56 are not.
 
-    /// Where the device last reported the pointer, along x.
+    /// Where the input driver's data channel is, in this component's address
+    /// space, or zero where the frame connected none.
     ///
-    /// Signed, in the 16.16 fixed point `f_abi::scene::SetTransform` and
-    /// `f_input::predict::Sample` are both written in, carried through a `u64`
-    /// word because that is what a routing page holds. There is no floating
-    /// point anywhere on this path and RFC 0004 is why.
-    /// Unit: device pixels from the surface origin, scaled by 65 536.
-    pub const POINTER_X_X65536: u32 = 144;
-
-    /// And along y. See [`POINTER_X_X65536`].
-    /// Unit: device pixels from the surface origin, scaled by 65 536.
-    pub const POINTER_Y_X65536: u32 = 152;
+    /// **The other end of the driver's ring, and this component holds it.** The
+    /// driver holds the client's end and submits unasked; until `E3-B04g` the
+    /// frame held this end, drained it, and handed on two coordinates in a
+    /// scene delta. Now the frame lays the channel out, gives the driver one
+    /// end and this component the other, and never takes an entry off it —
+    /// which is what makes *the position the latch reads came off a device by a
+    /// route the frame never touched* a property of the arrangement rather than
+    /// a promise. `crate::inbound` is what is done with an entry once taken.
+    ///
+    /// Zero is `input=withheld`, the control: the identical boot with the
+    /// channel not connected. A component told zero adopts nothing and latches
+    /// nothing, and publishes that it was not connected, so *nothing arrived*
+    /// and *nothing was connected* are two different words on its board.
+    /// Unit: bytes, in the component's address space.
+    pub const INPUT_AT: u32 = 160;
+    /// How many bytes of it. Unit: bytes.
+    pub const INPUT_LEN: u32 = 168;
 }
 
 /// What the frame says it will do when this component has nothing to do.
@@ -989,6 +987,70 @@ pub mod reported {
     /// not moved: the two have the same zero everywhere else.
     /// Unit: readings.
     pub const POINTER_UNSTAMPED: u32 = super::REPORT + 400;
+
+    // --- the input ring, `E3-B04g` -------------------------------------------
+    //
+    // What this component took off the driver's ring, in words the frame reads
+    // after the run. None of them has a node: the manifest is full, and these
+    // are evidence about *this run* rather than something a reader of a running
+    // machine would poll — `E3-B01j`'s argument for its own three, for its
+    // reason. **None of them is a crossing in `E3-B01j`'s sense either**:
+    // [`CROSSINGS`] is the scene ring's, it is a published claim, and an input
+    // entry counted into it would move `claims/0038` as a side effect of a
+    // different line.
+
+    /// One where the frame gave this component an input ring and it adopted
+    /// it, zero where it gave none. Unit: none — a flag.
+    pub const INPUT_CONNECTED: u32 = super::REPORT + 408;
+    /// Entries taken off the input ring that were not the driver's
+    /// attestation. Unit: entries.
+    pub const INPUT_ENTRIES: u32 = super::REPORT + 416;
+    /// Of those, the entries `f_abi::input::Event::decode` took. Unit: entries.
+    pub const INPUT_DECODED: u32 = super::REPORT + 424;
+    /// Of those, the entries it refused. Unit: entries.
+    pub const INPUT_REFUSED: u32 = super::REPORT + 432;
+    /// Of the decoded ones, pointer motion. Unit: entries.
+    pub const INPUT_MOTIONS: u32 = super::REPORT + 440;
+    /// What this component drained, folded in the order it arrived.
+    ///
+    /// **This component's half of the attestation**, and the frame compares it
+    /// against the driver's word as the *driver's routing page* carried it —
+    /// which is the second route that word travels by. [`INPUT_AGREED`] is this
+    /// component's own comparison against the copy that arrived on the ring.
+    /// Unit: none — a checksum.
+    pub const INPUT_CROSSING: u32 = super::REPORT + 448;
+    /// How many entries went into [`INPUT_CROSSING`]. Unit: entries.
+    pub const INPUT_CROSSED: u32 = super::REPORT + 456;
+    /// Attestations taken off the ring. One, or nothing was checked.
+    /// Unit: entries.
+    pub const INPUT_ATTESTATIONS: u32 = super::REPORT + 464;
+    /// The driver's word, as it arrived on the ring. Zero where none did.
+    /// Unit: none — a checksum.
+    pub const INPUT_ATTESTED: u32 = super::REPORT + 472;
+    /// How many entries the driver says went into it. Unit: entries.
+    pub const INPUT_ATTESTED_COUNT: u32 = super::REPORT + 480;
+    /// Entries taken after the attestation, which it therefore does not cover.
+    /// Unit: entries.
+    pub const INPUT_UNATTESTED: u32 = super::REPORT + 488;
+    /// One where what this component drained agrees with what the driver
+    /// attested, word and count, with exactly one attestation and nothing
+    /// after it. `crate::inbound::Inbound::agrees`. Unit: none — a flag.
+    pub const INPUT_AGREED: u32 = super::REPORT + 496;
+
+    /// The last latched frame's graph, folded with the pointer's two
+    /// translations masked, before the patch.
+    ///
+    /// `E3-B01i`'s *and by nothing else*, as a boot carries it:
+    /// `crate::latch::unmoved` is the fold and the argument for what it covers.
+    /// The frame requires [`LATCH_UNMOVED_AFTER`] to be the same word.
+    /// Unit: none — a checksum.
+    pub const LATCH_UNMOVED_BEFORE: u32 = super::REPORT + 504;
+    /// The same fold after the patch. Unit: none — a checksum.
+    pub const LATCH_UNMOVED_AFTER: u32 = super::REPORT + 512;
+    /// How many nodes the fold after the patch walked, which the frame requires
+    /// to be the graph's own count — a fold of an empty walk agrees with itself
+    /// about nothing. Unit: nodes.
+    pub const LATCH_WALKED: u32 = super::REPORT + 520;
 }
 
 /// Why the component's loop ended.

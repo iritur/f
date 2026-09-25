@@ -533,6 +533,33 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // this path comes out of, so a frame that ran it would be a frame deciding where
     // the pointer is.
     ("kernel/", "Driver::", "user/virtio-input/"),
+    // The sixth, and the first about a decision rather than a datapath. RFC 0008
+    // puts restart above the frame and RFC 0123 puts a timeout's judgement there
+    // too; `E3-B05e`'s delivery then gave the frame two words an occupant
+    // published about itself to copy onto a supervisor's row. The day the frame
+    // calls `f_supervisor::policy` — `fate`, `decide`, `answer`, or builds a
+    // `Liveness` to hand one of them — it has moved the file and kept the
+    // decision, which is RFC 0123's own reversal condition. The third field keeps
+    // the rule from being satisfied by a module nothing defines. RFC 0126.
+    //
+    // **The module's name and not a path into it**, because the path was beaten
+    // the first time it was attacked: this row read `policy::`, and
+    // `use f_supervisor::policy as judge;` then `judge::fate` in `kernel/` left
+    // `lint-datapath: ok`. Every route to a module spells its name once, in a
+    // `use` or a path, and comments and strings are stripped before this looks;
+    // the cost is that the frame may not call anything of its own `policy` in
+    // code, which is why `write_board`'s local is `declared`.
+    ("kernel/", "policy", "user/supervisor/"),
+    // The seventh, and the first whose needle is not a component's type but the
+    // decoder a component calls. `E3-B04g` took the input path's consumer out
+    // of the frame: `kernel/src/input.rs` decoded every entry the driver
+    // submitted until then, and the compositor decodes them now. The day the
+    // frame decodes an input entry again it is the consumer again — a courier
+    // holding events, whatever it does with them — and the third field keeps
+    // the rule honest from the other side: the day `user/compositor` stops
+    // decoding, nothing is the consumer and the row goes red for that too.
+    // RFC 0125.
+    ("kernel/", "Event::decode(", "user/compositor/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -958,6 +985,7 @@ fn main() -> ExitCode {
         "lint-debt" => lint_debt(),
         "lint-claim-runs" => lint_claim_runs(),
         "lint-schedules" => lint_schedules(),
+        "lint-pulls" => lint_pulls(),
         "lint-generations" => generation::fixpoint(),
         "lint-gate" => lint_gate(),
         "lint-manifests" => lint_manifests(),
@@ -1229,6 +1257,9 @@ cargo xtask <command>
   lint-schedules     every scheduled workflow has one job that watches every
                      other job in it and can open an issue about a red run.
                      A-06, docs/postmortem/0002 and 0003
+  lint-pulls         every workflow job that runs in the private image and
+                     names `permissions:` still holds `packages: read`, so it
+                     can pull the container it runs in
   lint-generations   every generation round-trips to a fixpoint
   lint-gate          the pull-request gate runs every check `verify` runs
   history --changes  where the recorded series stepped, rather than what crossed a bound
@@ -12083,6 +12114,13 @@ const INPUT_MARKER: &str = "input inject";
 /// The line carrying where the driver's accumulator ended up.
 const INPUT_POINTER: &str = "input pointer";
 
+/// The line carrying the compositor's latch: the transform the client
+/// committed and the one that was submitted, both ends and not their difference.
+///
+/// `E3-B01i`'s boot half. The difference is this process's to take, because
+/// this process is the only thing that holds the motion it is compared with.
+const INPUT_LATCH: &str = "input latch";
+
 /// The byte the harness writes back when it has finished injecting.
 ///
 /// One byte on the serial port, which the kernel polls for. Any byte would do
@@ -12144,12 +12182,30 @@ const INPUT_SCALE: i64 = 65_536;
 /// The sum is the whole of what this harness knows and the kernel does not: it
 /// prints where its driver's accumulator ended up and holds no copy of this
 /// list, and this process holds no copy of the accumulator. Unit: device pixels.
+///
+/// **And the list reverses along x inside the predictor's window** — out by ten,
+/// back by six — which is why the compositor's latch holds the newest position
+/// rather than extrapolating a velocity that has changed sign, and why *latched
+/// minus committed* is exactly this list's sum. A steady motion here would make
+/// that equality the motion plus a lead, and the kernel's verdict refuses an
+/// extrapolated latch rather than letting this check test the predictor.
+/// `user/compositor/src/latch.rs`'s `the_boots_motion_is_held_and_not_extrapolated`
+/// carries a copy of this list for that reason, and the boot is what catches
+/// the two drifting apart.
 const MOTIONS: &[(i32, i32)] = &[(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
 
 /// The two halves, and the second is what makes the first mean anything.
 const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
-    ("deliver", "every event the device produced reaches a compositor's graph"),
-    ("withheld", "the same events, decoded and not handed on, so the graph must not move"),
+    (
+        "deliver",
+        "the compositor holds the other end of the driver's ring, drains it itself, and \
+         latches the pointer by exactly the motion injected",
+    ),
+    (
+        "withheld",
+        "the same events on the same ring, with the ring not connected, so the compositor \
+         must decline every frame",
+    ),
 ];
 
 /// Send the emulator the pointer motions this check is made of.
@@ -12363,6 +12419,39 @@ fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
     Ok((x, y, motions))
 }
 
+/// A translation off the kernel's latch line, `(x, y)`.
+/// Unit: fixed-point units of 1/65536 device pixel.
+type Translation = (i64, i64);
+
+/// The committed and the latched translation off the kernel's latch line.
+///
+/// By position, for [`input_pointer`]'s reason. The line is
+/// `input latch committed x <cx> y <cy> latched x <lx> y <ly> ...`, and the
+/// kernel's own comment says its first twelve words are a format.
+///
+/// # Errors
+///
+/// A log with no such line, or one whose numbers are not numbers.
+/// Unit: fixed-point units of 1/65536 device pixel, as `(committed, latched)`.
+fn input_latch(log: &str) -> Result<(Translation, Translation), String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(INPUT_LATCH))
+        .ok_or("the boot printed no latch line")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize, word: &str| -> Result<i64, String> {
+        // The word before each number is checked, so a line whose format moved
+        // is a refusal naming the line rather than a number read from the wrong
+        // place.
+        if fields.get(index.wrapping_sub(1)).copied() != Some(word) {
+            return Err(format!("the latch line is not in the format this reads: {line}"));
+        }
+        let text = fields.get(index).copied().ok_or_else(|| format!("short latch line: {line}"))?;
+        text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
+    };
+    Ok(((at(4, "x")?, at(6, "y")?), (at(9, "x")?, at(11, "y")?)))
+}
+
 /// The exit criterion of `E3-B04d` and the run half of `E3-B04a`, as a command.
 ///
 /// # What it asserts, and why one of the assertions is not the kernel's
@@ -12382,12 +12471,19 @@ fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
 /// is the property `cargo xtask gpu` gets from a screen capture and this one
 /// gets from having been the thing that moved the mouse.
 ///
-/// The control is `withheld`: the identical boot with the frame's hand-on
-/// removed. The events are produced, drained and decoded in that run too — the
-/// kernel's verdict requires it — and the compositor must still apply exactly
-/// the two deltas the boot's own setup sends. Without it, the delivering half's
-/// edit count would establish that a compositor applies deltas rather than that
-/// these came off a device.
+/// Since `E3-B01i`'s boot half closed there is a second comparison of the same
+/// kind: the compositor publishes the transform the client committed and the
+/// one it latched, and this process subtracts them and requires **exactly** the
+/// motion it injected. The compositor took those positions off the driver's ring
+/// itself, with the frame holding neither end — `E3-B04g` — so the equality is
+/// between a list in this process and a latch at ring 3 with nothing in between
+/// that could have been told the answer.
+///
+/// The control is `withheld`: the identical boot with the ring not connected.
+/// The events are produced and submitted in that run too — the kernel's verdict
+/// requires it — and the compositor must decline every frame. Without it, a
+/// latch on the delivering half would establish that a compositor latches rather
+/// than that it latched these.
 ///
 /// # Errors
 ///
@@ -12425,9 +12521,10 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                 return Err(format!(
                     "the kernel refused to finish after `input={name}`. Either the device \
                      produced nothing, or the driver did not time every report exactly once, \
-                     or an entry reached this frame with no reading on it, or the compositor \
-                     applied a different number of deltas than the frame handed it. The \
-                     serial log above says which."
+                     or what the compositor drained off the driver's ring is not what the \
+                     driver says it sent, or the compositor latched on a half that gave it \
+                     no ring or failed to latch on the one that did. The serial log above \
+                     says which."
                 ));
             }
             Ending::Exited(0) => {
@@ -12482,16 +12579,46 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                 asked_y * INPUT_SCALE,
             ));
         }
+
+        // `E3-B01i`: *the latched transform differs from the committed one by
+        // exactly the motion injected*. Two equalities against the list this
+        // process sent, on the delivering half; the withholding half latches
+        // nothing, which the kernel's own verdict requires, and a subtraction of
+        // two unwritten words would be a comparison of zeroes.
+        if *name == "deliver" {
+            let ((cx, cy), (lx, ly)) = input_latch(&watched.log)?;
+            println!(
+                "input={name}: the compositor latched ({lx}, {ly}) over a committed ({cx}, {cy}), \
+                 a difference of ({}, {}) in units of 1/{INPUT_SCALE} device pixel",
+                lx - cx,
+                ly - cy,
+            );
+            if lx - cx != asked_x * INPUT_SCALE || ly - cy != asked_y * INPUT_SCALE {
+                return Err(format!(
+                    "`input={name}` latched a transform that differs from the committed one by \
+                     ({}, {}), and this harness injected ({}, {}). The compositor took every \
+                     position off the driver's ring itself and the frame relayed none, so a \
+                     difference is the ring, the decoder, the predictor, the latch, or the \
+                     transform the client committed — the kernel's `input cross` and `input \
+                     ring` lines say whether it was the first two, and its `input latch` line \
+                     shows the committed end.",
+                    lx - cx,
+                    ly - cy,
+                    asked_x * INPUT_SCALE,
+                    asked_y * INPUT_SCALE,
+                ));
+            }
+        }
     }
 
     if all {
         println!(
             "\nboth halves held: a pointer moved outside the machine, one driver at ring 3 \
-             timed each report exactly once and submitted what it saw unasked, this frame \
-             drained and decoded every entry, and a compositor at ring 3 applied one \
-             transform per event and said so in the state tree it publishes; the identical \
-             boot with the hand-on removed produced and decoded the same events and left \
-             the graph holding nothing but its own two setup nodes"
+             timed each report exactly once and submitted what it saw unasked, a compositor \
+             at ring 3 took every entry off that ring itself - the frame took none - decoded \
+             and folded them into the driver's own word, and latched the pointer by exactly \
+             the motion this harness injected; the identical boot with the ring not connected \
+             submitted the same events and the compositor declined every frame"
         );
     }
     Ok(())
@@ -13104,6 +13231,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
                 "`compositor={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `compositor` component file."
             ));
         }
+        liveness_held(name, &log)?;
     }
 
     if all {
@@ -13133,6 +13261,263 @@ compositor: ok — all five halves held. A component held the machine's scene gr
         );
     }
     Ok(())
+}
+
+/// What `E3-B05e` requires of the compositor's place after each half.
+///
+/// # Why this is here and not in the kernel's verdict
+///
+/// Because the comparison it makes is the one the frame may not. RFC 0123's
+/// reversal condition is a line in `kernel/` that compares an occupant's
+/// readings against anything; the frame copies two words onto a supervisor's
+/// row and prints what the supervisor says it read, and this is where the
+/// supervisor's account is held against the numbers the compositor's own tree
+/// published a stage earlier. Two derivations of one number: the kernel's
+/// compositor stage prints the tree at fixed indices, and `main::liveness_of`
+/// picks the carried words by node id.
+///
+/// # Why three answers and five halves
+///
+/// `serve` is the exit: its compositor gave its last frame up with a wait still
+/// outstanding, and the supervisor must name the timeout and restart the place.
+/// `starved` and `wake` are the controls, and each refuses a different wrong
+/// rule — `starved` abandoned nothing, so a policy that fired on every reading
+/// goes red there; `wake` abandoned its middle frame and has nothing
+/// outstanding, so a policy that forgot the outstanding half restarts a
+/// compositor for a late frame and goes red there. `wake` is the one that
+/// carries weight: `starved`'s component writes none of its nodes, so its two
+/// words are the manifest's declared zeroes rather than a zero it computed —
+/// `kernel/src/main.rs`'s `liveness_of` says so at the carry. `mute` and `floorless` never
+/// stood the component up, so a reading carried for them is a reading nobody
+/// published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Liveness {
+    /// Stopped for a timeout and restarted under the place's own policy.
+    Restarted,
+    /// Read, and left running: no fate named.
+    Left,
+    /// No reading carried at all.
+    NotCarried,
+}
+
+/// Which of the three a half must show. R04: a half this does not name is
+/// refused, so a sixth half has to say what its reading is for.
+fn liveness_expected(half: &str) -> Result<Liveness, String> {
+    match half {
+        "serve" => Ok(Liveness::Restarted),
+        "starved" | "wake" => Ok(Liveness::Left),
+        "mute" | "floorless" => Ok(Liveness::NotCarried),
+        other => Err(format!(
+            "`compositor={other}` is a half `liveness_expected` does not name. Say whether it\n\
+             stands the component up — and so carries a liveness reading to the supervisor —\n\
+             and what the supervisor must do with it; `kernel/src/main.rs`'s `liveness_of` is\n\
+             the other half of the same answer."
+        )),
+    }
+}
+
+/// Hold one half's log to what [`liveness_expected`] says of it.
+fn liveness_held(half: &str, log: &str) -> Result<(), String> {
+    liveness_verdict(liveness_expected(half)?, log)
+        .map_err(|why| format!("`compositor={half}`, E3-B05e: {why}"))
+}
+
+/// The digits immediately after `marker` in `text`.
+fn digits_after(text: &str, marker: &str) -> Option<u64> {
+    let tail = text.get(text.find(marker)? + marker.len()..)?;
+    let end = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+    tail.get(..end)?.parse().ok()
+}
+
+/// The pure half of [`liveness_held`], so that fixtures can drive it.
+fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
+    let line = log.lines().find(|line| line.starts_with("  liveness      place compositor"));
+    let ended = log.lines().find(|line| line.starts_with("  timeout       place compositor"));
+    let restart = log.lines().find(|line| line.starts_with("  restart       place compositor"));
+    if expected == Liveness::NotCarried {
+        if line.is_some() || ended.is_some() || restart.is_some() {
+            return Err("a liveness reading reached the supervisor from a half that never stood \
+                        the component up, so it is a reading nobody published — \
+                        `main::liveness_of` should have carried none"
+                .into());
+        }
+        return Ok(());
+    }
+    let line = line.ok_or(
+        "no `liveness` line for the compositor's place: the reading the compositor published \
+         never reached a supervisor's row",
+    )?;
+    let tree = log
+        .lines()
+        .find(|line| line.contains("compositor    state tree waits outstanding "))
+        .ok_or("no `state tree waits outstanding` line to hold the supervisor's account against")?;
+    let published = (
+        digits_after(tree, "waits outstanding ").ok_or("the tree line carries no waits")?,
+        digits_after(tree, "timeout(s) ").ok_or("the tree line carries no timeouts")?,
+    );
+    let heard_at =
+        line.find("the supervisor heard ").ok_or("the liveness line says nothing heard")?;
+    let heard_part = line.get(heard_at..).unwrap_or("");
+    let heard = (
+        digits_after(heard_part, "waits ").ok_or("the liveness line carries no heard waits")?,
+        digits_after(heard_part, "abandoned ").ok_or("the liveness line carries no heard count")?,
+    );
+    // **The check the `decide` finding asks for.** The words the supervisor
+    // decided on are the words the compositor published, or the frame carried
+    // the wrong reading, or the supervisor read the wrong one — and a policy fed
+    // the wrong word is a policy fed a constant with extra steps.
+    if heard != published {
+        return Err(format!(
+            "the supervisor heard waits {}, abandoned {} and the compositor's own tree says \
+             waits {}, timeouts {}. Either the frame copied the wrong nodes onto the row \
+             (`kernel/src/main.rs`'s `liveness_of`, `kernel/src/component.rs`'s `write_board`) \
+             or the supervisor read the wrong offsets (`user/supervisor/src/routing.rs`).",
+            heard.0, heard.1, published.0, published.1
+        ));
+    }
+    match expected {
+        Liveness::Restarted => {
+            if !line.contains("named timed out") {
+                return Err(format!(
+                    "the compositor published waits {}, timeouts {} — a wait outstanding on a \
+                     frame it gave up — and the supervisor named no timeout for it",
+                    published.0, published.1
+                ));
+            }
+            // By the word on the line and not by the line: an occupant ended on a
+            // stop that carried `STOPPED` in place of the named cause prints this
+            // line too, and the first version of this check then said *ended for a
+            // timeout* over a log that said `stopped`.
+            match ended {
+                None => {
+                    return Err("the supervisor named a timeout and the compositor's occupant \
+                                was never ended for it"
+                        .into());
+                }
+                Some(ended) if !ended.contains("supervisor's word — timed out") => {
+                    return Err(format!(
+                        "the supervisor named a timeout and the occupant ended by another \
+                         cause, so the frame did not carry the word it was handed:\n{ended}"
+                    ));
+                }
+                Some(_) => {}
+            }
+            match restart {
+                Some(restart) if restart.contains("heard timed out and said restart") => Ok(()),
+                // Refilled, and not by the verdict: the place has an occupant again
+                // and the policy that heard the timeout did not say restart. That is
+                // RFC 0094's assembler starting a member into a row a death emptied,
+                // which is what the first boot of this did.
+                Some(restart) if restart.contains("heard timed out and said") => Err(format!(
+                    "the compositor's place was refilled and the policy that heard the timeout \
+                     did not say restart, so something other than the policy refilled it:\n\
+                     {restart}"
+                )),
+                Some(restart) => Err(format!(
+                    "the compositor's place was restarted, and not for the timeout the \
+                     notice carried:\n{restart}"
+                )),
+                None => Err("the compositor's occupant was ended for a timeout and its place \
+                             was not restarted under `on_fault`"
+                    .into()),
+            }
+        }
+        Liveness::Left => {
+            if !line.contains("named no fate") || ended.is_some() || restart.is_some() {
+                return Err(format!(
+                    "the compositor published waits {}, timeouts {}, which is not a wait \
+                     outstanding on an abandoned frame, and the supervisor acted on it anyway. \
+                     A policy that fires here fires for something other than a timeout.",
+                    published.0, published.1
+                ));
+            }
+            Ok(())
+        }
+        Liveness::NotCarried => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::{Liveness, liveness_expected, liveness_verdict};
+
+    const TREE: &str =
+        "  compositor    state tree waits outstanding 1, timeline reached 1, timeout(s) 1; x\n";
+
+    fn stuck(heard: &str, tail: &str) -> String {
+        format!(
+            "{TREE}  liveness      place compositor epoch 0: the frame copied waits 1, abandoned \
+             1 from the tree its component published earlier in this boot; the supervisor heard \
+             {heard} and named timed out, 1 frame(s) abandoned — the frame answered 1\n{tail}"
+        )
+    }
+
+    const ENDED: &str =
+        "  timeout       place compositor epoch 0 ended on the supervisor's word — timed out\n";
+    const RESTARTED: &str = "  restart       place compositor under on_fault — the supervisor heard \
+                             timed out and said restart; restart 1 of 8\n";
+
+    /// The exit as a log, and each of the ways it can be missing one part.
+    #[test]
+    fn a_stuck_reading_needs_the_timeout_the_stop_and_the_restart() {
+        let whole = stuck("waits 1, abandoned 1", &format!("{ENDED}{RESTARTED}"));
+        assert_eq!(liveness_verdict(Liveness::Restarted, &whole), Ok(()));
+        assert!(
+            liveness_verdict(Liveness::Restarted, &stuck("waits 1, abandoned 1", ENDED)).is_err()
+        );
+        assert!(
+            liveness_verdict(Liveness::Restarted, &stuck("waits 1, abandoned 1", RESTARTED))
+                .is_err()
+        );
+        let wrong = RESTARTED.replace("timed out", "fault");
+        let refused = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{ENDED}{wrong}")),
+        );
+        assert!(refused.is_err(), "a restart for some other cause is not the exit");
+
+        // The two a boot actually produced by mutation: the stop carrying
+        // `STOPPED` in place of the named word, and the assembler refilling the
+        // row while the policy said leave.
+        let stopped = ENDED.replace("— timed out", "— stopped");
+        let why = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{stopped}{RESTARTED}")),
+        )
+        .expect_err("ended by another cause");
+        assert!(why.contains("ended by another cause"), "{why}");
+        let left = RESTARTED.replace("said restart", "said leave");
+        let why = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{ENDED}{left}")),
+        )
+        .expect_err("refilled by something other than the policy");
+        assert!(why.contains("something other than the policy"), "{why}");
+    }
+
+    /// **The check attacked**: a supervisor that heard a word the tree does not
+    /// say is refused even when everything it then did looks right.
+    #[test]
+    fn a_heard_word_that_is_not_the_published_one_is_refused() {
+        let swapped = stuck("waits 1, abandoned 3", &format!("{ENDED}{RESTARTED}"));
+        let why =
+            liveness_verdict(Liveness::Restarted, &swapped).expect_err("heard is not published");
+        assert!(why.contains("abandoned 3"), "{why}");
+    }
+
+    /// The controls: a restart on a half whose reading is not stuck is red, and
+    /// a reading carried for a half that never ran is red.
+    #[test]
+    fn a_control_that_restarts_or_a_half_that_never_ran_is_refused() {
+        let late = "  compositor    state tree waits outstanding 0, timeline reached 3, timeout(s) 1\n\
+                    \x20 liveness      place compositor epoch 0: …; the supervisor heard waits 0, \
+                    abandoned 1 and named no fate — the frame answered 0\n";
+        assert_eq!(liveness_verdict(Liveness::Left, late), Ok(()));
+        assert!(liveness_verdict(Liveness::Left, &format!("{late}{ENDED}{RESTARTED}")).is_err());
+        assert!(liveness_verdict(Liveness::NotCarried, late).is_err());
+        assert_eq!(liveness_verdict(Liveness::NotCarried, TREE), Ok(()));
+        assert!(liveness_expected("a-sixth-half").is_err());
+    }
 }
 
 /// `E3-B06c`'s two halves, and neither is the other's control in the ordinary
@@ -14773,7 +15158,8 @@ fn lint_all() -> Result<(), String> {
     // The rule RFC 0101 named and did not write. Four bounds on the boot path
     // are each larger than a count kept in another file, every relation was
     // written in a comment, and the last time one of them decayed it was a
-    // six-boot nightly claim that noticed, a day later. Four file reads.
+    // six-boot nightly claim that noticed, a day later. Five file reads, over
+    // four files.
     lint_bounds()?;
     // The same sentence applied to a string rather than to two constants. Three
     // CI jobs went red on four RFC filenames past ustar's 100-byte name field,
@@ -14821,6 +15207,13 @@ fn lint_all() -> Result<(), String> {
     // keeps it built, because the way it rots is somebody adding a job to
     // `nightly.yml` and not adding it to the alarm's `needs:`.
     lint_schedules()?;
+    // Its sibling over every workflow rather than the scheduled ones. Naming
+    // `permissions:` replaces the default set, so a container job that names it
+    // without `packages: read` cannot pull its own image and never runs a step —
+    // including the step that would have reported it. Three jobs had that shape
+    // and nothing said so: `nightly.yml`'s `sweep` for five red nights, and
+    // `weekly.yml`'s `runners` and `dates` for as long as they existed.
+    lint_pulls()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -15924,6 +16317,207 @@ fn four_space_key(line: &str) -> bool {
     }
 }
 
+/// Every workflow job that runs in a container and names `permissions:` can
+/// still pull the image it runs in.
+///
+/// # The incident, three times
+///
+/// A job that names `permissions:` **replaces** the default token set rather
+/// than adding to it, and `packages: read` is the row in the default set that
+/// pulls this tree's private image. So a container job that names the block to
+/// gain `issues: write` loses its container: it fails at `Initialize
+/// containers` with `Error response from daemon: denied`, before any step of its
+/// own — including an `if: failure()` step that would have reported it.
+/// `nightly.yml`'s `sweep` job measured that on five consecutive red nights
+/// (`docs/postmortem/0002`), and wave 12 repaired that job alone. `weekly.yml`'s
+/// `runners` and `dates` had carried the same block since `c8513d4`, so the two
+/// halves of E2-P06 that compare roots across runners and across dates had never
+/// started, and an audit on 2026-09-24 found them by reading, not by a red run.
+///
+/// # Why a file read, and why every workflow
+///
+/// `CLAUDE.md`'s rule: a relation between two keys in one file belongs in
+/// `verify`, not in the schedule that happens to notice it. Every workflow and
+/// not only the scheduled ones, because the defect does not care what triggers
+/// the job — a pull-request job with the shape would be a red gate nobody could
+/// read a step of.
+///
+/// A workflow-level `permissions:` block narrows every job that names none, so
+/// it is read too and applied to those jobs. `packages: write` and `read-all` /
+/// `write-all` are accepted, because each includes the read; whether a
+/// container job *should* hold a write is a different question and not this
+/// one.
+///
+/// # What it cannot see
+///
+/// A container that needs no token — a public image — would be refused here all
+/// the same. Nothing in this tree runs one, and the day something does it names
+/// `packages: read` anyway or this learns to tell the two apart. Nor can it see
+/// a pull that fails for a reason other than the token.
+///
+/// # Errors
+///
+/// Every container job whose permissions cannot pull, named with its file; or no
+/// container job at all, which would mean this reader has stopped matching the
+/// workflows it reads rather than that the tree stopped using its image.
+fn lint_pulls() -> Result<(), String> {
+    let dir = root().join(".github").join("workflows");
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("reading .github/workflows/: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
+            // `lint_schedules`' reason: a commented-out `packages: read` is a
+            // row the token does not have.
+            files.push((name, without_comments(&text)));
+        }
+    }
+    files.sort();
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut containers = 0usize;
+    let mut narrowed = 0usize;
+    for (name, text) in &files {
+        let pulls = workflow_pulls(text);
+        containers += pulls.containers;
+        narrowed += pulls.narrowed;
+        for (job, whose) in pulls.cannot {
+            findings.push(format!(
+                "  {name}: `{job}` runs in a container and {whose} `permissions:` does not \
+                 name `packages: read`"
+            ));
+        }
+    }
+
+    if containers == 0 {
+        return Err("no job in .github/workflows/ declares a `container:`.\n\n\
+             Every policy, test and boot job in this tree runs in the development image,\n\
+             so this means the reader no longer matches the workflows rather than that\n\
+             the image went away — and a reader that matches nothing reports ok."
+            .into());
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-pulls: ok  ({containers} container job(s) in {} workflow(s); {narrowed} of \
+             them name `permissions:` and every one can pull its image)",
+            files.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} job(s) cannot pull the image they run in:\n{}\n\n\
+         A job that names `permissions:` replaces the default token set rather than\n\
+         adding to it, and `packages: read` is the row that pulls the image. Without it\n\
+         the job fails at `Initialize containers` with `Error response from daemon:\n\
+         denied`, before any step runs — including a step that would have reported it.\n\
+         `nightly.yml`'s `sweep` did that on five red nights (`docs/postmortem/0002`),\n\
+         and `weekly.yml`'s `runners` and `dates` never once started.\n\n\
+         Add `packages: read` to the block, with the reason beside it.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// What [`lint_pulls`] found in one workflow.
+struct WorkflowPulls {
+    /// Jobs that declare a `container:`. Unit: jobs.
+    containers: usize,
+    /// Of those, the ones whose token is narrowed by a `permissions:` block,
+    /// their own or the workflow's. Unit: jobs.
+    narrowed: usize,
+    /// Each job that cannot pull, and whose block narrowed it — `its` or `the
+    /// workflow's`.
+    cannot: Vec<(String, &'static str)>,
+}
+
+/// The rule, over one workflow's text, so that a fixture can hold the shapes the
+/// tree does not.
+fn workflow_pulls(text: &str) -> WorkflowPulls {
+    // A top-level block: its opener at column zero, and everything indented
+    // under it until the next key at column zero.
+    let mut top: Vec<&str> = Vec::new();
+    let mut in_top = false;
+    for line in text.lines() {
+        if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+            in_top = line.starts_with("permissions:");
+        }
+        if in_top {
+            top.push(line);
+        }
+    }
+    let top = top.join("\n");
+
+    let can_pull = |block: &str| {
+        ["packages: read", "packages: write", "read-all", "write-all"]
+            .iter()
+            .any(|grant| block.contains(grant))
+    };
+
+    let mut pulls = WorkflowPulls { containers: 0, narrowed: 0, cannot: Vec::new() };
+    for job in workflow_jobs(text) {
+        let Some(body) = workflow_job_body(text, &job) else { continue };
+        if !body.lines().any(|line| line.starts_with("    container:")) {
+            continue;
+        }
+        pulls.containers += 1;
+        let own = yaml_key_region(&body, "permissions");
+        let (block, whose) = if !own.is_empty() {
+            (own, "its")
+        } else if !top.is_empty() {
+            (top.clone(), "the workflow's")
+        } else {
+            // The default set, which holds `packages: read`.
+            continue;
+        };
+        pulls.narrowed += 1;
+        if !can_pull(&block) {
+            pulls.cannot.push((job, whose));
+        }
+    }
+    pulls
+}
+
+/// The shapes [`workflow_pulls`] has to tell apart, most of which this tree does
+/// not write and only a fixture can.
+#[cfg(test)]
+mod workflow_pulls_shapes {
+    use super::*;
+
+    #[test]
+    fn a_container_job_that_names_permissions_must_keep_the_pull() {
+        let text = "on:\n  push:\njobs:\n\
+                    \x20 plain:\n    runs-on: x\n    container: img\n\
+                    \x20 narrowed:\n    runs-on: x\n    container: img\n    permissions:\n      contents: read\n      issues: write\n\
+                    \x20 repaired:\n    container: img\n    permissions:\n      contents: read\n      packages: read\n\
+                    \x20 hostless:\n    runs-on: x\n    permissions:\n      issues: write\n";
+        let pulls = workflow_pulls(text);
+        assert_eq!(pulls.containers, 3, "a job with no container was counted, or one was missed");
+        assert_eq!(pulls.narrowed, 2);
+        assert_eq!(pulls.cannot, vec![("narrowed".to_string(), "its")]);
+
+        // A workflow-level block narrows every job that names none, which is the
+        // same defect written once for the whole file.
+        let top = "on:\n  push:\npermissions:\n  contents: read\njobs:\n  a:\n    container: img\n";
+        assert_eq!(workflow_pulls(top).cannot, vec![("a".to_string(), "the workflow's")]);
+        let all = "permissions: read-all\njobs:\n  a:\n    container: img\n";
+        assert!(workflow_pulls(all).cannot.is_empty(), "read-all includes the pull");
+
+        // And a commented-out grant is not a grant, which is why the caller
+        // strips comments before asking.
+        let commented = "jobs:\n  a:\n    container: img\n    permissions:\n      # packages: read\n      issues: write\n";
+        assert_eq!(workflow_pulls(&without_comments(commented)).cannot.len(), 1);
+    }
+
+    #[test]
+    fn this_tree_s_container_jobs_can_pull_their_image() {
+        lint_pulls().expect("a workflow job cannot pull the image it runs in");
+    }
+}
+
 /// The half of the alarm that does not need a token, a network or a red night.
 ///
 /// `ops/alarm.sh` decides whether a run should say anything and writes what it
@@ -16074,6 +16668,58 @@ mod schedule_alarm {
 
         let (_, _, body) = run("nolog", "sweep\tfailure\n", None, "b74807ca");
         assert!(body.contains("the log could not be read"), "{body}");
+    }
+
+    #[test]
+    fn a_run_in_which_nothing_ran_asserts_nothing() {
+        // Every row `skipped`: nothing failed and nothing was cancelled, so this
+        // decided `green` — and `ops/alarm-post.sh` closes every open thread on
+        // green. A run that measured nothing closing a real finding is the one
+        // outcome the empty-table refusal above it exists to prevent, reached
+        // with a table that is not empty. Latent: every workflow's first job
+        // runs unconditionally today.
+        let (decision, _, body) = run(
+            "all-skipped",
+            "environment\tskipped\nsweep\tskipped\nrollback\tskipped\n",
+            None,
+            "b74807ca",
+        );
+        assert_eq!(decision, "nothing", "a run in which no job succeeded decided {decision}");
+        assert!(body.contains("no job in this run succeeded"), "{body}");
+
+        // One success is a run that measured something, and it still closes.
+        let (decision, _, _) =
+            run("one-ran", "detect\tsuccess\ndiagnose\tskipped\n", None, "b74807ca");
+        assert_eq!(decision, "green");
+    }
+
+    #[test]
+    fn the_headline_and_the_excerpt_are_about_one_job_and_it_is_named() {
+        // Two failures, and the log is both jobs' logs one after the other. The
+        // headline is the first failing line in it — `cut`'s — and the excerpt
+        // was the last forty lines of the whole file, which are `miri`'s, under
+        // a label that said *the failing job*. A reader was handed one job's
+        // failure and the other job's context as though they were one.
+        let log = "cut\t101\t2026-09-23T03:11:00.0000000Z FAIL: the cut: two roots for one tree\n\
+                   cut\t101\t2026-09-23T03:11:01.0000000Z the context of the cut\n\
+                   miri\t102\t2026-09-23T03:12:00.0000000Z error: Undefined Behavior: a read past the ring\n\
+                   miri\t102\t2026-09-23T03:12:01.0000000Z the context of miri\n";
+        let (_, _, body) = run("two", "cut\tfailure\nmiri\tfailure\n", Some(log), "b74807ca");
+        let (_, excerpt) = body.split_once("<details>").expect("an excerpt");
+        assert!(
+            !excerpt.contains("the context of miri"),
+            "the excerpt is about a different job from the headline: {body}"
+        );
+        assert!(excerpt.contains("the context of the cut"), "{body}");
+        assert!(body.contains("FAIL: the cut"), "{body}");
+        assert!(body.contains("from `cut`"), "the headline does not name its job: {body}");
+
+        // And a log that carries no job — written some other way — must not be
+        // labelled as though it did: with two failures it says it cannot tell.
+        let bare = "FAIL: the cut: two roots for one tree\nthe context of miri\n";
+        let (_, _, body) = run("two-bare", "cut\tfailure\nmiri\tfailure\n", Some(bare), "b74807ca");
+        assert!(body.contains("concatenated"), "{body}");
+        assert!(!body.contains("from `cut`"), "{body}");
     }
 
     #[test]
@@ -21606,13 +22252,22 @@ struct BootBound {
     /// Why, in one sentence, and what breaks when it is one short.
     /// Unit: none — prose.
     because: &'static str,
+    /// The names the bound must be *spelled* through, for a relation the source
+    /// has made structural — empty for a bound written as a literal.
+    ///
+    /// A bound spelled as the sum it is compared against dominates it by
+    /// construction, so `at_least` cannot fail for it and the row's one
+    /// remaining job is to keep the spelling: a literal in its place is the
+    /// decay RFC 0101 describes, arriving with a green row. Unit: none —
+    /// identifiers, taken by their last path segment.
+    spelled_as: &'static [&'static str],
 }
 
 /// Where each constant this check reads lives.
 ///
-/// Read from source rather than linked against, because three of the four are
-/// in crates `xtask` cannot depend on — `kernel` is `no_std`, `test = false`
-/// and built for a bare-metal target — and the fourth being readable the other
+/// Read from source rather than linked against, because four of the five are
+/// in a crate `xtask` cannot depend on — `kernel` is `no_std`, `test = false`
+/// and built for a bare-metal target — and the fifth being readable the other
 /// way would make this two mechanisms for one rule. `lint_gate` reads source
 /// for the same reason and says so at greater length.
 const BOUND_SOURCES: &[(&str, &str)] = &[
@@ -21637,7 +22292,8 @@ const BOUND_SOURCES: &[(&str, &str)] = &[
 ///
 /// # What it costs, and why that matters here
 ///
-/// Four file reads and no build. That is the entire argument for this being in
+/// Five file reads over four files, and no build. That is the entire argument
+/// for this being in
 /// `cargo xtask verify` rather than beside the claim it protects: the route
 /// that *did* catch `MAX_RESERVED` at thirteen is `cargo xtask rollback`, which
 /// is three generation builds and six boots, runs only in the nightly, and went
@@ -21662,6 +22318,7 @@ const BOUND_SOURCES: &[(&str, &str)] = &[
 /// this expects it, or a value that does not resolve.
 fn lint_bounds() -> Result<(), String> {
     let mut read: BTreeMap<String, u64> = BTreeMap::new();
+    let mut spelled: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut findings: Vec<String> = Vec::new();
 
     for (file, name) in BOUND_SOURCES {
@@ -21671,6 +22328,7 @@ fn lint_bounds() -> Result<(), String> {
         match constant_value(&text, name, &read) {
             Ok(value) => {
                 read.insert((*name).to_string(), value);
+                spelled.insert((*name).to_string(), constant_terms(&text, name));
             }
             Err(why) => findings.push(format!("  {file}  {why}")),
         }
@@ -21682,11 +22340,17 @@ fn lint_bounds() -> Result<(), String> {
         BootBound {
             bound: ("kernel/src/main.rs", "MAX_RESERVED"),
             over: "the ranges the frame allocator must be told not to hand out",
+            // `kernel/src/main.rs` now *defines* the bound as this sum, and the
+            // arithmetic resolves it through the same two names — so the
+            // comparison is `n >= n` for any values at all and cannot fail. What
+            // can still fail is the spelling, and that is what this row is for.
             at_least: |read| Some(read.get("FIXED_RESERVED")? + read.get("MAX_MODULES")?),
             because: "a module whose reservation did not fit is a module the allocator \
                       offers as free memory, and the symptom is the reader of that module \
                       failing, arbitrarily far away. This was the literal 13 against a \
-                      MAX_MODULES of 16 for a day",
+                      MAX_MODULES of 16 for a day; the relation is structural in the \
+                      spelling now, and this row exists to refuse the next literal",
+            spelled_as: &["FIXED_RESERVED", "MAX_MODULES"],
         },
         BootBound {
             bound: ("kernel/src/arch/x86_64/multiboot.rs", "MAX_MODULES"),
@@ -21699,6 +22363,7 @@ fn lint_bounds() -> Result<(), String> {
                       component file; a module past this bound is dropped by the loader \
                       reader, and the boot then cannot fold to the root it was asked for. \
                       This was 8 against a menu needing 9",
+            spelled_as: &[],
         },
         BootBound {
             bound: ("abi/src/reserve.rs", "RESERVATIONS_MAX"),
@@ -21711,6 +22376,7 @@ fn lint_bounds() -> Result<(), String> {
                       place holds two entries until the first is released. RFC 0101 names \
                       exactly this check as the repair that closes its residue rather than \
                       padding it",
+            spelled_as: &[],
         },
         BootBound {
             bound: ("kernel/src/component.rs", "PLACES_MAX"),
@@ -21719,11 +22385,31 @@ fn lint_bounds() -> Result<(), String> {
             because: "a component file with no place is a component no downstream count \
                       ever looks for — the ninth walked past a silent `continue` and was \
                       reported as a stale or partial build",
+            spelled_as: &[],
         },
     ];
 
     for bound in bounds {
         let (file, name) = bound.bound;
+        if let Some(terms) = spelled.get(name) {
+            let missing: Vec<&str> = bound
+                .spelled_as
+                .iter()
+                .copied()
+                .filter(|want| !terms.iter().any(|term| term == want))
+                .collect();
+            if !missing.is_empty() {
+                findings.push(format!(
+                    "  {file}  `{name}` is spelled `{}` and must be spelled through {} — it \
+                     bounds {}.\n\x20     {}",
+                    terms.join(" + "),
+                    bound.spelled_as.join(" + "),
+                    bound.over,
+                    bound.because
+                ));
+                continue;
+            }
+        }
         let Some(have) = read.get(name).copied() else { continue };
         let Some(want) = (bound.at_least)(&read) else { continue };
         if have >= want {
@@ -21744,7 +22430,8 @@ fn lint_bounds() -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{} boot-path bound(s) no longer dominate what they count:\n{}\n\n\
+        "{} boot-path bound(s) no longer dominate what they count, or no longer say so in \
+         their spelling:\n{}\n\n\
          RFC 0101: a constant derived from a count is only as good as the claim\n\
          that the count is what is being counted, and that claim decays silently —\n\
          by addition, with the failure surfacing nowhere near the addition.\n\n\
@@ -21900,6 +22587,26 @@ fn constant_value(text: &str, name: &str, known: &BTreeMap<String, u64>) -> Resu
     Ok(total)
 }
 
+/// The terms of `const NAME: usize = ...;` in `text`, each by its last path
+/// segment — the spelling of a bound rather than its value.
+///
+/// [`constant_value`] has already refused a second declaration and an
+/// expression it cannot read by the time this is asked, so an absent needle
+/// here is an empty spelling, which no structural row accepts.
+fn constant_terms(text: &str, name: &str) -> Vec<String> {
+    let needle = format!("const {name}: usize = ");
+    text.split_once(&needle)
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(expression, _)| {
+            expression
+                .split('+')
+                .filter_map(|term| term.trim().rsplit("::").next())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The resolver `lint-bounds` rests on, over text rather than over the tree.
 ///
 /// Here rather than in a boot, for the reason `lint_bounds` itself gives: this
@@ -21930,6 +22637,16 @@ mod bound_constants {
         known.insert("PLACES_MAX".to_string(), 9u64);
         let one = "pub const MAX_MODULES: usize = 1 + component::PLACES_MAX + 1 + 2;\n";
         assert_eq!(constant_value(one, "MAX_MODULES", &known), Ok(13));
+    }
+
+    #[test]
+    fn a_structural_bound_is_read_by_its_spelling_and_a_literal_has_none() {
+        // The two spellings of one value. `constant_value` cannot tell them
+        // apart — both are 21 — which is why the `MAX_RESERVED` row reads this.
+        let sum =
+            "const MAX_RESERVED: usize = FIXED_RESERVED + arch::x86_64::multiboot::MAX_MODULES;";
+        assert_eq!(constant_terms(sum, "MAX_RESERVED"), vec!["FIXED_RESERVED", "MAX_MODULES"]);
+        assert_eq!(constant_terms("const MAX_RESERVED: usize = 21;", "MAX_RESERVED"), vec!["21"]);
     }
 }
 
@@ -28476,6 +29193,30 @@ mod tests {
             retired.is_empty(),
             "`MINTS` is empty on purpose: the address space refuses what this used to look for"
         );
+    }
+
+    #[test]
+    fn the_frame_may_not_reach_the_supervisors_policy_by_any_spelling() {
+        // RFC 0126's row, attacked the way it was first beaten: an alias leaves
+        // no `policy::` in the frame, and the row read `policy::` until a
+        // mutation in `kernel/` made that `lint-datapath: ok`. Every spelling
+        // below is a route to `f_supervisor::policy::fate`; the last line is the
+        // prose and string exclusions, so the rule does not fire on the sentence
+        // explaining it.
+        let row = crate::NOT_THE_FRAME
+            .iter()
+            .find(|(prefix, _, defines)| *prefix == "kernel/" && *defines == "user/supervisor/")
+            .expect("RFC 0126's row");
+        for route in [
+            "fn f() { let _ = f_supervisor::policy::fate; }\n",
+            "use f_supervisor::policy as judge;\nfn f() { let _ = judge::fate; }\n",
+            "use f_supervisor::{routing, policy as judge};\n",
+            "use f_supervisor as s;\nfn f() { let _ = s::policy::fate; }\n",
+        ] {
+            assert!(!frame_findings("kernel/x.rs", route, row.1).is_empty(), "{route}");
+        }
+        let prose = "// `f_supervisor::policy` decides\nfn f() { let _ = \"policy\"; }\n";
+        assert!(frame_findings("kernel/x.rs", prose, row.1).is_empty());
     }
 
     #[test]
