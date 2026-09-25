@@ -33,9 +33,15 @@
 //! from Unicode's data by `cargo xtask unicode` and carry both licences in their
 //! first line (RFC 0114). They hold values and no code; [`property`] is the code
 //! that reads them. Neither is a dependency, so the crate still has none.
+//!
+//! [`bidi`] is UAX #9 over those two, through rule L2, and it is held to the
+//! specification's own conformance files by `tests/bidi_conformance.rs` — the
+//! one file in the crate that opens anything under the import, which is why it
+//! is a test on the host and not code in the library (RFC 0114, RFC 0115).
 
 #![no_std]
 
+pub mod bidi;
 pub mod bidi_brackets;
 pub mod bidi_class;
 pub mod cache;

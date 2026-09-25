@@ -20,3 +20,15 @@ description = "Text metrics as fixed-point integers, and the corpus of scripts a
 
 [lints]
 workspace = true
+
+# `E3-B03e`'s exit: UAX #9's two conformance files, read from the import by
+# path on the host (RFC 0114, RFC 0115). A target of its own, and `harness =
+# false`, because what the exit asks for is a printed count — cases run, passed
+# and excluded per file — and libtest would capture it on every run that
+# passes, which is every run that matters. `blob/tests/million.rs` is the
+# precedent for the shape. `IMPORT_READERS` in `xtask/src/main.rs` names the
+# file, which is what lets it open the corpus when nothing else here may.
+[[test]]
+name = "bidi_conformance"
+path = "tests/bidi_conformance.rs"
+harness = false
