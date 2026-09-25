@@ -7,3 +7,14 @@
 # depends on who last saved a file is charged to every diff after it, not just
 # the one that introduced it.
 * text=auto eol=lf
+
+# Except an import, which is upstream's bytes and not this tree's text. A data
+# import is checked by SHA-256 against its PROVENANCE.md (RFC 0114), so a
+# checkout that normalised one line ending in one imported file would make
+# `lint-licensing` red on a machine whose only difference is its git settings —
+# and, worse, would make the file this tree tests against not the file upstream
+# published. `-text` means git never converts it, in either direction.
+#
+# *What would reverse this:* nothing that is an import; an authored file under
+# third_party/ (a README, a PROVENANCE.md) is LF already and loses nothing.
+third_party/** -text

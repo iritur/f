@@ -27,10 +27,19 @@
 //! Where the shaper itself comes from is `E3-B03a`'s decision, and if the
 //! answer is *imported* then it arrives behind the licence boundary and is
 //! reached over a ring rather than by a dependency row here. RFC 0003.
+//!
+//! [`bidi_class`] and [`bidi_brackets`] are the two files in this crate — and in
+//! the permissive tree — that are not purely this tree's: they are generated
+//! from Unicode's data by `cargo xtask unicode` and carry both licences in their
+//! first line (RFC 0114). They hold values and no code; [`property`] is the code
+//! that reads them. Neither is a dependency, so the crate still has none.
 
 #![no_std]
 
+pub mod bidi_brackets;
+pub mod bidi_class;
 pub mod cache;
 pub mod corpus;
 pub mod face;
 pub mod metric;
+pub mod property;

@@ -51,6 +51,13 @@ mod rollback;
 /// second copy of it here. E2-P05, RFC 0013.
 mod compare;
 
+/// The one file in this crate that opens a file under `third_party/`: the check
+/// that reads each import's `PROVENANCE.md` against its bytes, and the generator
+/// that writes the tables `DERIVED_DATA` names. Split out so that
+/// `IMPORT_READERS` can name a file rather than a crate, which is the whole
+/// value of the row. RFC 0114, RFC 0138.
+mod imported;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -325,7 +332,98 @@ const CONFIG_ALLOW: &[(&str, &str, &str)] = &[
 const TOOLING: &[(&str, &str)] = &[(
     "xtask/",
     "build tooling: it runs outside the system under test, and it contains the \
-     needles the policy checks search for",
+     needles the policy checks search for. One file here also reads the import, \
+     and that is a second reason rather than the first: xtask/src/imported.rs \
+     generates the tables DERIVED_DATA names and hashes the files each \
+     PROVENANCE.md records. It may, because it is run by a person or by `lint` and \
+     never by a build, its output is committed and reviewed, and what it reads is \
+     data no compiler here reads (RFC 0114). It is IMPORT_READERS' row, and the \
+     exemption above means a second file here reading the import would not be seen",
+)];
+
+/// The one licence line every file in the permissive tree opens with, exactly.
+const PERMISSIVE_SPDX: &str = "// SPDX-License-Identifier: Apache-2.0 OR MIT";
+
+/// The line a file generated from imported data opens with instead: this tree's
+/// terms and the data's, both, because the file is both. RFC 0114.
+const DERIVED_SPDX: &str = "// SPDX-License-Identifier: (Apache-2.0 OR MIT) AND Unicode-3.0";
+
+/// The tag an SPDX reader looks for anywhere in a file, which is why a second
+/// one is refused: `reuse` and its kind take every tag they find, so a second
+/// licence written below the first is a second licence whatever line it is on.
+const SPDX_TAG: &str = "SPDX-License-Identifier:";
+
+/// Files in the permissive tree that are not purely permissive, each with the
+/// upstream file it was generated from and that file's SHA-256.
+///
+/// RFC 0114's first check, and the defect it closes is a silence. The licence
+/// check used to read a *prefix* — the tag and anything after it — so a file
+/// carrying a second licence passed and looked exactly like the 275 that carry
+/// only this tree's. Now every file must open with [`PERMISSIVE_SPDX`] to the
+/// byte, and a file that does not is either a row here or a finding. A table
+/// because a diff to a table is reviewable, which is `DETERMINISM_ALLOW`'s
+/// argument, and because *how many files in this tree are not liftable* is then
+/// a number somebody can read: two.
+///
+/// Each row's file must open with [`DERIVED_SPDX`] and carry, in the `//` block
+/// directly below that line, `Upstream-File`, `Upstream-SHA-256` and
+/// `Regenerate` equal to this row and to [`imported::REGENERATE`], plus a
+/// `Unicode-Version`, each written once in the whole file. The hash here must
+/// also be the input's, which [`imported::generate`] refuses to run without,
+/// and the one `PROVENANCE.md` records — so a version bump is red until all
+/// three move together.
+///
+/// *What would reverse this:* a generated file whose terms are not the tree's
+/// and the data's — a second upstream under a different licence — which is a
+/// row with a different line and an RFC saying why, not a wider prefix.
+const DERIVED_DATA: &[(&str, &str, &str)] = &[
+    (
+        "text/src/bidi_class.rs",
+        "third_party/unicode/extracted/DerivedBidiClass.txt",
+        "4867b4b7f0731ed1bfcd34cc6251211ff1542541fce0734b6fbda139ee80b3a4",
+    ),
+    (
+        "text/src/bidi_brackets.rs",
+        "third_party/unicode/BidiBrackets.txt",
+        "dadbaf38a0d0246e5b805bf8725cb81b7c621f93d030595635f5ba2c2f179428",
+    ),
+];
+
+/// Files in this workspace that open a file under `third_party/` at run time,
+/// each with the reason it may.
+///
+/// RFC 0114's second check. The `use` and `::` needles refuse a *module path*
+/// into the import; a string literal is neither, so a `read_to_string` of a
+/// corpus path in library code was silent — as silent as it is in the
+/// conformance harness, where it is right. So any permissive source whose code
+/// or string literals name the import is a finding unless it is a row here, and
+/// every row must still read it: `THE_ONE_READING`'s lesson from RFC 0103, that a
+/// rule with one call site has to count the call site, or a path with no reader
+/// and a path with one look the same.
+///
+/// *Code or string literals* and not *text*, and the difference is deliberate:
+/// three sources name `third_party/` in prose — `kernel/src/screen.rs`,
+/// `text/src/corpus.rs` and `text/src/face.rs` — and a comment opens nothing. A
+/// string literal is read the way the compiler reads it, escapes decoded, so a
+/// literal spelling the underscore as `\x5f` is the import. The needles are the
+/// directory's name and the name of every data file an import holds, so a
+/// `concat!` that splits the directory's name and spells a file's is caught too.
+///
+/// # What it cannot see
+///
+/// A path assembled at run time from pieces that spell neither the directory nor
+/// a file's name, or read from the environment or an argument. And any file
+/// under a `TOOLING` prefix, which is exempt from the source checks because it
+/// contains the needles — so a row under one must be named in that row's
+/// reason, which [`tooling_reason_findings`] holds, and a second reader there is
+/// not seen at all.
+///
+/// `E3-B03e`'s conformance harness under `text/tests/` is the next row, and it
+/// lands with the harness: a row whose file does not read the import is red.
+const IMPORT_READERS: &[(&str, &str)] = &[(
+    "xtask/src/imported.rs",
+    "the generator of every DERIVED_DATA table, and the check that reads each \
+     PROVENANCE.md against the bytes it records; TOOLING's row says why it may",
 )];
 
 /// True if `rel` names the checker rather than the checked.
@@ -1311,6 +1409,7 @@ fn main() -> ExitCode {
         "lint-determinism" => lint_determinism(),
         "lint-stamp" => lint_stamp(),
         "lint-licensing" => lint_licensing(),
+        "unicode" => imported::command(&root(), DERIVED_DATA, args.get(1).map(String::as_str)),
         "lint-boundary" => lint_boundary(),
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
@@ -1777,6 +1876,10 @@ cargo xtask <command>
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
 
+  unicode [--check]  Regenerate the Unicode tables DERIVED_DATA names in text/src/
+                     from third_party/unicode/, or report any that differ from
+                     what the generator writes. Run deliberately, never by a
+                     build; `lint-licensing` runs the check. RFC 0114
   claims             List the claims registry, and write claims/snapshot.json
   claims --render    Rewrite every cited claim value in docs/ from the registry
   claim <name>       Run one claim's workload and report against its threshold
@@ -21491,19 +21594,387 @@ fn boundary_findings(
     Ok((findings, stale))
 }
 
+/// A source as the compiler reads it: comments removed, and every string
+/// literal replaced by what it denotes — escapes decoded, raw strings as written,
+/// a continued line joined — between two spaces.
+///
+/// [`strip_to_code`] removes literals, which is right for a check about code and
+/// wrong for this one: a path into the import is a literal, and it can be spelled
+/// with `\x5f` for its underscore or `\u{74}` for its first letter. So this
+/// decodes rather than removes. It is a separate reader rather than a mode of
+/// that one because the two are asked different questions of the same bytes, and
+/// the scars RFC 0135 and RFC 0137 record are both about a reader answering the
+/// other question — a string that contained `/*`, a raw byte string whose `r` was
+/// taken for an identifier. Both are fixtures below.
+///
+/// Block comments nest, as the compiler's do. A character literal is removed,
+/// so `'"'` does not open a string, and a lifetime is kept as code.
+///
+/// *What would reverse this:* a reader built on the compiler's own tokens, which
+/// RFC 0135 names as the end of this class of finding.
+fn literal_view(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+        if b == b'r'
+            && raw_prefix_ok(bytes, i)
+            && let Some(hashes) = raw_string_hashes(bytes, i)
+        {
+            let opened = i + 1 + hashes + 1;
+            let end = run_to_close(bytes, opened, Quote::Raw(hashes)).unwrap_or(bytes.len());
+            let body_end = end.saturating_sub(1 + hashes).max(opened);
+            out.push(' ');
+            out.push_str(&text[opened.min(bytes.len())..body_end.min(bytes.len())]);
+            out.push(' ');
+            i = end;
+            continue;
+        }
+        if b == b'"' {
+            let (decoded, end) = decode_escaped(text, i + 1);
+            out.push(' ');
+            out.push_str(&decoded);
+            out.push(' ');
+            i = end;
+            continue;
+        }
+        if b == b'\'' {
+            // A character literal is `'x'` or an escape; a lifetime is a quote
+            // followed by an identifier and no closing quote.
+            let rest = &text[i + 1..];
+            let mut chars = rest.chars();
+            match chars.next() {
+                Some('\\') => {
+                    let close = rest.find('\'').filter(|at| *at >= 2 && *at <= 11);
+                    // `'\''` closes one quote later than a plain find says.
+                    let close = if rest.starts_with("\\'") { Some(2) } else { close };
+                    if let Some(at) = close {
+                        i += 1 + at + 1;
+                        out.push(' ');
+                        continue;
+                    }
+                }
+                Some(c) if chars.next() == Some('\'') => {
+                    i += 1 + c.len_utf8() + 1;
+                    out.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let c = text[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// An ordinary string literal's contents from `from`, decoded, and where it ends.
+fn decode_escaped(text: &str, from: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut chars = text[from..].char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => return (out, from + at + 1),
+            '\\' => match chars.next() {
+                Some((_, 'n')) => out.push('\n'),
+                Some((_, 'r')) => out.push('\r'),
+                Some((_, 't')) => out.push('\t'),
+                Some((_, '0')) => out.push('\0'),
+                Some((_, 'x')) => {
+                    let hex: String = (0..2).filter_map(|_| chars.next().map(|(_, h)| h)).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some((_, 'u')) => {
+                    let mut hex = String::new();
+                    for (_, h) in chars.by_ref() {
+                        match h {
+                            '{' | '_' => {}
+                            '}' => break,
+                            h => hex.push(h),
+                        }
+                    }
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some((_, '\n')) => {
+                    while chars.peek().is_some_and(|(_, w)| w.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                Some((_, other)) => out.push(other),
+                None => {}
+            },
+            c => out.push(c),
+        }
+    }
+    (out, text.len())
+}
+
+/// RFC 0114's first check, for one source: it opens with the licence line its
+/// row says to the byte, carries no second licence tag, and — for a generated
+/// file — carries the header its `DERIVED_DATA` row names.
+///
+/// A tooling file is held to the first line only below it. Its code carries the
+/// tag in string literals, because it writes and tests headers, so a second tag
+/// there is refused only on a line that is a comment — which is the form an SPDX
+/// reader would take as the file's own.
+fn spdx_findings(
+    rel: &str,
+    text: &str,
+    tooling: bool,
+    derived: &[(&str, &str, &str)],
+) -> Vec<String> {
+    let row = derived.iter().find(|(file, _, _)| *file == rel);
+    let want = if row.is_some() { DERIVED_SPDX } else { PERMISSIVE_SPDX };
+    let mut findings = Vec::new();
+    let first = text.split('\n').next().unwrap_or("");
+    if first != want {
+        let why = if row.is_none() && first.contains(SPDX_TAG) {
+            " — a licence other than this tree's, in a file DERIVED_DATA does not name"
+        } else if row.is_some() {
+            " — DERIVED_DATA names it as generated from imported data"
+        } else {
+            ""
+        };
+        findings.push(format!(
+            "  {rel}:1  opens with `{}` and must open with `{want}`{why}",
+            first.escape_debug()
+        ));
+    }
+    for (index, line) in text.split('\n').enumerate().skip(1) {
+        if !line.contains(SPDX_TAG) {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let comment =
+            trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*');
+        if !tooling || comment {
+            findings.push(format!(
+                "  {rel}:{}  carries a second licence tag, and a reader of SPDX takes every one \
+                 it finds",
+                index + 1
+            ));
+        }
+    }
+    if let Some((_, upstream, sha)) = row {
+        findings.extend(derived_header_findings(rel, text, upstream, sha));
+    }
+    findings
+}
+
+/// The keys a generated header must carry once each, and what each must say
+/// when this check knows. `Unicode-Version` is required and not compared here:
+/// the generator writes the input's own, and the table check compares the file.
+fn derived_header_findings(rel: &str, text: &str, upstream: &str, sha: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    // The header is the `//` block directly under the licence line and nothing
+    // else — not a `/* */` block, not a later comment, not a doc comment the
+    // check would have to be taught to skip. What the compiler would call the
+    // first comment of the file is what a reader of the file sees first.
+    let header_end = 1 + lines.iter().skip(1).take_while(|l| l.starts_with("//")).count();
+    let mut findings = Vec::new();
+    for (key, want) in [
+        ("Upstream-File", Some(upstream)),
+        ("Upstream-SHA-256", Some(sha)),
+        ("Unicode-Version", None),
+        ("Regenerate", Some(imported::REGENERATE)),
+    ] {
+        let needle = format!("{key}:");
+        let at: Vec<usize> =
+            lines.iter().enumerate().filter(|(_, l)| l.contains(&needle)).map(|(n, _)| n).collect();
+        let [n] = at[..] else {
+            findings.push(format!(
+                "  {rel}  names `{key}` {} time(s), and its header must name it exactly once",
+                at.len()
+            ));
+            continue;
+        };
+        let prefix = format!("// {key}: ");
+        let Some(value) = lines[n].strip_prefix(&prefix) else {
+            findings.push(format!("  {rel}:{}  `{key}` is not a `//` header line", n + 1));
+            continue;
+        };
+        if n >= header_end {
+            findings.push(format!(
+                "  {rel}:{}  `{key}` is below the header, which ends at line {header_end}",
+                n + 1
+            ));
+        }
+        if let Some(want) = want
+            && value != want
+        {
+            findings.push(format!(
+                "  {rel}:{}  `{key}` is `{value}` and DERIVED_DATA says `{want}`",
+                n + 1
+            ));
+        }
+    }
+    findings
+}
+
+/// Whether a source reads the import: any needle in [`literal_view`].
+fn reads_import(text: &str, needles: &[String]) -> bool {
+    let view = literal_view(text);
+    view.contains(IMPORTED) || needles.iter().any(|n| view.contains(n.as_str()))
+}
+
+/// RFC 0114's second check over every source: an unnamed reader, a row whose
+/// file is not there, and a row whose file does not read. The count is how many
+/// sources were scanned for an unnamed reader.
+fn import_reader_findings(
+    files: &[(String, String)],
+    readers: &[(&str, &str)],
+    needles: &[String],
+) -> (Vec<String>, usize) {
+    let mut findings = Vec::new();
+    let mut scanned = 0usize;
+    for (rel, text) in files {
+        if is_tooling(rel) || readers.iter().any(|(file, _)| file == rel) {
+            continue;
+        }
+        scanned += 1;
+        if reads_import(text, needles) {
+            findings.push(format!(
+                "  {rel}  names the import in code or a string literal and is not a row of \
+                 IMPORT_READERS"
+            ));
+        }
+    }
+    for (file, _) in readers {
+        match files.iter().find(|(rel, _)| rel == file) {
+            None => {
+                findings.push(format!("  {file}  is a row of IMPORT_READERS and is not a source"))
+            }
+            Some((_, text)) if !reads_import(text, needles) => findings.push(format!(
+                "  {file}  is a row of IMPORT_READERS and does not read the import, so the row \
+                 says nothing — RFC 0103: count the call site"
+            )),
+            Some(_) => {}
+        }
+    }
+    (findings, scanned)
+}
+
+/// RFC 0114's fourth check: a reader under a `TOOLING` prefix is exempt from
+/// every source check, so the exemption has to say it was considered — its row's
+/// reason must name the file. Without this the generator is blessed by accident:
+/// the reason `TOOLING` gave was true and was not this one.
+fn tooling_reason_findings(readers: &[(&str, &str)], tooling: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (file, _) in readers {
+        for (prefix, reason) in tooling {
+            if file.starts_with(prefix) && !reason.contains(file) {
+                findings.push(format!(
+                    "  {file}  reads the import from under TOOLING's `{prefix}` row, whose reason \
+                     does not name it — an exemption granted for the needles, not for this"
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// What RFC 0114's four checks and the table check found, for one tree.
+struct LicenceChecks {
+    spdx: Vec<String>,
+    readers: Vec<String>,
+    scanned: usize,
+    needles: usize,
+    imports: Vec<String>,
+    seen: imported::Imports,
+    tooling: Vec<String>,
+    tables: Vec<String>,
+    compared: usize,
+}
+
+/// The five checks composed, over a tree and its sources, with the three tables
+/// they read passed in.
+///
+/// Separate from [`lint_licensing`] for the reason [`boundary_findings`] is
+/// separate from its verb: a fixture drives **the composition**, so deleting any
+/// one of the five lines below turns `every_check_is_wired_into_the_lint` red
+/// rather than leaving each helper's own fixtures green around a check nothing
+/// calls. The tables are parameters so that the same fixture can make the
+/// fourth check red without editing `TOOLING`.
+fn licence_checks(
+    at: &Path,
+    texts: &[(String, String)],
+    derived: &[(&str, &str, &str)],
+    readers: &[(&str, &str)],
+    tooling: &[(&str, &str)],
+) -> Result<LicenceChecks, String> {
+    // The value, not the prefix. RFC 0114's first check; `DERIVED_DATA` says
+    // why the prefix was a silence rather than a pass.
+    let mut spdx = Vec::new();
+    for (rel, text) in texts {
+        spdx.extend(spdx_findings(rel, text, is_tooling(rel), derived));
+    }
+    for (file, _, _) in derived {
+        if !texts.iter().any(|(rel, _)| rel == file) {
+            spdx.push(format!("  {file}  is a row of DERIVED_DATA and is not a source"));
+        }
+    }
+    // The second, third and fourth, and the table check this line adds beside
+    // them. `imported` is the one file here that opens the import's bytes; the
+    // other two read only this tree's sources and its own tables.
+    let needles = imported::data_file_names(at);
+    let (reader_findings, scanned) = import_reader_findings(texts, readers, &needles);
+    let (imports, seen) = imported::import_findings(at)?;
+    let tooling = tooling_reason_findings(readers, tooling);
+    let (tables, compared) = imported::table_findings(at, derived);
+    Ok(LicenceChecks {
+        spdx,
+        readers: reader_findings,
+        scanned,
+        needles: 1 + needles.len(),
+        imports,
+        seen,
+        tooling,
+        tables,
+        compared,
+    })
+}
+
 fn lint_licensing() -> Result<(), String> {
-    let mut missing = Vec::new();
     let mut leaked = Vec::new();
     let mut compiled_in = Vec::new();
     let mut sources = 0usize;
+    let mut texts: Vec<(String, String)> = Vec::new();
 
     for path in rust_sources()? {
         let rel = relative(&path);
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", rel))?;
 
-        if !text.starts_with("// SPDX-License-Identifier:") {
-            missing.push(rel.clone());
-        }
         // The permissive tree may not depend on an imported tree by anything
         // other than the ring protocol. See LICENSING.md.
         //
@@ -21516,7 +21987,19 @@ fn lint_licensing() -> Result<(), String> {
             leaked.extend(names);
             compiled_in.extend(compiles);
         }
+        texts.push((rel, text));
     }
+    let LicenceChecks {
+        spdx: missing,
+        readers,
+        scanned,
+        needles,
+        imports,
+        seen,
+        tooling,
+        tables,
+        compared,
+    } = licence_checks(&root(), &texts, DERIVED_DATA, IMPORT_READERS, TOOLING)?;
 
     // The second net, and the one that reads a graph rather than a spelling.
     let mut manifest_texts = Vec::new();
@@ -21532,9 +22015,48 @@ fn lint_licensing() -> Result<(), String> {
     let mut problems = String::new();
     if !missing.is_empty() {
         problems.push_str(&format!(
-            "missing SPDX header in {} file(s):\n  {}\n",
+            "{} licence header finding(s) — every file opens with `{PERMISSIVE_SPDX}` \
+             exactly, or is a row of DERIVED_DATA and opens with `{DERIVED_SPDX}` and \
+             the header its row names:\n{}\n",
             missing.len(),
-            missing.join("\n  ")
+            missing.join("\n")
+        ));
+    }
+    if !readers.is_empty() {
+        problems.push_str(&format!(
+            "\n{} reader(s) of the import IMPORT_READERS does not account for:\n{}\n\n\
+             A path into third_party/ at run time is named, not merely unrefused: the\n\
+             conformance harness and the generator may read the import, and library code\n\
+             may not. RFC 0114.\n",
+            readers.len(),
+            readers.join("\n")
+        ));
+    }
+    if !imports.is_empty() {
+        problems.push_str(&format!(
+            "\n{} imported-tree finding(s):\n{}\n\n\
+             Every imported tree carries its own LICENSE and a PROVENANCE.md, and a data\n\
+             import's record names every file with its byte count and SHA-256 — a file not\n\
+             byte-identical to upstream is not the specification's data. LICENSING.md rule 3.\n",
+            imports.len(),
+            imports.join("\n")
+        ));
+    }
+    if !tooling.is_empty() {
+        problems.push_str(&format!(
+            "\n{} reader(s) under a TOOLING exemption that does not say why:\n{}\n",
+            tooling.len(),
+            tooling.join("\n")
+        ));
+    }
+    if !tables.is_empty() {
+        problems.push_str(&format!(
+            "\n{} generated table finding(s):\n{}\n\n\
+             A generated file nobody regenerates rots silently. Run `{}` and review the diff;\n\
+             if the diff is not what you meant, the change belongs in xtask/src/imported.rs.\n",
+            tables.len(),
+            tables.join("\n"),
+            imported::REGENERATE
         ));
     }
     if !leaked.is_empty() {
@@ -21573,14 +22095,307 @@ fn lint_licensing() -> Result<(), String> {
     }
 
     if problems.is_empty() {
+        let derived = DERIVED_DATA.len();
         println!(
             "lint-licensing: ok  ({} manifest(s) carry no path into {IMPORTED}/, \
              {sources} source(s) neither name it nor compile it)",
             manifest_view.len()
         );
+        println!(
+            "lint-licensing: spdx ok  ({} source(s) open with the permissive line exactly; \
+             {derived} DERIVED_DATA row(s) open with the dual line and carry their header)",
+            texts.len() - derived
+        );
+        println!(
+            "lint-licensing: import-readers ok  ({} named reader(s), each reading; {scanned} \
+             other source(s) name the import in no code or literal, over {needles} needle(s))",
+            IMPORT_READERS.len()
+        );
+        println!(
+            "lint-licensing: imports ok  ({} imported tree(s) carry LICENSE and PROVENANCE.md; \
+             {} file(s), {} byte(s), each the size and SHA-256 recorded; {} self-stated \
+             version(s) agree)",
+            seen.trees, seen.files, seen.bytes, seen.versions
+        );
+        println!(
+            "lint-licensing: tooling ok  (every reader under a TOOLING prefix is named in that \
+             row's reason)"
+        );
+        println!(
+            "lint-licensing: tables ok  ({compared} generated table(s) are byte-identical to what \
+             `{}` writes)",
+            imported::REGENERATE
+        );
         Ok(())
     } else {
         Err(problems)
+    }
+}
+
+/// RFC 0114's four checks, each driven red by the input it exists to refuse,
+/// and each spelled around at least once. Every source lint in this epoch has
+/// been walked past by text it did not read as the compiler does — a
+/// `#[cfg(test)]` line, a comment decoy, a raw byte string — so each check here
+/// has a fixture for the decoy as well as for the defect.
+#[cfg(test)]
+mod licence_values {
+    use super::{
+        DERIVED_DATA, DERIVED_SPDX, IMPORT_READERS, PERMISSIVE_SPDX, TOOLING,
+        import_reader_findings, literal_view, relative, rust_sources, spdx_findings,
+        tooling_reason_findings,
+    };
+
+    const ROWS: &[(&str, &str, &str)] = &[("text/src/t.rs", "third_party/u/X.txt", "abc123")];
+
+    fn generated(body: &str) -> String {
+        format!(
+            "{DERIVED_SPDX}\n//\n// Upstream-File: third_party/u/X.txt\n// Upstream-SHA-256: abc123\n\
+             // Unicode-Version: 1.0.0\n// Regenerate: cargo xtask unicode\n\n//! A table.\n{body}"
+        )
+    }
+
+    #[test]
+    fn the_permissive_line_is_a_value_and_not_a_prefix() {
+        let ok = format!("{PERMISSIVE_SPDX}\nfn f() {{}}\n");
+        assert_eq!(spdx_findings("text/src/a.rs", &ok, false, ROWS), Vec::<String>::new());
+        for first in [
+            "// SPDX-License-Identifier: Apache-2.0 OR MIT OR GPL-2.0-only",
+            "// SPDX-License-Identifier: Apache-2.0 OR MIT\r",
+            "// SPDX-License-Identifier: Apache-2.0",
+            "//SPDX-License-Identifier: Apache-2.0 OR MIT",
+        ] {
+            let text = format!("{first}\nfn f() {{}}\n");
+            let findings = spdx_findings("text/src/a.rs", &text, false, ROWS);
+            assert_eq!(findings.len(), 1, "{first:?} passed: {findings:?}");
+        }
+    }
+
+    /// The defect the RFC names: a file carrying a second licence used to pass
+    /// and look like every file that is purely liftable.
+    #[test]
+    fn a_second_licence_is_refused_unless_derived_data_names_the_file() {
+        let text = generated("pub const X: u8 = 1;\n");
+        let findings = spdx_findings("text/src/other.rs", &text, false, ROWS);
+        assert!(
+            findings.iter().any(|f| f.contains("a licence other than this tree's")),
+            "{findings:?}"
+        );
+        assert_eq!(spdx_findings("text/src/t.rs", &text, false, ROWS), Vec::<String>::new());
+        // And the other direction: a row whose file claims only this tree's terms.
+        let plain = format!("{PERMISSIVE_SPDX}\n");
+        let findings = spdx_findings("text/src/t.rs", &plain, false, ROWS);
+        assert!(findings.iter().any(|f| f.contains("DERIVED_DATA names it")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_second_tag_below_the_first_is_a_second_licence() {
+        for body in [
+            "/* SPDX-License-Identifier: GPL-2.0-only */\n",
+            "// SPDX-License-Identifier: GPL-2.0-only\n",
+            "    //! SPDX-License-Identifier: GPL-2.0-only\n",
+            "const L: &str = \"SPDX-License-Identifier: GPL-2.0-only\";\n",
+        ] {
+            let text = format!("{PERMISSIVE_SPDX}\n{body}");
+            assert_eq!(spdx_findings("text/src/a.rs", &text, false, ROWS).len(), 1, "{body:?}");
+        }
+        // Tooling writes headers in string literals, and is held to comments.
+        let literal = format!("{PERMISSIVE_SPDX}\n    \"// SPDX-License-Identifier: GPL\\n\",\n");
+        assert_eq!(spdx_findings("xtask/src/a.rs", &literal, true, ROWS), Vec::<String>::new());
+        let comment = format!("{PERMISSIVE_SPDX}\n// SPDX-License-Identifier: GPL-2.0-only\n");
+        assert_eq!(spdx_findings("xtask/src/a.rs", &comment, true, ROWS).len(), 1);
+    }
+
+    #[test]
+    fn a_generated_header_is_read_where_a_reader_sees_it_and_nowhere_else() {
+        let good = generated("");
+        assert_eq!(spdx_findings("text/src/t.rs", &good, false, ROWS), Vec::<String>::new());
+
+        let wrong = good.replace("SHA-256: abc123", "SHA-256: abc124");
+        let findings = spdx_findings("text/src/t.rs", &wrong, false, ROWS);
+        assert!(findings.iter().any(|f| f.contains("DERIVED_DATA says `abc123`")), "{findings:?}");
+
+        // A header inside a block comment is not the `//` block under line 1.
+        let boxed = format!(
+            "{DERIVED_SPDX}\n/*\n// Upstream-File: third_party/u/X.txt\n// Upstream-SHA-256: abc123\n\
+             // Unicode-Version: 1.0.0\n// Regenerate: cargo xtask unicode\n*/\n"
+        );
+        let findings = spdx_findings("text/src/t.rs", &boxed, false, ROWS);
+        assert_eq!(findings.len(), 4, "{findings:?}");
+        assert!(findings.iter().all(|f| f.contains("below the header")), "{findings:?}");
+
+        // A decoy further down, agreeing or not, makes the header ambiguous.
+        let decoy = format!("{good}// Upstream-SHA-256: 000000\n");
+        let findings = spdx_findings("text/src/t.rs", &decoy, false, ROWS);
+        assert!(findings.iter().any(|f| f.contains("2 time(s)")), "{findings:?}");
+
+        // A header with a field missing.
+        let short = good.replace("// Regenerate: cargo xtask unicode\n", "");
+        let findings = spdx_findings("text/src/t.rs", &short, false, ROWS);
+        assert!(findings.iter().any(|f| f.contains("`Regenerate` 0 time(s)")), "{findings:?}");
+    }
+
+    fn one(rel: &str, text: &str) -> Vec<(String, String)> {
+        vec![(rel.to_string(), text.to_string())]
+    }
+
+    fn needles() -> Vec<String> {
+        vec!["BidiTest.txt".to_string()]
+    }
+
+    #[test]
+    fn a_literal_path_into_the_import_is_a_reader() {
+        for (why, text) in [
+            ("plain", "fn f() { let _ = std::fs::read(\"third_party/unicode/BidiTest.txt\"); }\n"),
+            ("an escaped underscore", "const P: &str = \"third\\x5fparty/u\";\n"),
+            ("a unicode escape", "const P: &str = \"\\u{74}hird_party/u\";\n"),
+            ("a continued line", "const P: &str = \"third\\\n    _party/u\";\n"),
+            ("raw", "const P: &str = r#\"third_party/u\"#;\n"),
+            ("raw bytes", "const P: &[u8] = br\"third_party/u\";\n"),
+            (
+                "a file name",
+                "const P: &str = concat!(\"third\", \"_\", \"party/u/BidiTest.txt\");\n",
+            ),
+            (
+                "after a string holding a comment opener",
+                "const A: &str = \"/*\"; const P: &str = \"third_party\";\n",
+            ),
+            ("after a quote character", "const Q: char = '\"'; const P: &str = \"third_party\";\n"),
+            (
+                "after an escaped quote character",
+                "const Q: char = '\\''; const P: &str = \"third_party\";\n",
+            ),
+            ("beside a lifetime", "fn f<'a>(x: &'a str) -> &'a str { \"third_party\" }\n"),
+            ("after a closed block comment", "/* x */ const P: &str = \"third_party\";\n"),
+        ] {
+            let (findings, scanned) =
+                import_reader_findings(&one("text/src/a.rs", text), &[], &needles());
+            assert_eq!(scanned, 1);
+            assert_eq!(findings.len(), 1, "{why}: {text:?} was not read as a reader");
+        }
+    }
+
+    #[test]
+    fn prose_about_the_import_is_not_a_reader() {
+        for text in [
+            "// third_party/unicode/BidiTest.txt\nfn f() {}\n",
+            "//! Read from `third_party/`.\n",
+            "/* \"third_party\" */ fn f() {}\n",
+            "/* outer /* \"third_party\" */ still a comment */ fn f() {}\n",
+            "/// `third_party/unicode/`\nfn f() {}\n",
+        ] {
+            let (findings, _) =
+                import_reader_findings(&one("text/src/a.rs", text), &[], &needles());
+            assert_eq!(findings, Vec::<String>::new(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_row_must_name_a_source_that_reads() {
+        let reading = "const P: &str = \"third_party/u/BidiTest.txt\";\n";
+        let files = one("text/tests/conformance.rs", reading);
+        let rows = [("text/tests/conformance.rs", "the harness")];
+        let (findings, scanned) = import_reader_findings(&files, &rows, &needles());
+        assert_eq!((findings.len(), scanned), (0, 0), "{findings:?}");
+
+        let quiet = one("text/tests/conformance.rs", "fn f() {}\n");
+        let (findings, _) = import_reader_findings(&quiet, &rows, &needles());
+        assert!(findings.iter().any(|f| f.contains("does not read the import")), "{findings:?}");
+
+        let (findings, _) = import_reader_findings(&[], &rows, &needles());
+        assert!(findings.iter().any(|f| f.contains("is not a source")), "{findings:?}");
+
+        // A tooling file is not scanned: TOOLING's needles are its business.
+        let (findings, scanned) =
+            import_reader_findings(&one("xtask/src/x.rs", reading), &[], &needles());
+        assert_eq!((findings.len(), scanned), (0, 0));
+    }
+
+    #[test]
+    fn a_reader_under_tooling_is_named_by_the_exemption() {
+        let readers = [("xtask/src/imported.rs", "the generator")];
+        let blind = [("xtask/", "build tooling, and it contains the needles")];
+        let findings = tooling_reason_findings(&readers, &blind);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let named = [("xtask/", "the needles, and xtask/src/imported.rs reads the import")];
+        assert_eq!(tooling_reason_findings(&readers, &named), Vec::<String>::new());
+        // A reader outside every TOOLING prefix is not this check's.
+        assert_eq!(
+            tooling_reason_findings(&[("text/tests/c.rs", "")], &blind),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The four checks, pointed at this tree. The first three need no import on
+    /// disk; the imported-tree check has its own test in `imported`.
+    #[test]
+    fn this_tree_passes_the_three_source_checks() {
+        let mut files = Vec::new();
+        for path in rust_sources().expect("the tree") {
+            let rel = relative(&path);
+            let text = std::fs::read_to_string(&path).expect("a source");
+            let findings = spdx_findings(&rel, &text, super::is_tooling(&rel), DERIVED_DATA);
+            assert_eq!(findings, Vec::<String>::new(), "{rel}");
+            files.push((rel, text));
+        }
+        for (file, _, _) in DERIVED_DATA {
+            assert!(files.iter().any(|(rel, _)| rel == file), "{file} is not in the walk");
+        }
+        let names = super::imported::data_file_names(&super::root());
+        let (findings, scanned) = import_reader_findings(&files, IMPORT_READERS, &names);
+        assert_eq!(findings, Vec::<String>::new());
+        assert!(scanned > 200, "the walk scanned {scanned} source(s)");
+        assert_eq!(tooling_reason_findings(IMPORT_READERS, TOOLING), Vec::<String>::new());
+    }
+
+    /// The composition, driven red in all five places at once. Each helper has
+    /// its own fixtures above; this is the one that notices a helper nobody
+    /// calls.
+    #[test]
+    fn every_check_is_wired_into_the_lint() {
+        let input: &[u8] = b"# BidiBrackets-1.0.0.txt\n0028; 0029; o\n0029; 0028; c\n";
+        let at = super::target_dir().join(super::FIXTURE_DIR).join("licence-wiring");
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(at.join("third_party/unicode")).expect("fixture dir");
+        std::fs::write(at.join("third_party/unicode/BidiBrackets.txt"), input).expect("fixture");
+        let sha = crate::pack::hex(&f_hash::sha256(input));
+        let rows =
+            [("text/src/bidi_brackets.rs", "third_party/unicode/BidiBrackets.txt", sha.as_str())];
+        let texts = vec![
+            // Check 1: a second licence with no row. Check 5: the table is a
+            // source here and not what the generator writes.
+            ("text/src/a.rs".to_string(), format!("{DERIVED_SPDX}\n")),
+            ("text/src/bidi_brackets.rs".to_string(), format!("{DERIVED_SPDX}\n")),
+            // Check 2: a reader with no row.
+            (
+                "text/src/b.rs".to_string(),
+                format!("{PERMISSIVE_SPDX}\nconst P: &str = \"third_party/unicode\";\n"),
+            ),
+            (
+                "xtask/src/imported.rs".to_string(),
+                format!("{PERMISSIVE_SPDX}\nconst P: &str = \"third_party/unicode\";\n"),
+            ),
+        ];
+        let readers = [("xtask/src/imported.rs", "the generator")];
+        let tooling = [("xtask/", "the needles")];
+        // Check 3: `third_party/unicode/` holds neither LICENSE nor a record.
+        let checks = super::licence_checks(&at, &texts, &rows, &readers, &tooling).expect("ran");
+        for (name, findings) in [
+            ("spdx", &checks.spdx),
+            ("readers", &checks.readers),
+            ("imports", &checks.imports),
+            ("tooling", &checks.tooling),
+            ("tables", &checks.tables),
+        ] {
+            assert!(!findings.is_empty(), "the {name} check is not wired into the lint");
+        }
+    }
+
+    #[test]
+    fn a_literal_is_decoded_and_a_comment_is_gone() {
+        let view = literal_view("let a = \"x\\ty\"; // gone\nlet b = r\"z\\n\";\n");
+        assert!(view.contains("x\ty"), "{view:?}");
+        assert!(view.contains("z\\n"), "{view:?}");
+        assert!(!view.contains("gone"), "{view:?}");
     }
 }
 
