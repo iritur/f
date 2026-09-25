@@ -936,7 +936,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // declaration emptied. Behind its own parameter for `objects_datapath`'s
     // reason: an ordinary boot has no scene to commit, and a default boot that
     // ran it would stop being the fixture `cargo xtask trace` hashes.
-    compositor_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
+    //
+    // Kept rather than dropped since `E3-B05e`: the two words a compositor
+    // published about its own progress are what the component lifecycle below
+    // copies onto the supervisor's row for the compositor's place. `liveness_of`
+    // says which halves carry one and why the other two do not.
+    let composited = compositor_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
+    let carried = composited.as_ref().and_then(liveness_of);
 
     // E3-B06c. An application that declares an interface across a ring and dies,
     // leaving what it declared in a page the frame holds and a handle that no
@@ -1161,6 +1167,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             &routing,
             serving,
             generation.map(|(_, bytes, root)| component::Generation { bytes, root }),
+            carried,
         )
     } {
         Ok(report) => {
@@ -3191,6 +3198,46 @@ fn compositor_boot(
     Some(report)
 }
 
+/// The two words a compositor half published about its own progress, for the
+/// supervisor's row: waits outstanding and frames abandoned, read by node id out
+/// of the fifteen the frame read back from the component's tree.
+///
+/// **Only for a half that stood the component up.** `serve`, `starved` and
+/// `wake` ran it and the frame read its tree after it ended; `mute` and
+/// `floorless` never started it, so carrying their `tree` onto a row would be
+/// the frame handing a supervisor a reading of a component that never ran.
+/// Matched without a wildcard, so a sixth half is a compile error here rather
+/// than a default.
+///
+/// **`starved` is the weak one of the three, and it is said here because the
+/// first version of this comment said otherwise.** Its component refuses before
+/// it serves and its log says `0 written by the component`: the two words it
+/// carries are the manifest's declared zeroes, true of a compositor that closed
+/// no frame and abandoned none, but not a zero the component computed. So it
+/// holds a policy that fires on every reading, and it does not hold one that
+/// fires on a *written* zero. No half in this build writes one — `serve`
+/// abandons its last frame and `wake` its middle one — and `wake` is the control
+/// that carries weight: a real reading, a frame given up, nothing outstanding.
+///
+/// By id and not by position, because `kernel/src/compositor.rs` prints the same
+/// words at fixed indices and `cargo xtask compositor` compares the supervisor's
+/// account against that print: two derivations of one number, which is what lets
+/// a wrong one show. `E3-B05e`, RFC 0126.
+fn liveness_of(report: &compositor::Report) -> Option<component::Reading> {
+    match report.half {
+        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => {}
+        compositor::Half::Mute | compositor::Half::Floorless => return None,
+    }
+    use f_compositor::routing::node;
+    let word = |id: u32| {
+        node::WRITTEN.iter().position(|written| *written == id).and_then(|at| report.tree.get(at))
+    };
+    Some(component::Reading {
+        label: b"compositor",
+        words: [*word(node::WAITS)?, *word(node::TIMEOUTS)?],
+    })
+}
+
 /// `E3-B06c`'s boot: an application declares an interface, dies, and the frame
 /// still holds it.
 ///
@@ -4539,11 +4586,11 @@ fn gpu_datapath(
 ///
 /// # The two halves
 ///
-/// `input=deliver` hands every event the device produced to the compositor.
-/// `input=withheld` is the identical run with the hand-on removed, and is the
-/// control the exit needs: without it, the number of deltas a compositor applied
-/// would be evidence that a compositor applies deltas rather than that these
-/// came off a device.
+/// `input=deliver` gives the compositor the other end of the driver's ring, and
+/// the compositor drains it itself. `input=withheld` is the identical run with
+/// the ring not connected, and is the control the exit needs: without it, a
+/// latch on the delivering half would be evidence that a compositor latches
+/// rather than that it latched what came off a device.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
 /// `gpu`'s are — with the one exception the harness is entitled to, which is
@@ -4572,16 +4619,16 @@ fn input_datapath(
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     };
 
-    // Another core, always, for `gpu_datapath`'s reason and one more besides: a
-    // component runs at ring 3 and the frame is the other end of its ring, and
+    // Another core, always, for `gpu_datapath`'s reason and one more besides:
     // this stage stands **two** components up on that one core, one after the
-    // other. A machine with one core has nowhere to put either of them.
+    // other, with the driver's ring between them and the frame holding neither
+    // end. A machine with one core has nowhere to put either of them.
     let me = arch::x86_64::current_cpu();
     let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
     else {
         kprintln!(
             "FAIL: the input datapath needs a second core - the driver produces from ring 3 and \
-             the compositor consumes from ring 3, and the frame is between them"
+             the compositor consumes from ring 3, one after the other, off one ring"
         );
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     };
@@ -4591,9 +4638,9 @@ fn input_datapath(
         half.name(),
         match half {
             input::Half::Deliver =>
-                "what the device reported reaches a compositor's graph as a transform",
+                "the compositor drains the driver's ring itself and latches what it reported",
             input::Half::Withheld =>
-                "the same events, decoded and not handed on, so nothing may reach the graph",
+                "the same events on the same ring, not connected, so nothing may be latched",
         }
     );
 
@@ -4655,10 +4702,10 @@ fn input_datapath(
         match half {
             input::Half::Deliver =>
                 "a person moved a pointer, one driver timed each report once, and a compositor \
-                 at ring 3 applied one transform per event",
+                 at ring 3 took every entry off that ring itself and latched the pointer",
             input::Half::Withheld =>
-                "the same events crossed the same ring and none of them reached the graph, so \
-                 the delivering half's count is the device's and not this frame's",
+                "the same events crossed onto the same ring and the compositor was not given \
+                 it, so it latched nothing and the delivering half's latch is the ring's",
         }
     );
     Some(report)

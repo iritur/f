@@ -198,3 +198,11 @@ and looks right, which is why there is a lint and not a convention.
   its fold moves to the component, and what is left in `kernel/src/input.rs` is
   a supervisor that no longer decodes anything. Nothing here should survive that
   unchanged except `Crossing` and the four steps above.
+  **Appended 2026-09-24: this reversal is paid, by RFC 0125.** The compositor
+  drains the ring and holds the fold; `kernel/src/input.rs` decodes nothing and
+  takes nothing off that ring; the driver's word reaches the compositor on the
+  ring itself, under `f_abi::input::ATTEST`, which is step 4's *a ring* rather
+  than its *state tree*. The decision above stands as written — the frame still
+  compares folds it did not compute, now the compositor's against the driver's
+  routing-page copy — and the four steps were followed as written, which is the
+  most a section written to be copied can be asked for.

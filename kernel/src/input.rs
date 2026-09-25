@@ -1,181 +1,132 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! The input path, end to end: a fourth driver outside the frame, a real
-//! pointing device, an event a person caused, and a compositor that moves a node
-//! because of it.
+//! pointing device, an event a person caused, and a compositor that takes it off
+//! the driver's ring itself and moves a node because of it.
 //!
 //! # What this file is, and what it finishes
 //!
-//! It is the **frame's half** of `E3-B04d`. `user/virtio-input` is the driver:
-//! the transport handshake, one virtqueue, the evdev accumulator, the stamp and
-//! the submission loop, in a crate that forbids `unsafe`. That crate was built
-//! and never run — nothing stood it up and nothing drained it — so every
-//! property it states was a property of source rather than of a machine. What is
-//! here is everything a supervisor does around one, and then the thing the exit
-//! actually asks for: the events go somewhere.
+//! It is the **frame's half** of `E3-B04d` and, since `E3-B04g`, of a boot in
+//! which the frame is no longer on the input path at all. `user/virtio-input` is
+//! the driver: the transport handshake, one virtqueue, the evdev accumulator,
+//! the reading and the submission loop, in a crate that forbids `unsafe`.
+//! `user/compositor` is the consumer. What is here is everything a supervisor
+//! does around the two of them — and, since `E3-B04g`, nothing else: the frame
+//! lays the driver's data channel out, hands one end to each component, and
+//! never takes an entry off it.
 //!
-//! Two lines close on it.
+//! Four lines close on it.
 //!
 //! `E3-B04d`'s exit is *a driver component delivers events a compositor
 //! consumes, using `kernel/src/supervisor.rs`'s shared half rather than a fourth
 //! copy of it.* The shared half is [`declared`], [`Registers`], [`order_for`]
 //! and [`Supervising`], and this file writes none of them again — the one thing
-//! it had to widen is `Supervising::reaper`, which is now an `Option` because
-//! this is the first supervisor in the tree whose driver **produces rather than
-//! answers** and therefore holds no client end to reap. That field's own comment
-//! is the argument.
+//! it had to widen is `Supervising::reaper`, which is an `Option` because this
+//! is the first supervisor in the tree whose driver **produces rather than
+//! answers** and therefore holds no client end to reap.
 //!
 //! `E3-B04a`'s exit is *one time source in the whole input path*, and RFC 0099
-//! narrowed it because it was true of a path carrying nothing: `at_interrupt`
-//! had no caller outside its own tests. RFC 0103 then made `cargo xtask
-//! lint-stamp` count the call as well as the reading, which made the source
-//! true. Both entries say the same thing about what was still owed — *true in
-//! the source and not yet true in a boot*. This is the boot: the driver opens a
-//! report, takes one reading for it, and every entry the frame drains carries
-//! one, because `f_abi::input::Event::decode` refuses an unstamped payload and
-//! this frame decodes every entry it takes.
+//! narrowed it because it was true of a path carrying nothing. This is the boot
+//! in which it carries something: the driver opens a report, takes one reading
+//! for it, and every entry the compositor drains carries one, because
+//! `f_abi::input::Event::decode` refuses an entry that does not and the
+//! compositor decodes every entry it takes.
 //!
-//! # Why the frame is not on `lint-stamp`'s list, and why that is true rather
-//! than convenient
+//! `E3-B04g`'s exit is *a boot in which `user/compositor` holds the other end of
+//! the driver's data channel*, decodes and folds every entry itself, and checks
+//! its fold against the driver's — **with the frame relaying no input entry at
+//! all**. The last clause is structural here rather than asserted: there is no
+//! consumer of that ring in this file, no decoder call, and no buffer an event
+//! could be kept in. The frame's only contact with the ring is laying it out
+//! and handing out its ends.
+//!
+//! `E3-B01i`'s boot half is *a report taken, a frame latched, and the latched
+//! transform differing from the committed one by exactly the motion injected*.
+//! The compositor latches from positions it took off the driver's ring; this
+//! frame commits the pointer's transform at the accumulator's origin, which is
+//! the only place a client that was never told a position can honestly put it;
+//! and `cargo xtask input` — the process that moved the pointer — checks the
+//! difference against the motion it injected.
+//!
+//! # Why the frame is not on `lint-stamp`'s list, and why that is truer now
 //!
 //! `INPUT_PATH` in `xtask` names the crates on this path and forbids every one
 //! of them a clock reading. `kernel/` is not on it, and the reason is that **the
-//! frame on this path is a courier and not a stage**: it writes the clock the
-//! driver is told to take its readings against — a seed and a tick, onto a
-//! routing page — and then never asks what time it is on an event's behalf. It
-//! does not mint a reading, does not take a second one, does not compare one
-//! against a reading of its own, and does not name the field a reading crosses
-//! in. What it does with an arriving entry is decode it, which is the consumer's
-//! half of RFC 0099's sentence and takes no clock at all.
+//! frame on this path is not a stage**: it writes the clock the driver is told to
+//! take its readings against — a seed and a tick, onto a routing page — and then
+//! never asks what time it is on an event's behalf. Until `E3-B04g` it was a
+//! courier: it decoded every entry, kept two coordinates, and relayed them. It is
+//! not even that now. It reads positions — where the driver's accumulator ended
+//! and where the compositor latched — and two folds, none of which is a reading.
 //!
-//! That claim has a check behind it in both directions. `lint-stamp` fails this
-//! crate the moment its source names that vocabulary, because `ON_THE_PATH` is a
-//! text question rather than a dependency-graph one; and it fails
-//! `user/virtio-input` the moment the one call goes away. A frame that started
-//! deciding when an event happened would have to add `kernel/` to that list in a
-//! diff somebody reads, and would then have to explain the timestamp counter
-//! `kernel/src/smp.rs` reads to bound a spin.
+//! `lint-stamp` fails this crate the moment its source names the reading's
+//! vocabulary, because `ON_THE_PATH` is a text question rather than a
+//! dependency-graph one, and that includes this comment: the steps the
+//! compositor follows are RFC 0124's *What the consumer has to do*, spelled with
+//! the call names there, and not here.
 //!
-//! # The shape of the run, and the two costs it carries
+//! # The shape of the run, and what it costs
 //!
 //! One worker core, so **the two components run one after the other and the
-//! frame holds the events in between**. The driver is stood up, the harness
-//! moves the pointer, the frame drains what the driver submits and keeps it; the
-//! driver is stopped and reaped; the compositor is stood up on the same core and
-//! the frame submits one `SetTransform` per event it kept, then one commit.
+//! ring holds the events in between**. The frame allocates the driver's data
+//! channel and lays it out; the driver is stood up, the harness moves the
+//! pointer, and the driver submits onto the ring with nobody draining it; the
+//! driver is told to stop, puts its fold on the ring after its last event, and
+//! is reaped; the compositor is stood up on the same core **with the same page
+//! mapped as its input channel**, and drains it itself before the frame's one
+//! commit arrives.
 //!
-//! Both halves of that are worth saying plainly rather than leaving for a reader
-//! to discover.
+//! What that costs, stated rather than left for a reader to find:
 //!
-//! **The frame is the courier.** `E1-B05`'s ring-3 supervisor does not hand a
-//! place's occupant a core *and* a peer, so the only thing in this boot that can
-//! hold the far end of either channel is the frame — the arrangement every
-//! datapath boot in this tree has, under the same reversal, and `CHAOS_GAP` in
-//! `xtask` carries what is owed. What the frame adds here that it adds on none
-//! of the others is a *translation*: an input event and a scene delta are
-//! different vocabularies and something has to be the router between them. That
-//! router is `E3-B04`'s parent's business and what is here is the smallest
-//! honest version of it — one delta per event, injective in the event, so that a
-//! compositor which dropped or coalesced one says so in its own count.
+//! **The ring is the buffer, and it is bounded.** Sixteen entries, one of them
+//! the attestation. A gesture longer than that is an entry the driver could not
+//! submit, which it counts in `dropped`, and the verdict requires `dropped` to be
+//! zero — so a longer gesture is a red boot rather than a truncated one. Until
+//! `E3-B04g` the frame drained as the driver submitted and held what it took in
+//! an array of its own; that array is gone because an array of events in the
+//! frame is a frame holding events.
 //!
-//! **The events are buffered.** A machine with two worker cores would run the
-//! driver and the compositor at once and relay as it drained; this one has one,
-//! `-smp 2` is pinned because the core count is part of every boot log in this
-//! tree, and a verb that quietly asked for a third would be demonstrating a
-//! different machine. So the relay is a buffer of at most [`EVENTS_MAX`]
-//! entries, and a run that fills it **fails** rather than truncating: an input
-//! path that silently forgets the end of a gesture is the defect this subsystem
-//! exists not to have, and a buffer that dropped quietly would make the
-//! compositor's count agree with a number the frame had already discarded.
+//! **The two do not run at once.** `E1-B05`'s ring-3 supervisor does not hand a
+//! place's occupant a core *and* a peer, and `-smp 2` is pinned because the core
+//! count is part of every boot log in this tree. So the compositor drains a ring
+//! the driver has finished with. Every number the path carries is virtual time
+//! out of a seed in any case — `user/virtio-input/src/clock.rs` spends a page on
+//! that — so nothing here is a latency and nothing here claims to be. What the
+//! arrangement does establish is the route: the entries the compositor decoded
+//! are the entries the driver wrote, in the pages the driver wrote them, and
+//! this frame read none of them.
 //!
 //! # Two halves, and the control is the frame's own decision
 //!
-//! `input=deliver` is the path. The device produces, the driver translates and
-//! submits, the frame drains and hands on, the compositor applies.
+//! `input=deliver` connects the ring. `input=withheld` is **the identical run
+//! with the channel not connected**: the same device, the same injection, the
+//! same entries submitted onto the same ring, the same attestation, and the
+//! same scene the frame commits — and the compositor is not given the ring. It
+//! must then take no position and decline every frame it closes. A compositor
+//! that latched in that run would have got a position by some route other than
+//! the ring, which is the route this boot exists to show is the only one.
 //!
-//! `input=withheld` is **the identical run with the hand-on removed**. The same
-//! device is driven, the same events are injected, the driver submits the same
-//! entries, and the frame drains and decodes every one of them — and then relays
-//! none. The compositor is stood up, is given the same two setup deltas and the
-//! same commit, and must apply exactly those and no more.
+//! # What arrived is what was sent, twice
 //!
-//! The control had to be something the *frame* decides, and that is why it is
-//! this one rather than an unstamped entry: an entry with no reading on it is
-//! already refused by `abi/src/input.rs` before it reaches anybody, so a boot
-//! built around it would be re-running a decoder's test with an emulator
-//! attached. What is genuinely undecided until this file decides it is whether
-//! the deltas a compositor applies came off a device at all, and the only way to
-//! show that is a run in which the events existed, were counted, and did not
-//! arrive. It is `gpu=blank`'s shape and it is sharper than injecting nothing,
-//! for `gpu=blank`'s reason: the events are real for the whole of that boot, and
-//! a compositor that applied one would have got it by some route other than this
-//! relay.
-//!
-//! # What arrived is what was sent, and how a frame says so without holding a
-//! reading
-//!
-//! Every count in this file is a tally: how many records came off the device,
-//! how many reports closed, how many entries were submitted and drained and
-//! decoded. Not one of them says the entries that *arrived* are the entries
-//! that were *sent*. A relay that minted a reading on arrival, handed two on
-//! out of order, dropped one out of the middle or moved a coordinate by one
-//! satisfies all of them — and the first of those four is the defect
-//! `input/src/stamp.rs` is written against, which is not a wrong number but a
-//! right-looking one that improves as the system gets slower.
-//!
-//! So `E3-B04f` adds a second kind of observation. The driver folds every entry
-//! it puts on the ring into `f_abi::input::Crossing` and publishes the word on
-//! its routing page; this frame folds every entry it drains into one of its
-//! own; and `Report::driver_verdict` requires the two to agree. Neither side
-//! holds the other's copy and neither word travels with the entries. What is
-//! shared is the implementation, which is `E3-B04c`'s distinction: a defect
-//! inside the fold moves both words the same way and is `abi`'s own corpus to
-//! catch, and a defect in a relay moves one of them.
-//!
-//! **And this frame still names no stamp.** `Crossing::absorb` reads the
-//! payload the way `Event::decode` reads it — inside `abi/`, the crate that
-//! declares the field and carries an `INPUT_PATH` row for it — and hands back a
-//! checksum. A checksum is not a time: it is not ordered against anything, not
-//! invertible, and there is no expression in this file that could subtract one
-//! from another and publish the difference as a latency. That is the whole of
-//! why `kernel/` stays off `lint-stamp`'s list, and RFC 0124 is the argument at
-//! length, including what would reverse it.
-//!
-//! # What the compositor has to do to drain this itself, and why the four
-//! steps are not written here
-//!
-//! They are `docs/rfc/0124`'s section *What the consumer has to do*, in full,
-//! with the call names spelled out. They are there and not here because
-//! **writing them here is a red build**, which is a thing this file learned by
-//! doing it: `cargo xtask lint-stamp` decides whether a crate is on the input
-//! path by looking for that vocabulary in the crate's text, prose included, and
-//! a paragraph in this module naming the stamp's type and its wire field earns
-//! `kernel/` an `INPUT_PATH` row — which the one `rdtsc` in this tree, the
-//! counter `crate::smp` reads to bound a spin, turns red immediately.
-//!
-//! That is the rule working rather than the rule in the way, and it is worth a
-//! reader's attention because it is the sharper half of why the frame folds a
-//! checksum instead of carrying a position: this file may not so much as
-//! *describe* the number, let alone hold one. An RFC is not a workspace member,
-//! so the description lives where a description belongs.
-//!
-//! The one-sentence version, in words this file is allowed to use: the
-//! compositor holds the other end of the driver's data channel itself, decodes
-//! each entry with the same decoder this frame calls, rebuilds the reading from
-//! the field that entry carries, and folds what it drained so that it can check
-//! the driver's published word. What it must not do is read a clock when an
-//! entry arrives and call that the event's time.
+//! The driver folds every entry it submits into `f_abi::input::Crossing`. It
+//! publishes the word on its routing page, as `E3-B04f` had it do, and since
+//! `E3-B04g` also puts it on the ring after its last event. The compositor folds
+//! every entry it decodes, reads the driver's word off the ring, compares the
+//! two, and publishes its fold, the word it read and whether they agreed. This
+//! frame then requires three things, none of which it computes: the
+//! compositor's own agreement; that the compositor's fold equals the driver's
+//! word **as the routing page carried it**, which is a second route for the
+//! same number; and that the word the compositor read off the ring is the word
+//! on that page. RFC 0124 is why a fold is not a reading, and RFC 0125 is why
+//! the word rides the ring.
 //!
 //! # What this demonstration does not show
 //!
 //! One device, one queue, relative motion, and no seat. It says nothing about
 //! two input devices — [`virtio::VIRTIO_INPUT_MODERN`] cannot tell them apart
 //! and the frame takes the first — nothing about focus or about which of several
-//! clients an event belongs to, and nothing about latency: what an entry here
-//! carries is virtual time out of a seed, as `user/virtio-input/src/clock.rs`
-//! spends a page saying, and `E5-B06` is where a device times its own events.
-//! What it shows is that a person moving a pointer moves a node in a scene graph
-//! held at ring 3, through one reading, two rings, one translation and one
-//! commit.
+//! clients an event belongs to, and nothing about latency. What it shows is that
+//! a person moving a pointer moves a node in a scene graph held at ring 3,
+//! through one reading, one ring the frame never drained, and a latch.
 
 #![deny(
     clippy::indexing_slicing,
@@ -186,7 +137,6 @@
 )]
 
 use f_abi::cap::{CapType, rights};
-use f_abi::input::{Crossing, Entry as InputEntry, Event, PAYLOAD_BYTES};
 use f_abi::scene::{Commit, CreateNode, Delta, Entry as SceneEntry, NO_NODE, SetTransform, kind};
 use f_abi::{ABI_VERSION, Cqe, class, control, feature, state};
 use f_compositor::routing as scene_routing;
@@ -253,8 +203,15 @@ const DRIVER: &[u8] = b"virtio-input";
 /// page holds sixteen entries, their completions and an arena with room for
 /// ninety-odd payloads, and the driver takes the smaller of the two counts as
 /// its arena modulus. The driver's manifest declares two hundred and fifty-six,
-/// which is what a component gets when it pays for its own channel; this boot
-/// drains as the entries arrive rather than sizing a ring to hold the run.
+/// which is what a component gets when it pays for its own channel.
+///
+/// **On the driver's ring this is also the bound on a gesture**, since
+/// `E3-B04g`: nobody drains that ring while the driver runs — the compositor
+/// takes it after — so sixteen is how many entries the two components can
+/// have between them, one of which is the driver's attestation. `cargo xtask
+/// input` injects five motions, which is six entries. A seventeenth would be
+/// an entry the driver counts in `dropped`, and the verdict fails on that
+/// rather than quietly losing the end of a gesture.
 const ENTRIES: u32 = 16;
 
 /// How long the frame waits for a core to report finished after being told to
@@ -325,37 +282,77 @@ const STAMP_SEED: u64 = 0x_1A_9B_04_0D_5E_ED_00_01;
 /// Unit: nanoseconds per report.
 const STAMP_TICK_NANOS: u64 = 100_000;
 
-/// How many events the frame will hold between the two components.
-///
-/// Sixty-four, which is far more than this boot's script injects and small
-/// enough to sit on a stack. A run that fills it fails rather than truncating —
-/// [`Trouble::Overflowed`] — for the reason the module comment gives.
-/// Unit: entries.
-pub const EVENTS_MAX: usize = 64;
-
 /// The layer the pointer's node hangs under.
 const ROOT_NODE: u32 = 1;
 
 /// The node the pointer moves.
 ///
-/// Two, because node one is the layer it hangs under. Both are created by this
-/// boot's own setup deltas and neither is derived from anything the device said,
-/// which is what makes the *transforms* the only part of the compositor's work
-/// that came from outside the machine.
+/// Two, because node one is the layer it hangs under. Every node is created by
+/// this boot's own setup deltas and none is derived from anything the device
+/// said, which is what makes the *latched translation* the only part of the
+/// frame the compositor submits that came from outside the machine.
 const POINTER_NODE: u32 = 2;
 
-/// How many nodes the setup deltas create. Unit: nodes.
-const SETUP_NODES: u64 = 2;
-
-/// One, in the 16.16 fixed point `f_abi::scene::SetTransform` is written in.
+/// A sibling of the pointer that never moves.
 ///
-/// The matrix this boot sends is the identity with a translation, so every delta
-/// differs from its neighbour in exactly the two fields the device decided and
-/// in none of the four it did not. A scale that moved with the pointer would
-/// make *the compositor applied this delta* and *the compositor applied a delta*
-/// the same observation.
+/// **The host fixture's sibling, carried into the boot**, and for its reason:
+/// a scene with one transform in it cannot tell a latch that patched the
+/// pointer from one that patched every transform it found, because both submit
+/// the same frame. With a second transform committed beside the pointer's, a
+/// latch that touched it moves `f_compositor::latch::unmoved`'s word — its
+/// translation is not masked, only the pointer's is.
+const STILL_NODE: u32 = 3;
+
+/// How many nodes the setup deltas create. Unit: nodes.
+const SETUP_NODES: u64 = 3;
+
+/// How many transforms this client commits: the pointer's, at the origin, and
+/// the still sibling's. Unit: deltas.
+const COMMITTED_TRANSFORMS: u64 = 2;
+
+/// Where this client commits the pointer, along x.
+///
+/// The origin, and not a number chosen to look like a screen position: this
+/// client is never told where the pointer is — that is `E3-B04g` — so the one
+/// place it can honestly commit it is where the driver's accumulator starts.
+/// `commit`'s own doc is the argument, and it is what makes *latched minus
+/// committed* the motion the harness injected rather than an offset from a
+/// position somebody made up.
+/// Unit: device pixels, scaled by 65 536.
+const COMMITTED_TX_X65536: i64 = 0;
+
+/// And along y. Unit: device pixels, scaled by 65 536.
+const COMMITTED_TY_X65536: i64 = 0;
+
+/// Where the still sibling is committed, along x.
+///
+/// Anywhere but the origin, so that a latch which wrote the pointer's position
+/// into it, or zeroed it, is a word that moved.
+/// Unit: device pixels, scaled by 65 536.
+const STILL_TX_X65536: i64 = 7 * 65_536;
+
+/// And along y. Unit: device pixels, scaled by 65 536.
+const STILL_TY_X65536: i64 = -3 * 65_536;
+
+/// The first of the four matrix entries this client commits, in the 16.16
+/// fixed point `f_abi::scene::SetTransform` is written in — together a shear
+/// with a scale, and the host fixture's own numbers.
+///
+/// **Not the identity, and that is the point of them.** The latch copies the
+/// client's four entries and replaces two translations; a latch that instead
+/// wrote a fresh identity matrix around the translation would be a compositor
+/// deciding a client's scale — `f_compositor::latch`'s own comment names that
+/// defect — and **over an identity commit it submits the same frame as the
+/// correct latch**, so no instrument could see it. Committed as a shear, the
+/// four entries the latch must not touch are four the fold can see move.
 /// Unit: none — a ratio, scaled by 65 536.
-const IDENTITY_X65536: i64 = 65_536;
+const COMMITTED_A_X65536: i64 = 2 * 65_536;
+/// See [`COMMITTED_A_X65536`]. Unit: none — a ratio, scaled by 65 536.
+const COMMITTED_B_X65536: i64 = 17_000;
+/// See [`COMMITTED_A_X65536`]. Unit: none — a ratio, scaled by 65 536.
+const COMMITTED_C_X65536: i64 = -9_000;
+/// See [`COMMITTED_A_X65536`]. Unit: none — a ratio, scaled by 65 536.
+const COMMITTED_D_X65536: i64 = 3 * 65_536;
 
 /// What this boot tells the compositor its display scans out.
 ///
@@ -428,13 +425,15 @@ const GRANTABLE: u8 = rights::READ | rights::WRITE | rights::GRANT;
 /// Which half of the check this boot is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Half {
-    /// Drain the driver and hand every event to the compositor.
+    /// Give the compositor the other end of the driver's ring.
     Deliver,
-    /// Drain the driver, decode every event, and hand on none of them.
+    /// The same run with the ring not connected.
     ///
     /// **The control, and it is the frame's own decision rather than the
-    /// device's.** The module comment argues why it is this and not an entry
-    /// with no reading on it.
+    /// device's.** The events exist, are submitted, and sit on the ring; the
+    /// compositor is simply not given it. An entry with no reading on it was not
+    /// chosen, because `abi/src/input.rs` refuses one before it reaches anybody
+    /// and a boot built around it would be re-running a decoder's test.
     Withheld,
 }
 
@@ -448,9 +447,9 @@ impl Half {
         }
     }
 
-    /// Does the frame hand what it drained to the compositor?
+    /// Does the frame connect the driver's ring to the compositor?
     #[must_use]
-    pub const fn hands_on(self) -> bool {
+    pub const fn connects(self) -> bool {
         matches!(self, Self::Deliver)
     }
 }
@@ -496,9 +495,6 @@ pub enum Trouble {
     /// A core was still holding its job when the frame's bound passed. Carries
     /// that bound. Unit: microseconds.
     Overdue(u64),
-    /// The device produced more events than the frame is willing to hold
-    /// between the two components. Carries the bound. Unit: entries.
-    Overflowed(usize),
     /// A delta was refused by the ring, or a completion never arrived.
     NotCommitted,
     /// A component published a board this build cannot read.
@@ -531,11 +527,6 @@ impl Trouble {
             Self::StateTree(_) => "a component's state tree could not be published or read",
             Self::Scheduled(_) => "the core a component was given never took it or gave it back",
             Self::Overdue(_) => "a component's core did not report finished inside the bound",
-            Self::Overflowed(_) => {
-                "the device produced more events than the frame will hold between the two \
-                 components, and an input path that forgets the end of a gesture is worse than \
-                 one that stops"
-            }
             Self::NotCommitted => "the compositor refused a delta the client had room for",
             Self::BadReport => "a component published a board this build cannot read",
             Self::Leaked => "the demonstration's frames did not all come back",
@@ -599,24 +590,6 @@ pub struct Scheduling {
     pub tree: u64,
 }
 
-/// One event, as much of it as the relay needs.
-///
-/// Two numbers and not an `f_abi::input::Event`, and the subtraction is the
-/// decision rather than a saving. What a delta is built from is the translation,
-/// so that is what is carried forward; keeping the whole decoded event would be
-/// keeping the reading it arrived with, in a crate whose whole claim on this
-/// path is that it never holds one. The module comment on why `kernel/` is not
-/// on `lint-stamp`'s list is the same sentence from the other end, and this type
-/// is where it is true rather than argued.
-#[derive(Clone, Copy, Default)]
-pub struct Kept {
-    /// Where the pointer was when this event happened, along x.
-    /// Unit: device pixels, scaled by 65 536.
-    pub tx_x65536: i64,
-    /// The same along y. Unit: device pixels, scaled by 65 536.
-    pub ty_x65536: i64,
-}
-
 /// What the driver's own board said when its run ended.
 #[derive(Clone, Copy, Default)]
 pub struct Reported {
@@ -628,7 +601,7 @@ pub struct Reported {
     pub stamped: u64,
     /// Entries put on the data ring. Unit: entries.
     pub submitted: u64,
-    /// Entries built and not submitted, because the peer had not drained.
+    /// Entries built and not submitted, because the ring had no room.
     /// Unit: entries.
     pub dropped: u64,
     /// Records this build has no opcode for. Unit: records.
@@ -646,12 +619,25 @@ pub struct Reported {
     ///
     /// The **producer's** half, published by the component and read here. This
     /// frame never computes it and could not: it is a fold over every entry the
-    /// driver submitted, taken in the driver, on the component's side of the
-    /// boundary. Unit: none — a checksum.
+    /// driver submitted, taken in the driver. Since `E3-B04g` the same word also
+    /// crosses the ring, to the compositor, and this copy is the second route —
+    /// the one the frame holds the compositor's fold against.
+    /// Unit: none — a checksum.
     pub crossing: u64,
     /// How many entries went into that word, as the component counted them.
     /// Unit: entries.
     pub crossed: u64,
+    /// One where that word also went onto the ring, after the last event.
+    /// Unit: none — a flag.
+    pub attested: u64,
+    /// How many of the entries that crossed were pointer motion.
+    /// Unit: entries.
+    pub motions: u64,
+    /// Where the driver's accumulator ended up, along x.
+    /// Unit: device pixels, scaled by 65 536.
+    pub pointer_x_x65536: i64,
+    /// The same along y. Unit: device pixels, scaled by 65 536.
+    pub pointer_y_x65536: i64,
 }
 
 impl Reported {
@@ -680,34 +666,26 @@ impl Reported {
             outcome: read(routing::reported::OUTCOME),
             crossing: read(routing::reported::CROSSING),
             crossed: read(routing::reported::CROSSED),
+            attested: read(routing::reported::ATTESTED),
+            motions: read(routing::reported::MOTIONS),
+            // Two's complement in a word, back to signed. A pointer left of the
+            // origin is an ordinary place and not an enormous one.
+            pointer_x_x65536: read(routing::reported::POINTER_X_X65536) as i64,
+            pointer_y_x65536: read(routing::reported::POINTER_Y_X65536) as i64,
         })
     }
 }
 
-/// What the driver stage saw, from both sides of the boundary.
+/// What the driver stage saw.
+///
+/// Nothing in it came off the data ring. That is the difference `E3-B04g`
+/// made to this type: it held the frame's drain counts, its fold and an array
+/// of kept events, and all of that is the compositor's now.
 pub struct Produced {
     /// What the component published about itself.
     pub board: Reported,
     /// Whether it ended by `EXIT` rather than in a fault.
     pub exited: bool,
-    /// Entries the frame took off the data ring. Unit: entries.
-    pub drained: u64,
-    /// Entries that decoded. Unit: entries.
-    ///
-    /// **Equal to [`Produced::drained`] or the run is a failure**, and that
-    /// equality is where `E3-B04a` lands in this boot: `Event::decode` refuses a
-    /// payload carrying no reading, so an entry that decoded is an entry the
-    /// driver took one for.
-    pub decoded: u64,
-    /// Entries that did not. Unit: entries.
-    pub refused: u64,
-    /// How many of them were pointer motion. Unit: entries.
-    pub motions: u64,
-    /// Where the pointer ended up, along x.
-    /// Unit: device pixels, scaled by 65 536.
-    pub last_x_x65536: i64,
-    /// The same along y. Unit: device pixels, scaled by 65 536.
-    pub last_y_x65536: i64,
     /// Operations the driver asked of the frame on its control ring.
     ///
     /// **Zero, and that is not a failure.** The three drivers before this one
@@ -715,28 +693,23 @@ pub struct Produced {
     /// may not grant themselves a device address. This one holds no client
     /// buffer: the only memory its device ever touches is the queue region its
     /// manifest routed, which the frame translated before the component's first
-    /// instruction. A verdict that required a translation here would be a check
-    /// passing on three datapaths for a reason that is not the property it
-    /// names. Unit: operations.
+    /// instruction. Unit: operations.
     pub asked: u32,
     /// Whether anything outside the machine said it had injected.
     pub acknowledged: bool,
-    /// The events, in the order they arrived.
-    pub kept: [Kept; EVENTS_MAX],
-    /// How many of [`Produced::kept`] are filled. Unit: entries.
-    pub events: usize,
-    /// What arrived, folded into one word by this frame.
+    /// Entries on the driver's ring when the driver had been reaped and before
+    /// the compositor was stood up — submitted and not yet taken by anybody.
     ///
-    /// The **consumer's** half of the crossing attestation, and the reason it
-    /// is a fold rather than a copy is the one this file spends a section on:
-    /// the frame may not hold the reading an entry carries. `Crossing::absorb`
-    /// reads the payload the way `Event::decode` reads it — inside `abi/`,
-    /// which is the crate that declares the field and is on `lint-stamp`'s
-    /// path — and hands back a checksum, which is not a time, is not
-    /// invertible, and is not anything this frame could publish a latency
-    /// from. RFC 0124 is that argument at length.
-    /// Unit: none — a checksum.
-    pub crossing: Crossing,
+    /// **The measurement behind *the frame relayed no input entry*.** Until a
+    /// mutation that had this frame take one entry off the ring went red on the
+    /// wrong sentence, the boot log said *this frame took 0 entries* as a
+    /// literal: true of this file, and printed whatever this file did. So it is
+    /// read off the ring's own cursors instead, at the one moment nothing is
+    /// running on either end, and required to equal what the driver says it put
+    /// there — every event and its attestation. A frame, or anything else, that
+    /// took an entry between the two components is a smaller number here.
+    /// Unit: entries.
+    pub on_ring: u64,
 }
 
 /// What the compositor stage saw.
@@ -748,8 +721,6 @@ pub struct Consumed {
     /// Completions carrying a refusal, or answering a delta nobody sent.
     /// Unit: deltas.
     pub refused: u64,
-    /// How many of the submitted deltas came from an input event. Unit: deltas.
-    pub from_events: u64,
     /// What the component published on its board.
     pub board: Board,
     /// Nodes its declared schema carries, as the frame wrote them. Unit: nodes.
@@ -791,16 +762,24 @@ pub struct Report {
 const WATCHED: [u32; 3] =
     [scene_routing::node::FRAMES, scene_routing::node::EDITS, scene_routing::node::NODES];
 
+/// A word off a page as the signed number it was written as.
+///
+/// The compositor publishes translations as two's-complement `u64` words, for
+/// the reason `f_compositor::routing` gives about its own pointer words.
+const fn signed(word: u64) -> i64 {
+    word as i64
+}
+
 impl Report {
     /// How many deltas should have reached the graph. Unit: deltas.
     ///
-    /// Derived from what the frame actually handed on rather than from the
-    /// harness's intention, which is what makes the comparison below a
-    /// comparison: the component counts what reached its graph and this counts
-    /// what left this file, and neither number is computed from the other.
+    /// The setup nodes and the two committed transforms, on both halves: the
+    /// scene this frame commits is the same whichever half runs, which is what
+    /// makes the two halves differ in exactly the one thing — whether the
+    /// compositor was given the ring.
     #[must_use]
-    pub fn expected_edits(&self) -> u64 {
-        SETUP_NODES.saturating_add(self.consumed.from_events)
+    pub const fn expected_edits(&self) -> u64 {
+        SETUP_NODES + COMMITTED_TRANSFORMS
     }
 
     /// Did the machine do what this half asked of it?
@@ -810,7 +789,11 @@ impl Report {
     /// A sentence for the boot log, naming the clause that did not hold.
     pub fn verdict(&self) -> Result<(), &'static str> {
         self.driver_verdict()?;
-        self.compositor_verdict()
+        self.compositor_verdict()?;
+        match self.half {
+            Half::Deliver => self.drained_verdict(),
+            Half::Withheld => self.withheld_verdict(),
+        }
     }
 
     /// The half of the verdict that is about the device, the driver and the
@@ -841,11 +824,11 @@ impl Report {
                  every count below is a count of nothing",
             );
         }
-        // Where `E3-B04a` lands, and it is three readings none of which is
-        // derived from another: the component says how many reports it timed,
-        // the frame says how many entries decoded — and `Event::decode` refuses
-        // a payload with no reading on it, so an entry that decoded carried one
-        // — and the clock's own position says how many times it advanced.
+        // Where `E3-B04a` lands, as two readings neither of which is derived
+        // from the other: the component says how many reports it timed, and the
+        // clock's own position says how many times it advanced. The third — that
+        // every entry that arrived carried one — is the compositor's decoder's,
+        // and is in `drained_verdict`.
         if seen.board.stamped != seen.board.reports {
             return Err(
                 "the driver timed a different number of reports than it closed: one reading per \
@@ -859,44 +842,18 @@ impl Report {
                  number each event carries has come unstuck from the report it belongs to",
             );
         }
-        if seen.refused != 0 || seen.decoded != seen.drained {
-            return Err(
-                "an entry the frame took off the data ring did not decode: every input entry \
-                 carries a reading because the decoder refuses one that does not, so a refusal \
-                 here is an event that reached a consumer with no place in the latency chain",
-            );
-        }
         if seen.board.malformed != 0 {
             return Err("the driver built an entry its own format check refused, which is an \
                  encoder about to submit what its peer's decoder will not take");
         }
         if seen.board.dropped != 0 {
             return Err(
-                "the driver could not submit an entry because this frame had not drained: the \
-                 events exist and the consumer never saw them, which is the one failure on this \
-                 path that leaves every other count looking healthy",
+                "the driver could not submit an entry because the ring had no room: the ring is \
+                 the only buffer between the two components on this machine, and an event that \
+                 did not fit is one the consumer never saw — the one failure on this path that \
+                 leaves every other count looking healthy",
             );
         }
-        if seen.board.submitted != seen.drained {
-            return Err("the driver and the frame disagree about how many entries crossed the \
-                 data ring");
-        }
-        // --- the crossing, `E3-B04f` ----------------------------------------
-        //
-        // The counts above say *how many* entries crossed and every clause so
-        // far has been about a tally. None of them says the entries that
-        // arrived are the entries that were sent: a relay that re-stamped on
-        // arrival, handed them on in a different order, or moved a coordinate
-        // by one satisfies every count in this function, and the first of those
-        // three is what `input/src/stamp.rs` exists to prevent.
-        //
-        // So the driver folds what it submitted, this frame folds what it
-        // drained, and the two words are required to agree. Neither is computed
-        // from the other: the driver's is taken in `Outbound::put` on the far
-        // side of the boundary and published on its routing page; this one is
-        // built in `drain` out of entries that arrived. What they share is the
-        // implementation, which is `E3-B04c`'s distinction and is why a defect
-        // inside the fold is `abi`'s corpus to catch and not this boot's.
         if seen.board.crossed != seen.board.submitted {
             return Err(
                 "the driver folded a different number of entries than it counted submitting, so \
@@ -904,24 +861,31 @@ impl Report {
                  did not send",
             );
         }
-        if seen.crossing.absorbed() != seen.decoded {
-            return Err("this frame folded a different number of entries than it decoded, which \
-                 is this file's own arithmetic and not the driver's");
-        }
-        if !seen.crossing.agrees_with(seen.board.crossing) {
+        // The attestation is the driver's on both halves: it does not know
+        // whether anybody is connected to the far end, and must not.
+        if seen.board.attested != 1 {
             return Err(
-                "what arrived is not what was sent: the driver's fold over the entries it \
-                 submitted and this frame's fold over the entries it drained disagree, and the \
-                 fold covers the opcode and the whole payload - so a reading minted on arrival, \
-                 a pair handed on out of order, one dropped out of the middle, or a coordinate \
-                 moved by one all land here. `agrees_with` also refuses a fold of nothing, so a \
-                 run in which no entry crossed fails on this line rather than passing quietly",
+                "the driver did not put its fold on the ring after its last event, so a consumer \
+                 that is not the frame has nothing to check what it drained against",
             );
         }
-        if seen.motions == 0 {
+        if seen.board.motions == 0 {
             return Err(
-                "no entry the frame drained was pointer motion, so nothing in this run carries \
+                "no entry the driver submitted was pointer motion, so nothing in this run carries \
                  a coordinate the harness can check its own injection against",
+            );
+        }
+        // **`E3-B04g`'s *the frame relaying no input entry at all*, measured.**
+        // Every entry the driver put on the ring — its events and its
+        // attestation — must still be there when the compositor is given it.
+        // On both halves: the withholding half is the same ring with the same
+        // entries, and a control that lost one would be a control for two
+        // things.
+        if seen.on_ring != seen.board.submitted.saturating_add(seen.board.attested) {
+            return Err(
+                "the ring did not hold every entry the driver put on it when the compositor was \
+                 stood up: something took entries off it between the two components, and on \
+                 this path nothing may - the frame least of all",
             );
         }
         if seen.asked != 0 {
@@ -934,7 +898,8 @@ impl Report {
         Ok(())
     }
 
-    /// The half that is about what the compositor did with them.
+    /// The half that is about the scene this frame committed, and which is also
+    /// the same on both halves.
     fn compositor_verdict(&self) -> Result<(), &'static str> {
         let seen = &self.consumed;
         if seen.refused != 0 {
@@ -955,32 +920,17 @@ impl Report {
             return Err("the compositor did not close exactly the one frame this boot commits");
         }
         if seen.board.created != SETUP_NODES || seen.board.live != SETUP_NODES {
-            return Err("the compositor's graph does not hold the two nodes this boot's setup \
+            return Err("the compositor's graph does not hold the three nodes this boot's setup \
                  deltas create");
         }
-        // **The clause both halves exist for.** `edits` is deltas that reached
-        // the graph, counted by the component; `expected_edits` is the two setup
-        // deltas plus however many events this half handed on, counted by this
-        // file from what it drained. On `deliver` the second term is the number
-        // of events the device produced and on `withheld` it is zero, and the
-        // same sentence is what fails if a compositor invented an edit or if
-        // this frame's relay quietly dropped one.
+        // `edits` is deltas that reached the graph, counted by the component.
+        // The latch is not an edit — it patches the frame going out and not the
+        // client's graph through a delta — so a compositor that counted its own
+        // latch, or took a position as a delta, lands here.
         if seen.board.edits != self.expected_edits() {
             return Err(
-                "the compositor applied a different number of deltas than this frame handed it: \
-                 on the delivering half that number is the two setup deltas plus one per input \
-                 event, and on the withholding half it is the two setup deltas alone",
-            );
-        }
-        if self.half.hands_on() {
-            if seen.from_events != self.produced.decoded {
-                return Err("the frame did not hand on every event it decoded, so the count the \
-                     compositor agreed with is not the count the device produced");
-            }
-        } else if seen.from_events != 0 {
-            return Err(
-                "the withholding half handed an event to the compositor, so it is not the \
-                 control it claims to be and the delivering half's count is evidence of nothing",
+                "the compositor applied a different number of deltas than this frame sent it: \
+                 three setup nodes and two committed transforms, on both halves",
             );
         }
         // And the tree, read back out of the page the component publishes into
@@ -993,36 +943,182 @@ impl Report {
             return Err("the numbers in the compositor's published tree are not the numbers on \
                  its board, though both come out of one set of counters");
         }
-        // --- the late latch, `E3-B01i`, as the negative it is here -----------
-        //
-        // The component holds the latch and was told which node carries the
-        // pointer. It was never told **where** the pointer is, and that is a
-        // property of this arrangement rather than an omission: the three words
-        // that would say so carry the driver's stamp, `kernel/` is deliberately
-        // not on `lint-stamp`'s input path, and a frame that carried one would
-        // need a row that the single `rdtsc` in this tree — the counter
-        // `crate::smp` reads to bound a spin — immediately turns red.
-        // `INPUT_PATH` has no exemption to write, by design.
-        //
-        // So this is a clause rather than a comment, and **it is meant to go
-        // red**: the diff that gives the compositor a route to a stamped
-        // position — a second worker core, so the driver and the compositor run
-        // at once and the component decodes the entry itself, or the input
-        // router `E3-B04`'s parent owes — is the diff that closes `E3-B01i`'s
-        // boot half, and it arrives at this line first.
-        if seen.board.pointer_reports != 0 {
-            return Err("the compositor was told where the pointer is, which this frame has no \
-                 stamped route to say — `E3-B01i`'s boot half is open and this is the clause \
-                 that says so");
+        Ok(())
+    }
+
+    /// The delivering half: the compositor held the ring, and everything the
+    /// driver put on it reached the latch by that route and no other.
+    ///
+    /// `E3-B04g` first, then `E3-B01i`. The order is the dependency: a latch
+    /// clause checked against positions that did not provably come off the
+    /// ring would be a latch clause about somebody's positions.
+    fn drained_verdict(&self) -> Result<(), &'static str> {
+        let driver = &self.produced.board;
+        let seen = &self.consumed.board;
+        // --- `E3-B04g`: the compositor drained the ring itself ---------------
+        if seen.input_connected != 1 {
+            return Err("the compositor did not adopt the input ring this half gave it");
         }
-        if seen.board.pointer_unstamped == 0 {
-            return Err("the compositor refused no unstamped reading, so either it never looked \
-                 at the pointer words or it took a page of zeroes for a position at the origin");
+        if seen.input_entries != driver.submitted {
+            return Err(
+                "the driver and the compositor disagree about how many entries crossed the data \
+                 ring, and the ring held every one of them when the compositor was given it — so \
+                 the difference is the compositor's drain, and not a relay's",
+            );
         }
-        if seen.board.latches != 0 || seen.board.latch_declines != seen.board.frames {
-            return Err("the compositor latched a frame, or declined a number of frames that is \
-                 not the number it closed: with no position reported every closed frame \
-                 declines exactly once");
+        if seen.input_refused != 0 || seen.input_decoded != seen.input_entries {
+            return Err(
+                "an entry the compositor took off the ring did not decode: every input entry \
+                 carries a reading because the decoder refuses one that does not, so a refusal \
+                 here is an event that reached a consumer with no place in the latency chain",
+            );
+        }
+        if seen.input_crossed != seen.input_decoded {
+            return Err("the compositor folded a different number of entries than it decoded, \
+                 which is its own arithmetic and not the driver's");
+        }
+        if seen.input_attestations != 1 || seen.input_unattested != 0 {
+            return Err(
+                "the compositor did not find exactly one attestation after the last event: none \
+                 is a driver whose word never arrived, two is a producer saying two things \
+                 about one crossing, and an entry after it is one the word does not cover",
+            );
+        }
+        // The same number by two routes. The ring carried it to the component;
+        // the driver's routing page carried it here, read before the reap. A
+        // ring that moved the events faithfully and the word wrongly passes the
+        // component's own check and fails this one.
+        if seen.input_attested != driver.crossing || seen.input_attested_count != driver.crossed {
+            return Err(
+                "the attestation the compositor read off the ring is not the word the driver \
+                 published on its routing page, so one of the two routes carried it wrongly",
+            );
+        }
+        // **The clause `E3-B04g` is.** The compositor's fold over what it
+        // drained against the driver's fold over what it submitted — two words,
+        // neither computed here, neither computed from the other. The count is
+        // required non-zero first, for `Crossing::agrees_with`'s reason: two
+        // folds of nothing hold one basis and would agree about a crossing that
+        // never happened.
+        if seen.input_crossed == 0
+            || seen.input_crossing != driver.crossing
+            || seen.input_crossed != driver.crossed
+        {
+            return Err(
+                "what arrived is not what was sent: the driver's fold over the entries it \
+                 submitted and the compositor's fold over the entries it drained disagree, and \
+                 the fold covers the opcode and the whole payload - so a reading minted on \
+                 arrival, a pair handed on out of order, one dropped out of the middle, or a \
+                 coordinate moved by one all land here",
+            );
+        }
+        if seen.input_agreed != 1 {
+            return Err(
+                "the compositor's own comparison of what it drained against the word it read off \
+                 the ring did not agree, though this frame's did: the component's check is not \
+                 the check its published numbers describe",
+            );
+        }
+        if seen.input_motions != driver.motions {
+            return Err("the compositor decoded a different number of positions than the driver \
+                 says it sent");
+        }
+
+        // --- `E3-B01i`: every position reached the latch, and one frame
+        // latched in the window ------------------------------------------------
+        if seen.pointer_reports != seen.input_motions || seen.pointer_stale != 0 {
+            return Err(
+                "a position the compositor decoded did not reach its predictor as a report, or \
+                 one reached it twice: a relay that duplicated or reordered motion looks \
+                 exactly like this, and there is no relay here",
+            );
+        }
+        if seen.latches != 1 || seen.latch_declines != 0 {
+            return Err(
+                "the compositor did not latch the one frame it closed, though it was told which \
+                 node carries the pointer and took every position the driver sent",
+            );
+        }
+        if seen.latch_entry != 0 {
+            return Err(
+                "the latch landed past a submission in the frame's trace: zero entries is after \
+                 the commit closed and before the compositor's own submission entered its wait, \
+                 and that is the only moment `E3-B01i` allows",
+            );
+        }
+        // *And by nothing else.* The component folded every field of every node
+        // a renderer could see, with the pointer's two translations masked,
+        // either side of the patch — `f_compositor::latch::unmoved` — and the
+        // two words must be one. The walk must also have been the whole graph,
+        // or two folds of too little would agree about it.
+        if seen.latch_walked != seen.live || seen.latch_unmoved_before != seen.latch_unmoved_after {
+            return Err(
+                "the latched frame differs from the committed one in something other than the \
+                 pointer's two translations: the component's fold over every node, with those \
+                 two masked, moved across the patch or walked fewer nodes than the graph holds",
+            );
+        }
+        if signed(seen.latch_committed_x) != COMMITTED_TX_X65536
+            || signed(seen.latch_committed_y) != COMMITTED_TY_X65536
+        {
+            return Err(
+                "the transform the compositor says the client committed is not the one this \
+                 frame committed, and it was read back out of the graph — so the graph holds \
+                 something this client did not send",
+            );
+        }
+        // Held and not extrapolated, and the reason is the motion the harness
+        // injects rather than a preference: it reverses inside the predictor's
+        // window, so the predictor holds the newest position rather than running
+        // a velocity that has changed sign — `f_compositor`'s own
+        // `the_boots_motion_is_held_and_not_extrapolated` pins that arithmetic.
+        // A held latch differs from the commit by exactly the motion that
+        // arrived, which is the equality `cargo xtask input` checks; an
+        // extrapolated one would differ by that plus a lead, which is
+        // `E3-B04e`'s arithmetic and not this line's.
+        if seen.latch_extrapolated != 0 || seen.latch_lead_nanos != 0 {
+            return Err(
+                "the latch extrapolated, so the transform it submitted is the motion plus a \
+                 lead and not the motion: the harness's equality would be testing the \
+                 predictor rather than the route",
+            );
+        }
+        // And the value, against the driver's own word for where the pointer
+        // ended — which reached this frame on the driver's routing page, while
+        // the compositor's reached the latch through the ring. Two sides of one
+        // ring, neither copied from the other.
+        if signed(seen.latch_x) != driver.pointer_x_x65536
+            || signed(seen.latch_y) != driver.pointer_y_x65536
+        {
+            return Err("the position the compositor latched is not where the driver says its \
+                 accumulator ended: the newest report the latch held is not the newest report \
+                 the driver sent");
+        }
+        Ok(())
+    }
+
+    /// The withholding half: the same run with the ring not connected, and
+    /// nothing may reach the latch.
+    fn withheld_verdict(&self) -> Result<(), &'static str> {
+        let seen = &self.consumed.board;
+        if seen.input_connected != 0 {
+            return Err(
+                "the withholding half connected the input ring, so it is not the control it \
+                 claims to be and the delivering half's latch is evidence of nothing",
+            );
+        }
+        if seen.input_entries != 0 || seen.input_attestations != 0 {
+            return Err("the compositor took input entries on a run in which it was given no ring");
+        }
+        if seen.pointer_reports != 0 {
+            return Err(
+                "the compositor took a position on a run in which it was given no input ring, so \
+                 a position reaches it by some route other than the one this boot exists to show",
+            );
+        }
+        if seen.latches != 0 || seen.latch_declines != seen.frames {
+            return Err("the compositor latched a frame with no ring connected, or declined a \
+                 number of frames that is not the number it closed");
         }
         Ok(())
     }
@@ -1031,14 +1127,17 @@ impl Report {
 /// Print what happened, one subject per line.
 pub fn report_lines(report: &Report) {
     let seen = &report.produced;
+    let board = &report.consumed.board;
     crate::kprintln!(
         "  input         a fourth driver outside the frame, and the {} half: {}",
         report.half.name(),
         match report.half {
-            Half::Deliver => "every event the device produced is handed to a compositor",
+            Half::Deliver =>
+                "the compositor holds the other end of the driver's ring and this frame holds \
+                 neither",
             Half::Withheld =>
-                "the same events, drained and decoded, and none of them handed on - so a delta \
-                 the compositor applies came from somewhere else",
+                "the same events on the same ring, and the compositor is not given it - so a \
+                 position it latches came from somewhere else",
         }
     );
     crate::kprintln!(
@@ -1068,49 +1167,60 @@ pub fn report_lines(report: &Report) {
     );
     crate::kprintln!(
         "  input clock   {} report(s) timed and the clock stands at {} ns, which is {} ns per \
-         report; {} entr(y/ies) decoded of {} drained, {} refused",
+         report",
         seen.board.stamped,
         seen.board.clock_at,
         STAMP_TICK_NANOS,
-        seen.decoded,
-        seen.drained,
-        seen.refused,
+    );
+    // The ring, on its own line, because what it held between the two
+    // components is the number `E3-B04g` is: every entry the driver put there,
+    // read off the ring's own cursors rather than asserted by this file.
+    crate::kprintln!(
+        "  input ring    {} entr(y/ies) on the ring when the compositor was stood up, of the {} \
+         the driver submitted and {} attestation(s); the compositor was {} and took {} entr(y/ies) \
+         and {} attestation(s): {} decoded, {} refused, {} of them pointer motion",
+        seen.on_ring,
+        seen.board.submitted,
+        seen.board.attested,
+        if board.input_connected == 1 { "connected" } else { "not connected" },
+        board.input_entries,
+        board.input_attestations,
+        board.input_decoded,
+        board.input_refused,
+        board.input_motions,
     );
     // The crossing, on its own line, because it is the only thing in this log
-    // that two stages computed separately about one sequence. The counts are
-    // printed beside the words so that a reader of a red boot can tell a
-    // disagreement about *how many* from a disagreement about *what*.
+    // that two stages computed separately about one sequence — and since
+    // `E3-B04g` it is three numbers, because the driver's word reaches two
+    // places by two routes. The counts are printed beside the words so that a
+    // reader of a red boot can tell *how many* from *what*.
     crate::kprintln!(
-        "  input cross   the driver folded {} entr(y/ies) into {:#018x} and this frame folded \
-         {} into {:#018x}; {}",
+        "  input cross   the driver folded {} entr(y/ies) into {:#018x} (routing page); the \
+         compositor folded {} into {:#018x} and read {:#018x} off the ring; {}",
         seen.board.crossed,
         seen.board.crossing,
-        seen.crossing.absorbed(),
-        seen.crossing.word(),
-        if seen.crossing.agrees_with(seen.board.crossing) {
-            "what arrived is what was sent, stamps and bodies alike"
-        } else {
-            "THEY DISAGREE"
+        board.input_crossed,
+        board.input_crossing,
+        board.input_attested,
+        match (report.half, board.input_agreed == 1) {
+            (Half::Deliver, true) => "what arrived is what was sent, readings and bodies alike",
+            (Half::Deliver, false) => "THEY DISAGREE",
+            (Half::Withheld, _) => "nothing was drained, which is this half's point",
         },
     );
     crate::kprintln!(
-        "  input relay   {} event(s) kept, {} of them pointer motion, {} handed to the \
-         compositor; the harness {}",
-        seen.events,
-        seen.motions,
-        report.consumed.from_events,
+        "  input relay   none: the frame kept no event and handed none on; the harness {}",
         if seen.acknowledged { "acknowledged" } else { "NEVER ANSWERED" },
     );
     // The line the harness checks its own injection against. It carries what
     // nothing outside the machine can derive - where the driver's accumulator
-    // ended up - and the harness holds the other half: how far it asked the
-    // pointer to move, in whole device pixels. Neither side holds the other's
-    // number, which is what makes the comparison a comparison.
+    // ended up, as the driver published it - and the harness holds the other
+    // half: how far it asked the pointer to move, in whole device pixels.
     crate::kprintln!(
         "  input pointer x {} y {} in units of 1/65536 device pixel, after {} motion event(s)",
-        seen.last_x_x65536,
-        seen.last_y_x65536,
-        seen.motions,
+        seen.board.pointer_x_x65536,
+        seen.board.pointer_y_x65536,
+        seen.board.motions,
     );
     crate::kprintln!(
         "  input scene   {} delta(s) submitted, {} answered, {} refused; the component applied \
@@ -1118,10 +1228,10 @@ pub fn report_lines(report: &Report) {
         report.consumed.submitted,
         report.consumed.completed,
         report.consumed.refused,
-        report.consumed.board.edits,
+        board.edits,
         report.expected_edits(),
-        report.consumed.board.frames,
-        report.consumed.board.live,
+        board.frames,
+        board.live,
     );
     crate::kprintln!(
         "  input tree    {} node(s) from the compositor's manifest: frames {}, edits {}, nodes \
@@ -1130,28 +1240,50 @@ pub fn report_lines(report: &Report) {
         report.consumed.tree[0],
         report.consumed.tree[1],
         report.consumed.tree[2],
-        report.consumed.board.outcome,
+        board.outcome,
     );
-    // The late latch, `E3-B01i`, and this line is a **negative** on both halves.
-    // The component holds the mechanism and is told which node the pointer
-    // rides; what it is never told is where the pointer is, because the three
-    // words that would say so carry the driver's stamp and this frame may not
-    // hold one. `Report::compositor_verdict` is where that is a clause rather
-    // than a sentence, and the comment there says what route closes it.
+    // The late latch, `E3-B01i`, and **the second line the harness reads**.
+    // Both ends of the transform and not their difference, for
+    // `f_compositor::latch::Latched`'s reason: the process that injected the
+    // motion does the subtraction, against the list it injected, and nothing in
+    // the machine holds that list. The fields are read by position, so the
+    // first twelve words of this line are a format and not prose.
     crate::kprintln!(
-        "  input latch   the compositor was told node {} carries the pointer and was told no \
-         position: {} report(s) taken, {} frame(s) latched, {} declined — the relay carries \
-         no stamp, so there is nothing to predict from",
+        "  input latch   committed x {} y {} latched x {} y {} at trace entry {} of node {}: {} \
+         report(s) taken, {} stale, {} frame(s) latched, {} declined, {}",
+        signed(board.latch_committed_x),
+        signed(board.latch_committed_y),
+        signed(board.latch_x),
+        signed(board.latch_y),
+        board.latch_entry,
         POINTER_NODE,
-        report.consumed.board.pointer_reports,
-        report.consumed.board.latches,
-        report.consumed.board.latch_declines,
+        board.pointer_reports,
+        board.pointer_stale,
+        board.latches,
+        board.latch_declines,
+        if board.latches == 0 {
+            "nothing to latch from"
+        } else if board.latch_extrapolated == 0 {
+            "held at the newest position"
+        } else {
+            "EXTRAPOLATED"
+        },
     );
+    // *And by nothing else*, on its own line after the latch line — whose first
+    // twelve words are a format — and not inside it.
     crate::kprintln!(
-        "  input unstamp {} reading(s) refused for carrying no stamp, which is what the page \
-         this frame never wrote reads as — f_abi::input::NOT_STAMPED, at the one place a \
-         position reaches a component without crossing a ring",
-        report.consumed.board.pointer_unstamped,
+        "  input else    the compositor folded {} node(s) with the pointer's translation masked: \
+         {:#018x} before the patch and {:#018x} after; {}",
+        board.latch_walked,
+        board.latch_unmoved_before,
+        board.latch_unmoved_after,
+        if board.latches == 0 {
+            "no frame was latched"
+        } else if board.latch_unmoved_before == board.latch_unmoved_after {
+            "nothing else moved"
+        } else {
+            "SOMETHING ELSE MOVED"
+        },
     );
 }
 
@@ -1223,6 +1355,11 @@ pub unsafe fn demonstrate(
 
     let region_order = order_for(declared.bytes).ok_or(Trouble::Manifest)?;
     let granted = frames.alloc_zeroed(region_order).ok_or(Trouble::NoFrames)?;
+    // The driver's data channel. **It outlives the driver**, and that is the
+    // arrangement `E3-B04g` rests on: the frame allocates it, the driver holds
+    // one end while it runs, and the compositor holds the other after the
+    // driver is gone — so this function frees it, after both, and neither
+    // component's reap can.
     let wire = frames.alloc_zeroed(Order::FRAME).ok_or(Trouble::NoFrames)?;
 
     // SAFETY: two frames just allocated, each held by nobody else, and the
@@ -1253,19 +1390,37 @@ pub unsafe fn demonstrate(
     // SAFETY: nothing is attached and no device is walking these tables.
     unsafe { unit.release(frames, domain) };
 
-    // SAFETY: allocated above, at the order each is freed at, and the device is
-    // detached and stripped of bus mastering.
+    // SAFETY: allocated above, at the order it is freed at, and the device is
+    // detached and stripped of bus mastering. The data channel is *not* freed
+    // here: it is the compositor's input ring next.
     unsafe { frames.free(granted) };
-    // SAFETY: as above.
-    unsafe { frames.free(wire) };
 
-    let produced = outcome?;
+    let produced = match outcome {
+        Ok(produced) => produced,
+        Err(why) => {
+            // SAFETY: allocated above; the driver that held one end of it has
+            // been reaped or never ran, and no compositor has been given it.
+            unsafe { frames.free(wire) };
+            return Err(why);
+        }
+    };
 
-    // And now the second component, on the core the first one has given back.
+    // And now the second component, on the core the first one has given back,
+    // holding the far end of the ring the first one wrote into — or, on the
+    // withholding half, not holding it.
     // SAFETY: the caller's guarantee about the boot processor, the allocator,
     // the direct map and the worker core, passed down; the driver has been
-    // reaped, so that core is idle again.
-    let consumed = unsafe { consume(frames, space, features, half, boot, scheduling, &produced) }?;
+    // reaped, so that core is idle again, and `wire` is a frame this function
+    // allocated whose only other holder is gone.
+    let consumed = unsafe { consume(frames, space, features, half, boot, scheduling, wire) }?;
+
+    // SAFETY: allocated above; both components that held an end of it have been
+    // joined and reaped - `consume` answering `Ok` is what says the second one
+    // was - and this frame holds no pointer into it. On an error it is not
+    // freed, for the reason `consume` does not free its own scene ring on one:
+    // a component whose join did not return may still be inside the page, and
+    // the boot is failing anyway.
+    unsafe { frames.free(wire) };
 
     // Everything both stages took, back where it started, with the unit's own
     // retained tables taken out. Two numbers rather than a tolerance: a check
@@ -1287,7 +1442,7 @@ pub unsafe fn demonstrate(
 }
 
 /// The driver stage: stand `user/virtio-input` up, hold still while somebody
-/// moves the pointer, and keep what arrives.
+/// moves the pointer, and **take nothing off its ring**.
 ///
 /// # Safety
 ///
@@ -1364,14 +1519,15 @@ unsafe fn produce(
 
     let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Authority)?;
     let at = frames.virt(wire);
-    // The data ring, and **the frame keeps the server's end of it**, which is
-    // the opposite of every other datapath in this tree. The component holds the
-    // client's end because nobody asks for an input event: there is a device
-    // that produces and a peer that drains.
+    // The data ring, laid out and **held by nobody on this side**. The component
+    // adopts the client's end; the server's end is the compositor's, later, in
+    // a different address space — `consume` maps this same frame into it. The
+    // value `describe` answers is dropped on purpose: a `Mapping` kept here would
+    // be a consumer this file could call, and `E3-B04g`'s exit is that no such
+    // call exists.
     // SAFETY: `wire` was allocated zeroed by the caller, is frame-aligned and is
     // `FRAME_SIZE` bytes with no pointer into it held anywhere else.
-    let server_end =
-        unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
+    let _ = unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
     // SAFETY: `pages.control` is the kernel address of a frame `prepare_driver`
     // allocated zeroed for this run and handed to nobody else.
     let control = unsafe {
@@ -1439,8 +1595,6 @@ unsafe fn produce(
 
     let asks = Consumer::new(control.channel()).ok_or(Trouble::Channel(0))?;
     let answers = Poster::new(control.completions()).ok_or(Trouble::Channel(0))?;
-    let events = Consumer::new(server_end.channel()).ok_or(Trouble::Channel(0))?;
-    let arena = server_end.arena();
 
     let mut supervising = Supervising {
         asks: &asks,
@@ -1463,16 +1617,16 @@ unsafe fn produce(
         answered: 0,
     };
 
-    let mut seen = Drained::default();
     let tsc_khz = setup.scheduling.tsc_khz;
+    let mut acknowledged = false;
 
     // **The line the harness waits for.** It is printed after the component is
-    // running and before the frame starts draining, because the events have to
-    // be injected into a machine whose driver is already serving: an event
-    // delivered to a device nobody has started is an event the emulator queues
-    // and the driver finds later or not at all. `kernel/src/gpu.rs`'s marker is
-    // the other way round - it is printed after its verdict, because a picture
-    // survives the boot and an input event does not.
+    // running, because the events have to be injected into a machine whose
+    // driver is already serving: an event delivered to a device nobody has
+    // started is an event the emulator queues and the driver finds later or not
+    // at all. `kernel/src/gpu.rs`'s marker is the other way round - it is
+    // printed after its verdict, because a picture survives the boot and an
+    // input event does not.
     crate::kprintln!(
         "  input inject  the driver is serving on core {}; move the pointer now",
         setup.scheduling.cpu,
@@ -1486,11 +1640,17 @@ unsafe fn produce(
         // here rather than skipped because a supervisor that stopped serving
         // while its component ran would be a supervisor this boot cannot say
         // anything about.
+        //
+        // **And that is the whole of what this loop does with the component.**
+        // Until `E3-B04g` a drain of the data ring stood beside this call, and
+        // the ring then emptied as the driver filled it. It does not now: the
+        // entries stay on the ring until the compositor takes them, which is why
+        // the ring's size is the bound on a gesture and why the verdict requires
+        // the driver's `dropped` to be zero.
         supervising.serve()?;
-        drain(&events, &arena, &mut seen)?;
 
         if settle_until.is_none() && crate::arch::x86_64::serial::Serial.received().is_some() {
-            seen.acknowledged = true;
+            acknowledged = true;
             settle_until = Some(crate::smp::deadline_after(tsc_khz, SETTLE_MICROS));
         }
         match settle_until {
@@ -1501,7 +1661,9 @@ unsafe fn produce(
     }
 
     // Told to stop whatever happened above, because a driver left serving a
-    // frame that has gone is a core this boot never gets back.
+    // frame that has gone is a core this boot never gets back. The driver puts
+    // its fold on the data ring on its way out — after this notice and before
+    // its `EXIT` — which is why the stop comes before the join and not after.
     let told = supervising.stop();
     // SAFETY: `start_on` was called for this core and nothing else has joined
     // it. The closure serves the driver's control ring, whose two ends are
@@ -1530,136 +1692,38 @@ unsafe fn produce(
     })?;
 
     let board = reported.ok_or(Trouble::BadReport)?;
-    if seen.overflowed {
-        return Err(Trouble::Overflowed(EVENTS_MAX));
-    }
 
-    Ok(Produced {
-        board,
-        exited,
-        drained: seen.drained,
-        decoded: seen.decoded,
-        refused: seen.refused,
-        motions: seen.motions,
-        last_x_x65536: seen.last_x_x65536,
-        last_y_x65536: seen.last_y_x65536,
-        asked,
-        acknowledged: seen.acknowledged,
-        kept: seen.kept,
-        events: seen.events,
-        crossing: seen.crossing,
-    })
-}
-
-/// What the frame has taken off the data ring so far.
-struct Drained {
-    drained: u64,
-    decoded: u64,
-    refused: u64,
-    motions: u64,
-    last_x_x65536: i64,
-    last_y_x65536: i64,
-    acknowledged: bool,
-    overflowed: bool,
-    kept: [Kept; EVENTS_MAX],
-    events: usize,
-    crossing: Crossing,
-}
-
-impl Default for Drained {
-    fn default() -> Self {
-        Self {
-            drained: 0,
-            decoded: 0,
-            refused: 0,
-            motions: 0,
-            last_x_x65536: 0,
-            last_y_x65536: 0,
-            acknowledged: false,
-            overflowed: false,
-            kept: [Kept { tx_x65536: 0, ty_x65536: 0 }; EVENTS_MAX],
-            events: 0,
-            crossing: Crossing::new(),
-        }
-    }
-}
-
-/// Take everything the driver has submitted and keep what a delta will be built
-/// from.
-///
-/// # Why every entry is decoded and not merely counted
-///
-/// Because decoding is the whole of what this frame checks about the reading an
-/// entry carries. `f_abi::input::Event::decode` refuses a payload whose first
-/// eight bytes are the not-stamped value, and it is the same function a consumer
-/// anywhere else on this path would call - so an entry that decoded here is an
-/// entry the driver called the one reading for, and this file establishes that
-/// without reading a clock, naming the field, or holding an opinion about what
-/// time it is. `E3-B04a`, in a boot.
-///
-/// # Errors
-///
-/// [`Trouble::Channel`] for a ring that stopped validating under the frame,
-/// which is a component that has stopped speaking.
-fn drain(events: &Consumer<'_>, arena: &Arena<'_>, seen: &mut Drained) -> Result<(), Trouble> {
-    loop {
-        let Some(entry) = events.pop().map_err(|_| Trouble::Channel(0))? else { return Ok(()) };
-        seen.drained = seen.drained.saturating_add(1);
-
-        let mut payload = [0u8; PAYLOAD_BYTES];
-        let Ok(offset) = usize::try_from(entry.offset) else {
-            seen.refused = seen.refused.saturating_add(1);
-            continue;
-        };
-        if !arena.copy_out(offset, &mut payload) {
-            seen.refused = seen.refused.saturating_add(1);
-            continue;
-        }
-        let Ok(event) = Event::decode(&entry, &payload) else {
-            seen.refused = seen.refused.saturating_add(1);
-            continue;
-        };
-        seen.decoded = seen.decoded.saturating_add(1);
-        // The consumer's half of the attestation, folded here and from nowhere
-        // else, in the order the entries came off the ring. It is taken from
-        // the decoded event rather than from the bytes in the arena on purpose:
-        // what is being attested is that the *event* crossed unchanged, and an
-        // entry that did not decode is not an event at all — it is counted in
-        // `refused`, which the verdict already requires to be zero.
-        seen.crossing.absorb(&event);
-
-        // Where the pointer is, as the driver's accumulator has it. A motion
-        // event carries the position and every other opcode carries none, so an
-        // event that is not motion is relayed at the position the last motion
-        // left - which keeps the relay one delta per event without inventing a
-        // coordinate the device never reported.
-        if let InputEntry::PointerMotion(motion) = event.body {
-            seen.motions = seen.motions.saturating_add(1);
-            seen.last_x_x65536 = i64::from(motion.x_x65536);
-            seen.last_y_x65536 = i64::from(motion.y_x65536);
-        }
-
-        let kept = Kept { tx_x65536: seen.last_x_x65536, ty_x65536: seen.last_y_x65536 };
-        match seen.kept.get_mut(seen.events) {
-            Some(slot) => {
-                *slot = kept;
-                seen.events += 1;
-            }
-            // Recorded rather than acted on here, because this function runs
-            // inside the driver's run and stopping in the middle of it would
-            // leave a core holding a job. `produce` fails the boot on it once
-            // the component has been told to stop and reaped.
-            None => seen.overflowed = true,
-        }
-    }
+    // What is on the ring now, with the driver joined and reaped and the
+    // compositor not yet stood up: the one moment neither end is running. The
+    // ring's cursors are read and nothing is taken — `occupancy` is the
+    // producer's count of what it published and nobody has consumed.
+    //
+    // A producer's handle and not a consumer's, because a producer's has no
+    // call that takes an entry off. `Producer::occupancy` is sound only for the
+    // ring's one producer — *only the owner may ask* — and it is sound here for
+    // that reason: the driver that owned the head is joined, the join is the
+    // edge that makes its last head store visible to this core, and nothing
+    // else holds either end until `consume` hands the far one out. The handle
+    // is dropped at the end of this expression and submits nothing.
+    // SAFETY: `wire` is the frame the channel was laid out in above, allocated
+    // by the caller and held by nothing that runs: the driver that held one end
+    // is reaped. Every accessor hands out atomics rather than references.
+    let ring = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
+    let on_ring = Producer::new(ring.channel())
+        .ok_or(Trouble::Channel(0))?
+        .occupancy()
+        .map_err(|_| Trouble::Channel(0))?;
+    Ok(Produced { board, exited, asked, acknowledged, on_ring: u64::from(on_ring) })
 }
 
 /// The compositor stage: stand `user/compositor` up on the core the driver has
-/// given back, and commit one frame built out of what arrived.
+/// given back, with the driver's ring as its input channel on the delivering
+/// half, and commit one frame.
 ///
 /// # Safety
 ///
-/// As [`demonstrate`], after the driver has been reaped.
+/// As [`demonstrate`], after the driver has been reaped, with `input` the frame
+/// the driver's data channel was laid out in and nothing else holding it.
 unsafe fn consume(
     frames: &mut FrameAllocator,
     kernel: &AddressSpace,
@@ -1667,7 +1731,7 @@ unsafe fn consume(
     half: Half,
     boot: &BootInfo,
     on: Scheduling,
-    produced: &Produced,
+    input: Frame,
 ) -> Result<Consumed, Trouble> {
     // The same finder `kernel/src/compositor.rs` uses, and not a second one: a
     // boot with two answers to *which module is the compositor* is a boot that
@@ -1687,13 +1751,33 @@ unsafe fn consume(
         return Err(Trouble::HeapDisagrees);
     }
 
+    // **The one line the two halves differ in.** The delivering half maps the
+    // driver's data channel into the compositor and says where; the withholding
+    // half maps nothing and writes zero, which the component reads as *not
+    // connected*. Everything else below — the scene, the commit, the stop — is
+    // the same on both, so a latch on one and not the other is the ring's doing.
+    //
+    // The ring rides `ServerPlan::buffers`, the one caller-held region that
+    // shape maps writable into a server at `process::BLK_QUEUES`. It is named
+    // for a client's buffer region and this component declares `payload =
+    // "inline"`, so it has no such region and the address is otherwise unused —
+    // `process::prepare_server`'s own comment says the reuse of that address
+    // across meanings is deliberate. *What would reverse this:* a shape that
+    // maps a second channel by name, which is `E1-B05`'s supervisor handing a
+    // place's occupant its peers; on that day this is a ring in a manifest and
+    // not a region in a plan.
+    let (buffers, buffer_bytes, input_at, input_len) = if half.connects() {
+        (input.addr(), FRAME_SIZE, crate::process::BLK_QUEUES, FRAME_SIZE)
+    } else {
+        (0, 0, 0, 0)
+    };
+
     let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0))?;
     let wire = frames.alloc_zeroed(Order::FRAME).ok_or(Trouble::NoFrames)?;
     let at = frames.virt(wire);
-    // Here the frame is the **client** and the component is the server, which is
-    // the other way round from the ring above it. Both ends are in this file,
-    // and that is the cost `E1-B05` still owes: the courier holds one end of
-    // each channel because nothing else in this boot can.
+    // The scene ring, and here the frame is the **client** and the component is
+    // the server — the frame's one role left on this path, and it is the role a
+    // client application has, which is what the frame is standing in for.
     // SAFETY: `wire` was allocated zeroed just above, is frame-aligned and is
     // `FRAME_SIZE` bytes with no pointer into it held anywhere else.
     let _ = unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
@@ -1702,7 +1786,9 @@ unsafe fn consume(
     let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
 
     // SAFETY: the caller's guarantee about `kernel`, `frames` and `cpu`, plus
-    // `wire` being a frame this function allocated and holds the far end of.
+    // `wire` being a frame this function allocated and holds the far end of,
+    // and `input` — when it is passed — being the caller's frame with nobody
+    // else holding it.
     let (prepared, pages) = unsafe {
         process::prepare_server(
             frames,
@@ -1716,11 +1802,8 @@ unsafe fn consume(
                 target: on.target,
                 cpu: on.cpu,
                 data: wire.addr(),
-                // This component's ring carries its payloads inline, in the
-                // channel's own arena, so a registered region would be a page
-                // nobody ever addresses.
-                buffers: 0,
-                buffer_bytes: 0,
+                buffers,
+                buffer_bytes,
                 heap_bytes: scene_routing::HEAP_BYTES,
                 own_tree: true,
             },
@@ -1760,12 +1843,13 @@ unsafe fn consume(
         (scene_routing::at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
         (scene_routing::at::BACKEND_CAPABILITIES, BACKEND_CAPABILITIES),
         // Which node the pointer rides, `E3-B01i`. Told on **both** halves, so
-        // that the difference between them stays the one line in `commit` that
-        // hands the events on: a control whose compositor had been told to latch
-        // nothing would be a control for two things at once, and the withholding
-        // half's zero latches is then a fact about the events rather than about
-        // this word.
+        // that the difference between them stays the one ring: a control whose
+        // compositor had been told to latch nothing would be a control for two
+        // things at once, and the withholding half's zero latches is then a fact
+        // about the ring rather than about this word.
         (scene_routing::at::POINTER_NODE, u64::from(POINTER_NODE)),
+        (scene_routing::at::INPUT_AT, input_at),
+        (scene_routing::at::INPUT_LEN, input_len),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1781,7 +1865,7 @@ unsafe fn consume(
     let arena = client_end.arena();
 
     let mut env = SeededEnv::new(PACING_SEED, 0);
-    let driven = commit(&producer, &reaper, &arena, &board, &mut env, on.tsc_khz, half, produced);
+    let driven = commit(&producer, &reaper, &arena, &board, &mut env, on.tsc_khz);
 
     let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
     // SAFETY: `start_on` was called for this core and nothing else has joined
@@ -1825,7 +1909,6 @@ unsafe fn consume(
         submitted: seen.submitted,
         completed: seen.completed,
         refused: seen.refused,
-        from_events: seen.from_events,
         board,
         tree_nodes,
         tree,
@@ -1837,32 +1920,32 @@ struct Sent {
     submitted: u64,
     completed: u64,
     refused: u64,
-    from_events: u64,
 }
 
-/// Submit the two setup deltas, one delta per event this half hands on, and one
-/// commit.
+/// Submit the three setup deltas, the two committed transforms, and one
+/// commit — the same six on both halves.
+///
+/// # Why the committed transform is at the origin
+///
+/// Because this client has never been told where the pointer is, and that is
+/// the point of `E3-B04g`: the position goes from the driver to the compositor
+/// and not through here. The one place a client that knows nothing can honestly
+/// put the pointer is where the driver's accumulator starts, which is the
+/// origin. `E3-B01i`'s *by exactly the motion injected* is then a subtraction
+/// the harness can do against the list it injected: latched minus committed is
+/// the accumulator's end, and the accumulator's end is the sum of the motion.
 ///
 /// # Why one at a time
 ///
 /// Because the payload travels in the channel's arena and this client writes
 /// every payload at the same offset, so a second entry submitted before the
 /// first was answered would overwrite bytes the component had not read yet.
-/// `kernel/src/compositor.rs` makes the same choice for the same reason, and
-/// adds the one that matters for the epoch: batching deltas into one crossing is
-/// `E3-B01`'s exit and `E3-B01j` is the task that counts the crossings, so a
-/// client that batched here would be building that task's evidence without its
-/// counter.
+/// `kernel/src/compositor.rs` makes the same choice for the same reason.
 ///
 /// # Errors
 ///
 /// [`Trouble::NotCommitted`] where the ring will not take a delta, or where a
 /// completion does not arrive inside the bound.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the client, its ring, its arena, its page, its clock, a bound and what it is \
-              relaying; a struct holding them would be a type that exists so a lint passes"
-)]
 fn commit(
     producer: &Producer<'_>,
     reaper: &Collector<'_>,
@@ -1870,10 +1953,8 @@ fn commit(
     board: &Window,
     env: &mut SeededEnv,
     tsc_khz: u64,
-    half: Half,
-    produced: &Produced,
 ) -> Result<Sent, Trouble> {
-    let mut seen = Sent { submitted: 0, completed: 0, refused: 0, from_events: 0 };
+    let mut seen = Sent { submitted: 0, completed: 0, refused: 0 };
     let mut token: u64 = 0;
 
     let mut send = |seen: &mut Sent, body: SceneEntry, slack_nanos: u64| -> Result<(), Trouble> {
@@ -1926,8 +2007,7 @@ fn commit(
         }
     };
 
-    // The surface, and the node that will move on it. Both sent on both halves,
-    // which is what makes the difference between the halves exactly one thing.
+    // The surface, and the node that will move on it.
     send(
         &mut seen,
         SceneEntry::CreateNode(CreateNode {
@@ -1948,29 +2028,48 @@ fn commit(
         }),
         0,
     )?;
-
-    // And the events, or not. This `if` is the whole of the difference between
-    // the two halves of this command, and it is deliberately one line: a control
-    // that differed from its positive in two places would be a control for two
-    // things at once.
-    if half.hands_on() {
-        for kept in produced.kept.iter().take(produced.events) {
-            send(
-                &mut seen,
-                SceneEntry::SetTransform(SetTransform {
-                    node: POINTER_NODE,
-                    a_x65536: IDENTITY_X65536,
-                    b_x65536: 0,
-                    c_x65536: 0,
-                    d_x65536: IDENTITY_X65536,
-                    tx_x65536: kept.tx_x65536,
-                    ty_x65536: kept.ty_x65536,
-                }),
-                0,
-            )?;
-            seen.from_events = seen.from_events.saturating_add(1);
-        }
-    }
+    // And the sibling that never moves, after the pointer in paint order.
+    send(
+        &mut seen,
+        SceneEntry::CreateNode(CreateNode {
+            node: STILL_NODE,
+            parent: ROOT_NODE,
+            before: NO_NODE,
+            kind: kind::TRANSFORM,
+        }),
+        0,
+    )?;
+    // The transform the client commits for the pointer, which is the one the
+    // latch reads back out of the graph and patches: a shear at the origin —
+    // see this function's doc for why the origin, and `COMMITTED_A_X65536`
+    // for why a shear.
+    send(
+        &mut seen,
+        SceneEntry::SetTransform(SetTransform {
+            node: POINTER_NODE,
+            a_x65536: COMMITTED_A_X65536,
+            b_x65536: COMMITTED_B_X65536,
+            c_x65536: COMMITTED_C_X65536,
+            d_x65536: COMMITTED_D_X65536,
+            tx_x65536: COMMITTED_TX_X65536,
+            ty_x65536: COMMITTED_TY_X65536,
+        }),
+        0,
+    )?;
+    // The sibling's, which nothing may move.
+    send(
+        &mut seen,
+        SceneEntry::SetTransform(SetTransform {
+            node: STILL_NODE,
+            a_x65536: COMMITTED_A_X65536,
+            b_x65536: COMMITTED_B_X65536,
+            c_x65536: COMMITTED_C_X65536,
+            d_x65536: COMMITTED_D_X65536,
+            tx_x65536: STILL_TX_X65536,
+            ty_x65536: STILL_TY_X65536,
+        }),
+        0,
+    )?;
 
     send(&mut seen, SceneEntry::Commit(Commit { frame_token: FRAME_ONE }), COMMIT_SLACK_NANOS)?;
     Ok(seen)

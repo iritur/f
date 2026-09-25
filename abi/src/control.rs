@@ -96,6 +96,14 @@ pub mod op {
     /// has already passed is a kill, spelled the same way as a polite stop so
     /// that the simulator's *kill this driver at a seeded moment* is one opcode
     /// rather than two paths through the frame.
+    ///
+    /// `ext[0]` is zero, or a packed [`cause`](super::cause) word the submitter
+    /// **names** as the reason — which the frame carries onto the peer-gone
+    /// notice in place of `STOPPED` and does not otherwise read. Only a cause
+    /// [`cause::named_above`](super::cause::named_above) admits may be named; any
+    /// other non-zero word is refused `ARGUMENT/RESERVED_NOT_ZERO`, because the
+    /// other four are facts the frame observes and a submitter that could name
+    /// one would be forging an exception, an exit or a budget. RFC 0126.
     pub const STOP: u8 = 0x16;
     /// Derive a capability the submitter holds with `GRANT` into the table of
     /// the occupant of an endpoint. The powerbox's one operation.
@@ -236,6 +244,25 @@ pub mod notice {
 /// [`Cqe::timestamp`], which every completion already carries.
 pub const ORDER: [&str; 4] = ["slots ascending", "stop", "reclaim by core ascending", "grades"];
 
+/// The deadline that spells *at once* on an `op::STOP` stamped `now`: `now`
+/// itself, or one tick where `now` is zero.
+///
+/// **Because zero is [`crate::NO_DEADLINE`]**, and a stop carrying it is a
+/// promise nothing can refuse, which the frame refuses to make. So the first
+/// tick of a boot cannot name itself, and a supervisor asking for a kill on it
+/// was refused — which is what the first boot of `E3-B05e`'s stop did, with the
+/// log saying the supervisor had named no fate at all. One definition, used by
+/// the submitter that asks and by the frame that decides whether the deadline
+/// has arrived, so the two cannot disagree about what *at once* means. RFC 0126.
+///
+/// *What would reverse it:* a deadline encoding with room for tick zero — a
+/// `NO_DEADLINE` that is not a valid tick — at which point this is the identity.
+/// Unit: timer ticks, in the stamp's own count.
+#[must_use]
+pub const fn at_once(now: u64) -> u64 {
+    if now == crate::NO_DEADLINE { 1 } else { now }
+}
+
 /// Why a component's peer ended, as the `ext` of a peer-gone notice.
 ///
 /// RFC 0008 requires the cause to be carried and does not spell it. Three
@@ -310,6 +337,26 @@ pub mod cause {
     #[must_use]
     pub const fn known(cause: u64) -> bool {
         matches!(cause, FAULT | EXIT | STOPPED | RETIRED | TIMEDOUT)
+    }
+
+    /// May a submitter name this cause on `op::STOP`?
+    ///
+    /// **One of the five, and it is the one that is a judgement rather than an
+    /// observation.** [`TIMEDOUT`]'s own documentation draws the line: every
+    /// other cause is something the frame saw — an exception it took, a door
+    /// call it answered, a deadline it compared, a budget it spent — so a
+    /// supervisor naming one would be telling the occupant's peers a fact
+    /// nobody observed. A timeout is the supervisor's to name and the frame's
+    /// to carry, which is the whole split RFC 0123 makes; RFC 0126 is where it
+    /// gets a route onto the wire.
+    ///
+    /// *What would widen it:* a second judgement — a cause that is a supervisor's
+    /// reading of what an occupant published rather than an event the frame
+    /// took. It is an arm here and a row in RFC 0126, never a flag the submitter
+    /// sets.
+    #[must_use]
+    pub const fn named_above(cause: u64) -> bool {
+        matches!(cause, TIMEDOUT)
     }
 
     /// A word for a log.
@@ -886,6 +933,38 @@ mod tests {
             assert!(cause::known(cause));
             assert_ne!(cause::label(cause), "unknown");
         }
+    }
+
+    /// A stop may name the one cause that is a judgement, and none of the four
+    /// that are the frame's observations. Two-sided, because a set that admitted
+    /// nothing would pass the second half and a set that admitted everything
+    /// would pass the first.
+    #[test]
+    fn a_submitter_may_name_a_timeout_and_no_fact_the_frame_observes() {
+        assert!(cause::named_above(cause::TIMEDOUT));
+        for observed in [cause::FAULT, cause::EXIT, cause::STOPPED, cause::RETIRED] {
+            assert!(
+                !cause::named_above(observed),
+                "{} is the frame's to observe",
+                cause::label(observed)
+            );
+        }
+        // And nothing this build cannot read, which is R04 pointing the same way
+        // `known` does: zero is *no cause named*, not a cause.
+        for unknown in [0u64, 6, u64::MAX] {
+            assert!(!cause::named_above(unknown));
+        }
+    }
+
+    /// *At once* is the tick itself, except where the tick is the one value a
+    /// deadline cannot carry. The first boot of `E3-B05e`'s stop was refused on
+    /// exactly that tick.
+    #[test]
+    fn at_once_is_now_and_never_no_deadline() {
+        assert_eq!(super::at_once(0), 1);
+        assert_ne!(super::at_once(0), crate::NO_DEADLINE);
+        assert_eq!(super::at_once(1), 1);
+        assert_eq!(super::at_once(4096), 4096);
     }
 
     /// The publication order is fixed and is stated once.

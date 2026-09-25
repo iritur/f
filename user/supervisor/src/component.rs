@@ -165,9 +165,13 @@ fn supervise() -> u64 {
     // under a policy whose entire content is telling those two apart. The cause
     // has been in `Cqe::ext` since RFC 0008 and nothing read it.
     //
-    // Zero is *nothing died here*, which is safe for the reason it is safe on
-    // the routing page: zero is not a cause, so no notice can produce it.
-    let mut ended = [0u64; crate::routing::PLACES_MAX];
+    // **`None` is *nothing died here*, and zero is not.** This was a `0u64`
+    // sentinel on the argument that zero is not a cause, so no notice could
+    // produce it — and the frame posted zero on every death, so every death read
+    // as nothing and was refilled by the branch for a place never filled. RFC
+    // 0126. A notice with no cause on it is now a death decided on cause zero,
+    // which no policy restarts after.
+    let mut ended: [Option<u64>; crate::routing::PLACES_MAX] = [None; PLACES_MAX];
     while let Ok(Some(entry)) = control.take() {
         if !f_abi::control::is_notice(&entry) {
             // An answer to something submitted on a previous run, arriving now
@@ -198,7 +202,7 @@ fn supervise() -> u64 {
             if u64::from(row.endpoint) == entry.user_data
                 && let Some(slot) = ended.get_mut(index)
             {
-                *slot = entry.ext;
+                *slot = Some(entry.ext);
             }
         }
     }
@@ -215,20 +219,21 @@ fn supervise() -> u64 {
     // `None` on every boot that selected no generation, which is every boot with
     // no `f.root=` — the fault boots, the datapath boots, `cargo xtask user`.
     // Those run exactly the loop they ran before this landed.
-    let assembled = crate::assemble::assemble(&board, &control);
+    //
+    // A row a death arrived for is withheld from it: that is the second
+    // question, and answering it by starting the member again is a restart no
+    // policy decided. `assemble::Spawning::new` has the boot that showed it.
+    let mut withheld = [false; PLACES_MAX];
+    for (slot, death) in withheld.iter_mut().zip(ended.iter()) {
+        *slot = death.is_some();
+    }
+    let assembled = crate::assemble::assemble(&board, &control, &withheld);
 
     // --- the decision --------------------------------------------------------
-    let mut said = [(crate::policy::Verdict::Leave, crate::policy::Budget::default()); PLACES_MAX];
+    let mut said = [crate::routing::Said::default(); PLACES_MAX];
     let mut submitted = assembled.as_ref().map_or(0, |it| it.submitted);
     let mut refused = 0;
     for (index, row) in board.rows.iter().enumerate().take(board.places) {
-        let mut budget = row.budget;
-        // A place nothing died in has nothing to decide about — except on the
-        // first consultation, where the frame has handed over a place it built
-        // and deliberately never filled. Those two are told apart by whether a
-        // death arrived, and by the tally being untouched. A flag on the board
-        // saying *fill this* would be the frame deciding and this component
-        // typing, which is the thing RFC 0008 refuses.
         // A row the assembler already submitted a spawn for is not a row with
         // nothing in it. Without this the loop below would see an untouched
         // tally, read it as *the frame built this place and never filled it*,
@@ -242,29 +247,56 @@ fn supervise() -> u64 {
         // place empty and failed with `a spawn named a place it may not occupy`.
         let taken =
             assembled.as_ref().and_then(|it| it.filled.get(index)).copied().unwrap_or(false);
-        let verdict = if taken {
-            crate::policy::Verdict::Leave
-        } else if let Some(packed) = ended.get(index).copied()
-            && packed != 0
-        {
-            // The cause the frame put on the notice, and not this component's
-            // guess at one. A stop still never restarts — it is this
-            // supervisor's own act — but now because the *word* says `STOPPED`
-            // rather than because a boolean was hard-coded to say fault.
-            crate::policy::decide(
-                &declared(),
-                &mut budget,
-                f_abi::control::cause::of(packed),
-                board.now,
-            )
-        } else if budget == crate::policy::Budget::default() {
-            crate::policy::Verdict::Restart(0)
-        } else {
-            crate::policy::Verdict::Leave
+        let facts = crate::policy::Facts {
+            ended: ended.get(index).copied().flatten(),
+            occupied: row.occupant != 0,
+            taken,
+            budget: row.budget,
+            liveness: row.liveness,
+            seen: row.seen,
         };
+        // Everything this run does about the row is `policy::answer`'s, which
+        // says why the four cases are in the order they are. What is left here
+        // is putting its answer on the ring and on the board.
+        //
+        // Decided against **the place's own manifest**, as the frame copied it,
+        // and no longer against a function returning `user/store`'s numbers: the
+        // compositor declares a budget of eight and a store of three, and a
+        // timeout decided on the store's would be a restart line naming one
+        // manifest's number over another's decision.
+        let answered = crate::policy::answer(&row.policy.record(), &facts, board.now);
         if let Some(slot) = said.get_mut(index) {
-            *slot = (verdict, budget);
+            *slot = crate::routing::Said {
+                verdict: answered.verdict.to_wire(),
+                budget: answered.budget,
+                cause: facts.ended.unwrap_or(0),
+                heard: row.liveness,
+                seen: answered.seen,
+            };
         }
+        // The fate, on the one route a supervisor has to end an occupant: a stop
+        // against the place's endpoint, whose deadline is this consultation's
+        // own tick — already reached, so a kill, which `op::STOP` spells the same
+        // way as a polite stop on purpose. `control::at_once` because the tick
+        // may be zero and zero is no deadline at all; the first boot of this
+        // wrote `board.now` and was refused. The word goes in `ext[0]` and the
+        // frame carries it onto the notice that tells the place's holders why;
+        // RFC 0126 is the argument that it may, and `cause::named_above` is the
+        // one word it will accept there.
+        if let Some(named) = answered.stop {
+            let entry = f_abi::Sqe {
+                opcode: f_abi::control::op::STOP,
+                cap: row.endpoint,
+                user_data: index as u64 + 1,
+                deadline: f_abi::control::at_once(board.now),
+                ext: [named, 0],
+                ..f_abi::Sqe::ZERO
+            };
+            if control.submit(entry).is_err() {
+                refused += 1;
+            }
+        }
+        let verdict = answered.verdict;
         if !matches!(verdict, crate::policy::Verdict::Restart(_)) {
             continue;
         }
@@ -296,38 +328,13 @@ fn supervise() -> u64 {
     if refused == 0 { DONE } else { i64::from(RING_FULL) as u64 }
 }
 
-/// The manifest fields [`crate::policy::decide`] reads.
-///
-/// # Why a supervisor does not read the manifest itself
-///
-/// Because it has no way to. A manifest is compiled into a record beside the
-/// component's image (RFC 0030) and lives in a boot module the frame maps for
-/// itself; a supervisor holds a content *hash*, which names a manifest and does
-/// not reach it. Handing the whole record across would be handing a component a
-/// page it did not ask for, and every field in it but four is the frame's
-/// business.
-///
-/// **So this is a stated gap rather than a helper**, and it is a function with
-/// this comment rather than four literals inline so that it is greppable. What
-/// it returns is the policy `user/store` declares, which is the manifest behind
-/// every place this boot supervises — so it is right today and is right by
-/// coincidence.
-///
-/// *Reversal:* a row that carries the four fields. It costs the board 32 bytes
-/// and the frame four writes it already has the values for, and it is not here
-/// because the increment that needs it is the one where two supervised places
-/// declare *different* policies. This boot has one manifest behind all of them,
-/// and a field that cannot yet differ is a field nothing tests.
-fn declared() -> f_abi::manifest::Record {
-    f_abi::manifest::Record {
-        restart: f_abi::manifest::restart::ON_FAULT,
-        max_restarts: 3,
-        budget_window_ticks: 3000,
-        backoff_first_ticks: 8,
-        backoff_max_ticks: 64,
-        ..f_abi::manifest::Record::EMPTY
-    }
-}
+// `declared()` was here: the four manifest fields `policy::decide` reads, as a
+// function returning `user/store`'s, because a supervisor holds a content hash
+// and not the manifest behind it. Its own comment said it was right by
+// coincidence and named its reversal — *a row that carries the four fields, the
+// increment where two supervised places declare different policies*. `E3-B05e`
+// supervises the compositor, which declares eight restarts in sixty thousand
+// ticks, so the reversal fell due and was paid: `crate::routing::at::POLICY`.
 
 /// What this component ends with when it could not put an entry on its own ring.
 ///

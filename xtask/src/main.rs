@@ -533,6 +533,33 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // this path comes out of, so a frame that ran it would be a frame deciding where
     // the pointer is.
     ("kernel/", "Driver::", "user/virtio-input/"),
+    // The sixth, and the first about a decision rather than a datapath. RFC 0008
+    // puts restart above the frame and RFC 0123 puts a timeout's judgement there
+    // too; `E3-B05e`'s delivery then gave the frame two words an occupant
+    // published about itself to copy onto a supervisor's row. The day the frame
+    // calls `f_supervisor::policy` — `fate`, `decide`, `answer`, or builds a
+    // `Liveness` to hand one of them — it has moved the file and kept the
+    // decision, which is RFC 0123's own reversal condition. The third field keeps
+    // the rule from being satisfied by a module nothing defines. RFC 0126.
+    //
+    // **The module's name and not a path into it**, because the path was beaten
+    // the first time it was attacked: this row read `policy::`, and
+    // `use f_supervisor::policy as judge;` then `judge::fate` in `kernel/` left
+    // `lint-datapath: ok`. Every route to a module spells its name once, in a
+    // `use` or a path, and comments and strings are stripped before this looks;
+    // the cost is that the frame may not call anything of its own `policy` in
+    // code, which is why `write_board`'s local is `declared`.
+    ("kernel/", "policy", "user/supervisor/"),
+    // The seventh, and the first whose needle is not a component's type but the
+    // decoder a component calls. `E3-B04g` took the input path's consumer out
+    // of the frame: `kernel/src/input.rs` decoded every entry the driver
+    // submitted until then, and the compositor decodes them now. The day the
+    // frame decodes an input entry again it is the consumer again — a courier
+    // holding events, whatever it does with them — and the third field keeps
+    // the rule honest from the other side: the day `user/compositor` stops
+    // decoding, nothing is the consumer and the row goes red for that too.
+    // RFC 0125.
+    ("kernel/", "Event::decode(", "user/compositor/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -12087,6 +12114,13 @@ const INPUT_MARKER: &str = "input inject";
 /// The line carrying where the driver's accumulator ended up.
 const INPUT_POINTER: &str = "input pointer";
 
+/// The line carrying the compositor's latch: the transform the client
+/// committed and the one that was submitted, both ends and not their difference.
+///
+/// `E3-B01i`'s boot half. The difference is this process's to take, because
+/// this process is the only thing that holds the motion it is compared with.
+const INPUT_LATCH: &str = "input latch";
+
 /// The byte the harness writes back when it has finished injecting.
 ///
 /// One byte on the serial port, which the kernel polls for. Any byte would do
@@ -12148,12 +12182,30 @@ const INPUT_SCALE: i64 = 65_536;
 /// The sum is the whole of what this harness knows and the kernel does not: it
 /// prints where its driver's accumulator ended up and holds no copy of this
 /// list, and this process holds no copy of the accumulator. Unit: device pixels.
+///
+/// **And the list reverses along x inside the predictor's window** — out by ten,
+/// back by six — which is why the compositor's latch holds the newest position
+/// rather than extrapolating a velocity that has changed sign, and why *latched
+/// minus committed* is exactly this list's sum. A steady motion here would make
+/// that equality the motion plus a lead, and the kernel's verdict refuses an
+/// extrapolated latch rather than letting this check test the predictor.
+/// `user/compositor/src/latch.rs`'s `the_boots_motion_is_held_and_not_extrapolated`
+/// carries a copy of this list for that reason, and the boot is what catches
+/// the two drifting apart.
 const MOTIONS: &[(i32, i32)] = &[(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
 
 /// The two halves, and the second is what makes the first mean anything.
 const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
-    ("deliver", "every event the device produced reaches a compositor's graph"),
-    ("withheld", "the same events, decoded and not handed on, so the graph must not move"),
+    (
+        "deliver",
+        "the compositor holds the other end of the driver's ring, drains it itself, and \
+         latches the pointer by exactly the motion injected",
+    ),
+    (
+        "withheld",
+        "the same events on the same ring, with the ring not connected, so the compositor \
+         must decline every frame",
+    ),
 ];
 
 /// Send the emulator the pointer motions this check is made of.
@@ -12367,6 +12419,39 @@ fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
     Ok((x, y, motions))
 }
 
+/// A translation off the kernel's latch line, `(x, y)`.
+/// Unit: fixed-point units of 1/65536 device pixel.
+type Translation = (i64, i64);
+
+/// The committed and the latched translation off the kernel's latch line.
+///
+/// By position, for [`input_pointer`]'s reason. The line is
+/// `input latch committed x <cx> y <cy> latched x <lx> y <ly> ...`, and the
+/// kernel's own comment says its first twelve words are a format.
+///
+/// # Errors
+///
+/// A log with no such line, or one whose numbers are not numbers.
+/// Unit: fixed-point units of 1/65536 device pixel, as `(committed, latched)`.
+fn input_latch(log: &str) -> Result<(Translation, Translation), String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(INPUT_LATCH))
+        .ok_or("the boot printed no latch line")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize, word: &str| -> Result<i64, String> {
+        // The word before each number is checked, so a line whose format moved
+        // is a refusal naming the line rather than a number read from the wrong
+        // place.
+        if fields.get(index.wrapping_sub(1)).copied() != Some(word) {
+            return Err(format!("the latch line is not in the format this reads: {line}"));
+        }
+        let text = fields.get(index).copied().ok_or_else(|| format!("short latch line: {line}"))?;
+        text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
+    };
+    Ok(((at(4, "x")?, at(6, "y")?), (at(9, "x")?, at(11, "y")?)))
+}
+
 /// The exit criterion of `E3-B04d` and the run half of `E3-B04a`, as a command.
 ///
 /// # What it asserts, and why one of the assertions is not the kernel's
@@ -12386,12 +12471,19 @@ fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
 /// is the property `cargo xtask gpu` gets from a screen capture and this one
 /// gets from having been the thing that moved the mouse.
 ///
-/// The control is `withheld`: the identical boot with the frame's hand-on
-/// removed. The events are produced, drained and decoded in that run too — the
-/// kernel's verdict requires it — and the compositor must still apply exactly
-/// the two deltas the boot's own setup sends. Without it, the delivering half's
-/// edit count would establish that a compositor applies deltas rather than that
-/// these came off a device.
+/// Since `E3-B01i`'s boot half closed there is a second comparison of the same
+/// kind: the compositor publishes the transform the client committed and the
+/// one it latched, and this process subtracts them and requires **exactly** the
+/// motion it injected. The compositor took those positions off the driver's ring
+/// itself, with the frame holding neither end — `E3-B04g` — so the equality is
+/// between a list in this process and a latch at ring 3 with nothing in between
+/// that could have been told the answer.
+///
+/// The control is `withheld`: the identical boot with the ring not connected.
+/// The events are produced and submitted in that run too — the kernel's verdict
+/// requires it — and the compositor must decline every frame. Without it, a
+/// latch on the delivering half would establish that a compositor latches rather
+/// than that it latched these.
 ///
 /// # Errors
 ///
@@ -12429,9 +12521,10 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                 return Err(format!(
                     "the kernel refused to finish after `input={name}`. Either the device \
                      produced nothing, or the driver did not time every report exactly once, \
-                     or an entry reached this frame with no reading on it, or the compositor \
-                     applied a different number of deltas than the frame handed it. The \
-                     serial log above says which."
+                     or what the compositor drained off the driver's ring is not what the \
+                     driver says it sent, or the compositor latched on a half that gave it \
+                     no ring or failed to latch on the one that did. The serial log above \
+                     says which."
                 ));
             }
             Ending::Exited(0) => {
@@ -12486,16 +12579,46 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                 asked_y * INPUT_SCALE,
             ));
         }
+
+        // `E3-B01i`: *the latched transform differs from the committed one by
+        // exactly the motion injected*. Two equalities against the list this
+        // process sent, on the delivering half; the withholding half latches
+        // nothing, which the kernel's own verdict requires, and a subtraction of
+        // two unwritten words would be a comparison of zeroes.
+        if *name == "deliver" {
+            let ((cx, cy), (lx, ly)) = input_latch(&watched.log)?;
+            println!(
+                "input={name}: the compositor latched ({lx}, {ly}) over a committed ({cx}, {cy}), \
+                 a difference of ({}, {}) in units of 1/{INPUT_SCALE} device pixel",
+                lx - cx,
+                ly - cy,
+            );
+            if lx - cx != asked_x * INPUT_SCALE || ly - cy != asked_y * INPUT_SCALE {
+                return Err(format!(
+                    "`input={name}` latched a transform that differs from the committed one by \
+                     ({}, {}), and this harness injected ({}, {}). The compositor took every \
+                     position off the driver's ring itself and the frame relayed none, so a \
+                     difference is the ring, the decoder, the predictor, the latch, or the \
+                     transform the client committed — the kernel's `input cross` and `input \
+                     ring` lines say whether it was the first two, and its `input latch` line \
+                     shows the committed end.",
+                    lx - cx,
+                    ly - cy,
+                    asked_x * INPUT_SCALE,
+                    asked_y * INPUT_SCALE,
+                ));
+            }
+        }
     }
 
     if all {
         println!(
             "\nboth halves held: a pointer moved outside the machine, one driver at ring 3 \
-             timed each report exactly once and submitted what it saw unasked, this frame \
-             drained and decoded every entry, and a compositor at ring 3 applied one \
-             transform per event and said so in the state tree it publishes; the identical \
-             boot with the hand-on removed produced and decoded the same events and left \
-             the graph holding nothing but its own two setup nodes"
+             timed each report exactly once and submitted what it saw unasked, a compositor \
+             at ring 3 took every entry off that ring itself - the frame took none - decoded \
+             and folded them into the driver's own word, and latched the pointer by exactly \
+             the motion this harness injected; the identical boot with the ring not connected \
+             submitted the same events and the compositor declined every frame"
         );
     }
     Ok(())
@@ -13108,6 +13231,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
                 "`compositor={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `compositor` component file."
             ));
         }
+        liveness_held(name, &log)?;
     }
 
     if all {
@@ -13137,6 +13261,263 @@ compositor: ok — all five halves held. A component held the machine's scene gr
         );
     }
     Ok(())
+}
+
+/// What `E3-B05e` requires of the compositor's place after each half.
+///
+/// # Why this is here and not in the kernel's verdict
+///
+/// Because the comparison it makes is the one the frame may not. RFC 0123's
+/// reversal condition is a line in `kernel/` that compares an occupant's
+/// readings against anything; the frame copies two words onto a supervisor's
+/// row and prints what the supervisor says it read, and this is where the
+/// supervisor's account is held against the numbers the compositor's own tree
+/// published a stage earlier. Two derivations of one number: the kernel's
+/// compositor stage prints the tree at fixed indices, and `main::liveness_of`
+/// picks the carried words by node id.
+///
+/// # Why three answers and five halves
+///
+/// `serve` is the exit: its compositor gave its last frame up with a wait still
+/// outstanding, and the supervisor must name the timeout and restart the place.
+/// `starved` and `wake` are the controls, and each refuses a different wrong
+/// rule — `starved` abandoned nothing, so a policy that fired on every reading
+/// goes red there; `wake` abandoned its middle frame and has nothing
+/// outstanding, so a policy that forgot the outstanding half restarts a
+/// compositor for a late frame and goes red there. `wake` is the one that
+/// carries weight: `starved`'s component writes none of its nodes, so its two
+/// words are the manifest's declared zeroes rather than a zero it computed —
+/// `kernel/src/main.rs`'s `liveness_of` says so at the carry. `mute` and `floorless` never
+/// stood the component up, so a reading carried for them is a reading nobody
+/// published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Liveness {
+    /// Stopped for a timeout and restarted under the place's own policy.
+    Restarted,
+    /// Read, and left running: no fate named.
+    Left,
+    /// No reading carried at all.
+    NotCarried,
+}
+
+/// Which of the three a half must show. R04: a half this does not name is
+/// refused, so a sixth half has to say what its reading is for.
+fn liveness_expected(half: &str) -> Result<Liveness, String> {
+    match half {
+        "serve" => Ok(Liveness::Restarted),
+        "starved" | "wake" => Ok(Liveness::Left),
+        "mute" | "floorless" => Ok(Liveness::NotCarried),
+        other => Err(format!(
+            "`compositor={other}` is a half `liveness_expected` does not name. Say whether it\n\
+             stands the component up — and so carries a liveness reading to the supervisor —\n\
+             and what the supervisor must do with it; `kernel/src/main.rs`'s `liveness_of` is\n\
+             the other half of the same answer."
+        )),
+    }
+}
+
+/// Hold one half's log to what [`liveness_expected`] says of it.
+fn liveness_held(half: &str, log: &str) -> Result<(), String> {
+    liveness_verdict(liveness_expected(half)?, log)
+        .map_err(|why| format!("`compositor={half}`, E3-B05e: {why}"))
+}
+
+/// The digits immediately after `marker` in `text`.
+fn digits_after(text: &str, marker: &str) -> Option<u64> {
+    let tail = text.get(text.find(marker)? + marker.len()..)?;
+    let end = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+    tail.get(..end)?.parse().ok()
+}
+
+/// The pure half of [`liveness_held`], so that fixtures can drive it.
+fn liveness_verdict(expected: Liveness, log: &str) -> Result<(), String> {
+    let line = log.lines().find(|line| line.starts_with("  liveness      place compositor"));
+    let ended = log.lines().find(|line| line.starts_with("  timeout       place compositor"));
+    let restart = log.lines().find(|line| line.starts_with("  restart       place compositor"));
+    if expected == Liveness::NotCarried {
+        if line.is_some() || ended.is_some() || restart.is_some() {
+            return Err("a liveness reading reached the supervisor from a half that never stood \
+                        the component up, so it is a reading nobody published — \
+                        `main::liveness_of` should have carried none"
+                .into());
+        }
+        return Ok(());
+    }
+    let line = line.ok_or(
+        "no `liveness` line for the compositor's place: the reading the compositor published \
+         never reached a supervisor's row",
+    )?;
+    let tree = log
+        .lines()
+        .find(|line| line.contains("compositor    state tree waits outstanding "))
+        .ok_or("no `state tree waits outstanding` line to hold the supervisor's account against")?;
+    let published = (
+        digits_after(tree, "waits outstanding ").ok_or("the tree line carries no waits")?,
+        digits_after(tree, "timeout(s) ").ok_or("the tree line carries no timeouts")?,
+    );
+    let heard_at =
+        line.find("the supervisor heard ").ok_or("the liveness line says nothing heard")?;
+    let heard_part = line.get(heard_at..).unwrap_or("");
+    let heard = (
+        digits_after(heard_part, "waits ").ok_or("the liveness line carries no heard waits")?,
+        digits_after(heard_part, "abandoned ").ok_or("the liveness line carries no heard count")?,
+    );
+    // **The check the `decide` finding asks for.** The words the supervisor
+    // decided on are the words the compositor published, or the frame carried
+    // the wrong reading, or the supervisor read the wrong one — and a policy fed
+    // the wrong word is a policy fed a constant with extra steps.
+    if heard != published {
+        return Err(format!(
+            "the supervisor heard waits {}, abandoned {} and the compositor's own tree says \
+             waits {}, timeouts {}. Either the frame copied the wrong nodes onto the row \
+             (`kernel/src/main.rs`'s `liveness_of`, `kernel/src/component.rs`'s `write_board`) \
+             or the supervisor read the wrong offsets (`user/supervisor/src/routing.rs`).",
+            heard.0, heard.1, published.0, published.1
+        ));
+    }
+    match expected {
+        Liveness::Restarted => {
+            if !line.contains("named timed out") {
+                return Err(format!(
+                    "the compositor published waits {}, timeouts {} — a wait outstanding on a \
+                     frame it gave up — and the supervisor named no timeout for it",
+                    published.0, published.1
+                ));
+            }
+            // By the word on the line and not by the line: an occupant ended on a
+            // stop that carried `STOPPED` in place of the named cause prints this
+            // line too, and the first version of this check then said *ended for a
+            // timeout* over a log that said `stopped`.
+            match ended {
+                None => {
+                    return Err("the supervisor named a timeout and the compositor's occupant \
+                                was never ended for it"
+                        .into());
+                }
+                Some(ended) if !ended.contains("supervisor's word — timed out") => {
+                    return Err(format!(
+                        "the supervisor named a timeout and the occupant ended by another \
+                         cause, so the frame did not carry the word it was handed:\n{ended}"
+                    ));
+                }
+                Some(_) => {}
+            }
+            match restart {
+                Some(restart) if restart.contains("heard timed out and said restart") => Ok(()),
+                // Refilled, and not by the verdict: the place has an occupant again
+                // and the policy that heard the timeout did not say restart. That is
+                // RFC 0094's assembler starting a member into a row a death emptied,
+                // which is what the first boot of this did.
+                Some(restart) if restart.contains("heard timed out and said") => Err(format!(
+                    "the compositor's place was refilled and the policy that heard the timeout \
+                     did not say restart, so something other than the policy refilled it:\n\
+                     {restart}"
+                )),
+                Some(restart) => Err(format!(
+                    "the compositor's place was restarted, and not for the timeout the \
+                     notice carried:\n{restart}"
+                )),
+                None => Err("the compositor's occupant was ended for a timeout and its place \
+                             was not restarted under `on_fault`"
+                    .into()),
+            }
+        }
+        Liveness::Left => {
+            if !line.contains("named no fate") || ended.is_some() || restart.is_some() {
+                return Err(format!(
+                    "the compositor published waits {}, timeouts {}, which is not a wait \
+                     outstanding on an abandoned frame, and the supervisor acted on it anyway. \
+                     A policy that fires here fires for something other than a timeout.",
+                    published.0, published.1
+                ));
+            }
+            Ok(())
+        }
+        Liveness::NotCarried => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::{Liveness, liveness_expected, liveness_verdict};
+
+    const TREE: &str =
+        "  compositor    state tree waits outstanding 1, timeline reached 1, timeout(s) 1; x\n";
+
+    fn stuck(heard: &str, tail: &str) -> String {
+        format!(
+            "{TREE}  liveness      place compositor epoch 0: the frame copied waits 1, abandoned \
+             1 from the tree its component published earlier in this boot; the supervisor heard \
+             {heard} and named timed out, 1 frame(s) abandoned — the frame answered 1\n{tail}"
+        )
+    }
+
+    const ENDED: &str =
+        "  timeout       place compositor epoch 0 ended on the supervisor's word — timed out\n";
+    const RESTARTED: &str = "  restart       place compositor under on_fault — the supervisor heard \
+                             timed out and said restart; restart 1 of 8\n";
+
+    /// The exit as a log, and each of the ways it can be missing one part.
+    #[test]
+    fn a_stuck_reading_needs_the_timeout_the_stop_and_the_restart() {
+        let whole = stuck("waits 1, abandoned 1", &format!("{ENDED}{RESTARTED}"));
+        assert_eq!(liveness_verdict(Liveness::Restarted, &whole), Ok(()));
+        assert!(
+            liveness_verdict(Liveness::Restarted, &stuck("waits 1, abandoned 1", ENDED)).is_err()
+        );
+        assert!(
+            liveness_verdict(Liveness::Restarted, &stuck("waits 1, abandoned 1", RESTARTED))
+                .is_err()
+        );
+        let wrong = RESTARTED.replace("timed out", "fault");
+        let refused = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{ENDED}{wrong}")),
+        );
+        assert!(refused.is_err(), "a restart for some other cause is not the exit");
+
+        // The two a boot actually produced by mutation: the stop carrying
+        // `STOPPED` in place of the named word, and the assembler refilling the
+        // row while the policy said leave.
+        let stopped = ENDED.replace("— timed out", "— stopped");
+        let why = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{stopped}{RESTARTED}")),
+        )
+        .expect_err("ended by another cause");
+        assert!(why.contains("ended by another cause"), "{why}");
+        let left = RESTARTED.replace("said restart", "said leave");
+        let why = liveness_verdict(
+            Liveness::Restarted,
+            &stuck("waits 1, abandoned 1", &format!("{ENDED}{left}")),
+        )
+        .expect_err("refilled by something other than the policy");
+        assert!(why.contains("something other than the policy"), "{why}");
+    }
+
+    /// **The check attacked**: a supervisor that heard a word the tree does not
+    /// say is refused even when everything it then did looks right.
+    #[test]
+    fn a_heard_word_that_is_not_the_published_one_is_refused() {
+        let swapped = stuck("waits 1, abandoned 3", &format!("{ENDED}{RESTARTED}"));
+        let why =
+            liveness_verdict(Liveness::Restarted, &swapped).expect_err("heard is not published");
+        assert!(why.contains("abandoned 3"), "{why}");
+    }
+
+    /// The controls: a restart on a half whose reading is not stuck is red, and
+    /// a reading carried for a half that never ran is red.
+    #[test]
+    fn a_control_that_restarts_or_a_half_that_never_ran_is_refused() {
+        let late = "  compositor    state tree waits outstanding 0, timeline reached 3, timeout(s) 1\n\
+                    \x20 liveness      place compositor epoch 0: …; the supervisor heard waits 0, \
+                    abandoned 1 and named no fate — the frame answered 0\n";
+        assert_eq!(liveness_verdict(Liveness::Left, late), Ok(()));
+        assert!(liveness_verdict(Liveness::Left, &format!("{late}{ENDED}{RESTARTED}")).is_err());
+        assert!(liveness_verdict(Liveness::NotCarried, late).is_err());
+        assert_eq!(liveness_verdict(Liveness::NotCarried, TREE), Ok(()));
+        assert!(liveness_expected("a-sixth-half").is_err());
+    }
 }
 
 /// `E3-B06c`'s two halves, and neither is the other's control in the ordinary
@@ -28812,6 +29193,30 @@ mod tests {
             retired.is_empty(),
             "`MINTS` is empty on purpose: the address space refuses what this used to look for"
         );
+    }
+
+    #[test]
+    fn the_frame_may_not_reach_the_supervisors_policy_by_any_spelling() {
+        // RFC 0126's row, attacked the way it was first beaten: an alias leaves
+        // no `policy::` in the frame, and the row read `policy::` until a
+        // mutation in `kernel/` made that `lint-datapath: ok`. Every spelling
+        // below is a route to `f_supervisor::policy::fate`; the last line is the
+        // prose and string exclusions, so the rule does not fire on the sentence
+        // explaining it.
+        let row = crate::NOT_THE_FRAME
+            .iter()
+            .find(|(prefix, _, defines)| *prefix == "kernel/" && *defines == "user/supervisor/")
+            .expect("RFC 0126's row");
+        for route in [
+            "fn f() { let _ = f_supervisor::policy::fate; }\n",
+            "use f_supervisor::policy as judge;\nfn f() { let _ = judge::fate; }\n",
+            "use f_supervisor::{routing, policy as judge};\n",
+            "use f_supervisor as s;\nfn f() { let _ = s::policy::fate; }\n",
+        ] {
+            assert!(!frame_findings("kernel/x.rs", route, row.1).is_empty(), "{route}");
+        }
+        let prose = "// `f_supervisor::policy` decides\nfn f() { let _ = \"policy\"; }\n";
+        assert!(frame_findings("kernel/x.rs", prose, row.1).is_empty());
     }
 
     #[test]

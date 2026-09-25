@@ -193,6 +193,14 @@ fn serve() -> ! {
     // into these buffers whenever the user acts, and the frame is about to take
     // the memory back.
     driver.stop();
+    // The fold, onto the ring after the last event, for a consumer that is not
+    // the frame. `crate::driver::Outbound::attest` is the argument. After the
+    // device is stopped, so that nothing can be submitted behind it; and on
+    // every ending that has a driver, not only `TOLD`, because a consumer
+    // checking a run that ended some other way is owed the word for what did
+    // cross. A ring with no room is published as *not attested* rather than
+    // retried — the consumer then says it found none, which is true.
+    let _ = driver.attest();
     report(&board, Some(&driver), outcome);
     end(outcome)
 }
@@ -331,6 +339,15 @@ fn report(board: &Window, driver: Option<&crate::driver::Driver>, outcome: u64) 
         let crossing = driver.crossing();
         let _ = board.write64(reported::CROSSING, crossing.word());
         let _ = board.write64(reported::CROSSED, crossing.absorbed());
+        let _ = board.write64(reported::ATTESTED, u64::from(driver.attested()));
+        let _ = board.write64(reported::MOTIONS, driver.motions());
+        // Two's complement in a word, for the reason `f_compositor::routing`
+        // gives about its own pointer words: a page holds words and not
+        // integers with opinions, and a pointer left of the origin is an
+        // ordinary place rather than an enormous one.
+        let (x_x65536, y_x65536) = driver.at();
+        let _ = board.write64(reported::POINTER_X_X65536, i64::from(x_x65536) as u64);
+        let _ = board.write64(reported::POINTER_Y_X65536, i64::from(y_x65536) as u64);
     }
     let _ = board.write64(reported::OUTCOME, outcome);
     let _ = board.write64(reported::MAGIC, routing::MAGIC);

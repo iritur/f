@@ -67,8 +67,9 @@
 //! which `crate::pacing::scanout_after` computed from `routing::at::TICK_NANOS`
 //! — the frame's clock, written into this component's page — and the display's
 //! declared period. No question about *when the pointer moved* is answered by
-//! it; every such answer in this module is [`Reading::at_nanos`], which is the
-//! driver's stamp carried across two rings unchanged.
+//! it; every such answer in this module is the driver's stamp, carried across
+//! one ring unchanged and rebuilt in [`LateLatch::drained`] from the decoded
+//! entry's own field — or, in a host test, [`Reading::at_nanos`].
 //!
 //! *What would reverse this:* a display that reports its own scanout instant. On
 //! that day the number arrives off a wire like the stamp does, [`Aim`] holds
@@ -81,7 +82,7 @@
 //! nanoseconds, and an ordinal is a count. RFC 0004. The only time this module
 //! holds is a number somebody else read.
 
-use f_abi::input::NOT_STAMPED;
+use f_abi::input::{Entry, Event, NOT_STAMPED};
 use f_abi::scene::{NO_NODE, SetTransform};
 use f_input::predict::{Predictor, Sample};
 use f_input::stamp::StampNanos;
@@ -218,6 +219,29 @@ pub struct Latched {
     /// predictor claimed.
     /// Unit: none — a flag.
     extrapolated: bool,
+    /// Everything in the graph a renderer could see, folded, with this node's
+    /// two translations left out — taken before the patch.
+    ///
+    /// **`E3-B01i`'s *and by nothing else*, in a form a boot can carry.** The
+    /// host tests hold that clause by encoding the whole frame twice and
+    /// comparing bytes; a running component cannot, because the encoder's
+    /// buffer is `f_scene::encode::ENCODING_MAX` — 83 992 bytes — and this
+    /// component's heap is its graph and its batch with 6 528 bytes to spare
+    /// (`routing::HEAP_BYTES` less `HELD_BYTES` and `HEAP_OVERHEAD`, measured
+    /// on 2026-09-25 rather than read off a comment). So
+    /// the latch folds every field of every node the encoding carries, walked
+    /// the way the encoding walks, with the two numbers the latch is allowed to
+    /// change masked out; [`Latched::unmoved_after`] is the same fold after the
+    /// patch, and the two must be one word. [`unmoved`] is the argument for
+    /// what is covered and what is not.
+    /// Unit: none — a checksum.
+    unmoved_before: u64,
+    /// The same fold, taken after the patch. Unit: none — a checksum.
+    unmoved_after: u64,
+    /// How many nodes the second fold walked, so that a fold of an empty walk —
+    /// which agrees with itself about nothing — is a number a reader can refuse.
+    /// Unit: nodes.
+    walked: u32,
 }
 
 impl Latched {
@@ -267,6 +291,27 @@ impl Latched {
     #[must_use]
     pub const fn extrapolated(&self) -> bool {
         self.extrapolated
+    }
+
+    /// The graph, folded with this node's translation masked, before the patch.
+    /// Unit: none — a checksum.
+    #[must_use]
+    pub const fn unmoved_before(&self) -> u64 {
+        self.unmoved_before
+    }
+
+    /// The same, after the patch. Equal to [`Latched::unmoved_before`] or the
+    /// latch changed something other than the two numbers it is allowed to.
+    /// Unit: none — a checksum.
+    #[must_use]
+    pub const fn unmoved_after(&self) -> u64 {
+        self.unmoved_after
+    }
+
+    /// How many nodes the fold after the patch walked. Unit: nodes.
+    #[must_use]
+    pub const fn walked(&self) -> u32 {
+        self.walked
     }
 
     /// How far the latch moved the node along x.
@@ -334,8 +379,9 @@ pub struct LateLatch {
     /// stale report is a position somebody reported twice, and an unstamped one
     /// is **nobody having reported anything** — the state of a page the frame
     /// has not written. `f_abi::input::Event::decode` refuses the same value on
-    /// the wire for the same reason, and this is that refusal at the one place
-    /// a position reaches this component without crossing a ring.
+    /// the wire for the same reason, and this is that refusal again at the two
+    /// doors into this module, so that neither a hand-built event nor a
+    /// harness's reading can put a page of zeroes into the predictor.
     /// Unit: readings.
     unstamped: u64,
     /// Frames that carried a latch. Unit: frames.
@@ -422,11 +468,42 @@ impl LateLatch {
         // why this line is written this way, and `lint-stamp` is what keeps it
         // written this way.
         let at = StampNanos::from_wire_nanos(reading.at_nanos);
-        let taken = self.predictor.observe(Sample {
-            at,
-            x_x65536: reading.x_x65536,
-            y_x65536: reading.y_x65536,
-        });
+        self.sample(Sample { at, x_x65536: reading.x_x65536, y_x65536: reading.y_x65536 })
+    }
+
+    /// One entry this component took off the input ring itself, `E3-B04g`.
+    ///
+    /// **The route a position reaches this component by**, and the reason this
+    /// is a second entry point rather than a caller building a [`Reading`]: the
+    /// reading is rebuilt here, from the decoded event's own field passed
+    /// straight into `from_wire_nanos`, which is RFC 0124's third step
+    /// verbatim. A [`Reading`] in between would be a copy of the stamp into a
+    /// struct this module chose, and the whole of `lint-stamp`'s argument rule
+    /// is that the number reaching the constructor is the number that crossed.
+    ///
+    /// `false` for an event that carries no position — a key, a button, a
+    /// scroll — and for one the predictor refused as not newer than what it
+    /// holds, which is counted in [`LateLatch::stale`] and is exactly how a
+    /// relay that duplicated or reordered motion shows up here.
+    ///
+    /// The unstamped guard is repeated although `Event::decode` has already
+    /// refused `NOT_STAMPED`, and the repetition is deliberate: a caller that
+    /// built an [`Event`] by hand rather than by decoding one would otherwise
+    /// put a page of zeroes into the predictor through this door, and the scar
+    /// on [`LateLatch::observed`] is about exactly that.
+    pub fn drained(&mut self, event: &Event) -> bool {
+        let Entry::PointerMotion(motion) = event.body else { return false };
+        if event.stamp_nanos == NOT_STAMPED {
+            self.unstamped += 1;
+            return false;
+        }
+        let at = StampNanos::from_wire_nanos(event.stamp_nanos);
+        self.sample(Sample { at, x_x65536: motion.x_x65536, y_x65536: motion.y_x65536 })
+    }
+
+    /// Hand one sample to the predictor and count what it said.
+    fn sample(&mut self, sample: Sample) -> bool {
+        let taken = self.predictor.observe(sample);
         if taken {
             self.reports += 1;
         } else {
@@ -559,9 +636,15 @@ impl LateLatch {
             tx_x65536: i64::from(predicted.x_x65536()),
             ty_x65536: i64::from(predicted.y_x65536()),
         };
+        // The graph as the client committed it, with the two numbers about to
+        // change masked out, taken immediately before the patch; and again
+        // immediately after. Nothing else runs between the two, so a difference
+        // is this patch touching something it was not allowed to.
+        let (unmoved_before, _) = unmoved(graph, self.node);
         if graph.set_transform(patched).is_err() {
             return Err(Declined::Refused);
         }
+        let (unmoved_after, walked) = unmoved(graph, self.node);
         Ok(Latched {
             node: self.node,
             before_entry: u32::try_from(entered).unwrap_or(u32::MAX),
@@ -571,14 +654,124 @@ impl LateLatch {
             latched_ty_x65536: patched.ty_x65536,
             lead_nanos: predicted.lead_nanos(),
             extrapolated: predicted.basis().extrapolated(),
+            unmoved_before,
+            unmoved_after,
+            walked,
         })
+    }
+}
+
+/// Where an unmoved fold starts. FNV-1a's offset basis, for
+/// `f_abi::input::Crossing`'s reason: not zero, so a word nobody wrote is not a
+/// fold of nothing. Unit: none — a checksum.
+const UNMOVED_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
+
+/// FNV-1a's 64-bit prime. Unit: none.
+const UNMOVED_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+/// Every field of every node a renderer could see, folded in the order the
+/// encoding walks them, with `masked`'s two translations left out.
+///
+/// # What is covered, and why it is the encoding's list
+///
+/// The node's identifier, its depth, its kind, and each of its three property
+/// records — transform, path, paint — with a presence byte in front of each,
+/// which is `f_scene::encode`'s node record field for field. The walk is the
+/// roots in paint order, each followed depth-first by its children in paint
+/// order, which is the order a frame is encoded in. So a change this fold
+/// cannot see is a change the encoding would not carry either, and the
+/// encoding is the instrument `E3-B06f` and the host tests trust for the
+/// reason that a difference it cannot see is a difference no renderer can.
+///
+/// What is left out is exactly two numbers: `masked`'s `tx_x65536` and
+/// `ty_x65536`. Its other four matrix entries are folded, which is the half of
+/// *and by nothing else* a reader is least likely to check — a latch that
+/// wrote a fresh matrix rather than copying the client's would move this word.
+///
+/// # What it is not
+///
+/// A second implementation of the encoding's walk, and it says so rather than
+/// pretending otherwise: a field added to the encoding and not here is a field
+/// this cannot see, and the tests in this module are what keep the two lists
+/// in step — `the_unmoved_fold_sees_every_field_but_the_two_it_masks` changes
+/// every field this folds and requires every change but two to move it.
+/// *What would reverse this:* a component with the heap for the encoder, at
+/// which point the boot compares the encoding itself and this goes away.
+///
+/// Answers the fold and how many nodes it walked. Unit: none — a checksum; nodes.
+#[must_use]
+pub fn unmoved(graph: &Arena, masked: u32) -> (u64, u32) {
+    let mut fold = Unmoved { word: UNMOVED_BASIS, walked: 0 };
+    for root in graph.roots() {
+        fold.visit(graph, root, 0, masked);
+    }
+    (fold.word, fold.walked)
+}
+
+/// The fold in progress.
+struct Unmoved {
+    word: u64,
+    walked: u32,
+}
+
+impl Unmoved {
+    fn mix(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.word = (self.word ^ u64::from(byte)).wrapping_mul(UNMOVED_PRIME);
+        }
+    }
+
+    /// One node and everything under it. Recursive, and the depth is the
+    /// graph's, which `f_scene::arena::NODES_MAX` bounds.
+    fn visit(&mut self, graph: &Arena, node: u32, depth: u32, masked: u32) {
+        self.walked = self.walked.saturating_add(1);
+        self.mix(u64::from(node));
+        self.mix(u64::from(depth));
+        self.mix(graph.kind_of(node).map_or(u64::MAX, |kind| u64::from(kind.wire())));
+        match graph.transform_of(node) {
+            Ok(Some(t)) => {
+                self.mix(1);
+                for value in [t.a_x65536, t.b_x65536, t.c_x65536, t.d_x65536] {
+                    self.mix(value as u64);
+                }
+                if node != masked {
+                    self.mix(t.tx_x65536 as u64);
+                    self.mix(t.ty_x65536 as u64);
+                }
+            }
+            _ => self.mix(0),
+        }
+        match graph.path_of(node) {
+            Ok(Some(p)) => {
+                self.mix(1);
+                self.mix(u64::from(p.geometry_offset));
+                self.mix(u64::from(p.geometry_bytes));
+                self.mix(u64::from(p.fill_rule));
+            }
+            _ => self.mix(0),
+        }
+        match graph.paint_of(node) {
+            Ok(Some(p)) => {
+                self.mix(1);
+                for value in [p.red_x65535, p.green_x65535, p.blue_x65535, p.alpha_x65535] {
+                    self.mix(u64::from(value));
+                }
+                self.mix(u64::from(p.stroke_width_x65536));
+            }
+            _ => self.mix(0),
+        }
+        if let Ok(children) = graph.children(node) {
+            for child in children {
+                self.visit(graph, child, depth.saturating_add(1), masked);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use f_abi::Sqe;
-    use f_abi::scene::{Commit, CreateNode, Delta, Entry, PAYLOAD_BYTES, kind};
+    use f_abi::scene::{Commit, CreateNode, Delta, Entry, PAYLOAD_BYTES, SetPaint, SetPath, kind};
     use f_abi::trace::Stage;
     use f_input::predict::Predictor;
     use f_interface::token::Theme;
@@ -890,6 +1083,11 @@ mod tests {
             "the latched frame is not the frame a client sending that transform would have got"
         );
 
+        // The boot's form of the same clause, over the same frame: the fold with
+        // the two translations masked did not move, and it walked every node.
+        assert_eq!(latched.unmoved_before(), latched.unmoved_after());
+        assert_eq!(latched.walked(), 3, "the root, the pointer and the sibling");
+
         let (first, last) =
             differ(before.bytes(), after.bytes()).expect("the latch changed nothing");
         assert!(
@@ -1178,6 +1376,240 @@ mod tests {
         // above statements rather than two ways of writing the same sample.
         assert!(latched.moved_x_x65536() > 0, "the prediction ran the cursor nowhere");
         assert_eq!(latch.aimed_at_nanos(), scanout_nanos);
+    }
+
+    /// A decoded event is a report when it carries a position, and nothing
+    /// else when it does not — and the reading it becomes is the one it carried.
+    #[test]
+    fn an_event_off_the_ring_is_a_report_only_when_it_is_a_position() {
+        use f_abi::input::{Entry, Key, PointerMotion, edge};
+        let event = |stamp_nanos: u64, body: Entry| Event {
+            user_data: 0,
+            class: 0,
+            payload_offset: 0,
+            flags: f_abi::flags::NO_CQE,
+            stamp_nanos,
+            body,
+        };
+        let motion = |x: i32| Entry::PointerMotion(PointerMotion { x_x65536: x, y_x65536: -x });
+
+        let mut latch = LateLatch::riding(POINTER);
+        assert!(latch.drained(&event(COMMITTED_AT_NANOS, motion(COMMITTED_X_X65536))));
+        assert!(!latch.drained(&event(
+            INJECTED_AT_NANOS,
+            Entry::Key(Key { code: 30, transition: edge::PRESSED })
+        )));
+        // Not newer than what is held: stale, and counted as such.
+        assert!(!latch.drained(&event(COMMITTED_AT_NANOS, motion(0))));
+        // A hand-built event with no reading on it is refused here as well as
+        // at the decoder.
+        assert!(!latch.drained(&event(NOT_STAMPED, motion(0))));
+        assert_eq!((latch.reports(), latch.stale(), latch.unstamped()), (1, 1, 1));
+
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        commit_a_frame(&mut graph, &mut batch);
+        let latched = latch
+            .latch(&mut graph, 0, Aim { scanout_nanos: COMMITTED_AT_NANOS })
+            .expect("one report latches");
+        assert_eq!(latched.latched_tx_x65536(), i64::from(COMMITTED_X_X65536));
+        assert_eq!(latched.latched_ty_x65536(), -i64::from(COMMITTED_X_X65536));
+    }
+
+    /// **The arithmetic `cargo xtask input deliver` rests on.** The motion that
+    /// harness injects, accumulated as the driver accumulates it and stamped as
+    /// the driver stamps it, is held rather than extrapolated at every scanout
+    /// the boot's compositor could aim at — so the latched translation is the
+    /// newest position exactly, and *latched minus committed* is the motion.
+    ///
+    /// Why it holds is the motion's shape and not luck: along x it runs out by
+    /// ten pixels and back by six inside the predictor's window, and a window
+    /// whose two halves disagree about direction extrapolates nothing —
+    /// `f_input::predict::Held::Reversed`. The boot's verdict requires the
+    /// latch to report *held*, and this is the test that says it will; a
+    /// harness motion changed to a steady one would turn that clause red, and
+    /// the repair is then `E3-B04e`'s arithmetic in the verdict rather than a
+    /// weaker clause.
+    ///
+    /// The motion is written twice — here and in `xtask`'s `MOTIONS` — because
+    /// a component test cannot read a host tool's constant. The boot is what
+    /// catches the two drifting apart: its verdict refuses an extrapolated latch.
+    #[test]
+    fn the_boots_motion_is_held_and_not_extrapolated() {
+        const MOTIONS: [(i32, i32); 5] = [(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
+        // `kernel/src/input.rs`'s `STAMP_TICK_NANOS`: the driver's clock
+        // advances one tick before each report's reading.
+        const TICK_NANOS: u64 = 100_000;
+
+        let mut latch = LateLatch::riding(POINTER);
+        let (mut x_x65536, mut y_x65536) = (0i32, 0i32);
+        for (at, (dx, dy)) in MOTIONS.iter().enumerate() {
+            x_x65536 += dx * 65_536;
+            y_x65536 += dy * 65_536;
+            assert!(latch.observed(Reading {
+                at_nanos: TICK_NANOS * (at as u64 + 1),
+                x_x65536,
+                y_x65536,
+            }));
+        }
+        assert_eq!((x_x65536, y_x65536), (8 * 65_536, 4 * 65_536), "the harness's sum");
+
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        commit_a_frame(&mut graph, &mut batch);
+        // At the newest report, just after it, a whole frame after it, and past
+        // the lead ceiling: every instant a sixty-hertz compositor could aim a
+        // first frame at, whatever its clock read when the commit landed.
+        for scanout_nanos in [
+            TICK_NANOS * MOTIONS.len() as u64,
+            TICK_NANOS * MOTIONS.len() as u64 + 1,
+            PERIOD_NANOS,
+            2 * PERIOD_NANOS,
+        ] {
+            let latched = latch
+                .latch(&mut graph, 0, Aim { scanout_nanos })
+                .expect("the boot's motion latches");
+            assert!(!latched.extrapolated(), "extrapolated when aimed at {scanout_nanos}");
+            assert_eq!(latched.lead_nanos(), 0);
+            assert_eq!(latched.latched_tx_x65536(), i64::from(x_x65536));
+            assert_eq!(latched.latched_ty_x65536(), i64::from(y_x65536));
+        }
+    }
+
+    /// One way to change the committed frame, for the test below.
+    type Change = fn(&mut Arena);
+
+    /// Nothing, as a [`Change`].
+    fn unchanged(_: &mut Arena) {}
+
+    /// The pointer's committed transform with one field moved.
+    fn moved_pointer(graph: &mut Arena, change: fn(SetTransform) -> SetTransform) {
+        let committed = committed(COMMITTED_X_X65536, COMMITTED_Y_X65536);
+        graph.set_transform(change(committed)).expect("the pointer is in the graph");
+    }
+
+    /// The path the path rows start from.
+    const PATH: SetPath =
+        SetPath { node: POINTER, geometry_offset: 64, geometry_bytes: 32, fill_rule: 1 };
+
+    /// The paint the paint rows start from.
+    const PAINT: SetPaint = SetPaint {
+        node: STILL,
+        red_x65535: 1,
+        green_x65535: 2,
+        blue_x65535: 3,
+        alpha_x65535: 4,
+        stroke_width_x65536: 5,
+    };
+
+    fn with_path(graph: &mut Arena) {
+        graph.set_path(PATH).expect("the pointer is in the graph");
+    }
+
+    fn with_paint(graph: &mut Arena) {
+        graph.set_paint(PAINT).expect("the sibling is in the graph");
+    }
+
+    /// The committed frame, then `setup`, then `change`, folded with the
+    /// pointer's translation masked.
+    fn folded(setup: Change, change: Change, masked: u32) -> (u64, u32) {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        commit_a_frame(&mut graph, &mut batch);
+        setup(&mut graph);
+        change(&mut graph);
+        unmoved(&graph, masked)
+    }
+
+    /// **The instrument the boot carries *and by nothing else* with, driven to
+    /// red.** Every field [`unmoved`] folds is changed once against a baseline
+    /// that already holds the record the field belongs to, and every change but
+    /// the two it masks must move the word — and those two must not. A walker
+    /// that dropped a field, masked more than two numbers, or masked the wrong
+    /// node fails here rather than in a boot that would have gone green over it.
+    #[test]
+    fn the_unmoved_fold_sees_every_field_but_the_two_it_masks() {
+        let rows: [(&str, bool, Change, Change); 18] = [
+            ("tx", false, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { tx_x65536: t.tx_x65536 + 1, ..t })
+            }),
+            ("ty", false, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { ty_x65536: t.ty_x65536 - 1, ..t })
+            }),
+            ("a", true, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { a_x65536: t.a_x65536 + 1, ..t })
+            }),
+            ("b", true, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { b_x65536: t.b_x65536 + 1, ..t })
+            }),
+            ("c", true, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { c_x65536: t.c_x65536 + 1, ..t })
+            }),
+            ("d", true, unchanged, |g| {
+                moved_pointer(g, |t| SetTransform { d_x65536: t.d_x65536 + 1, ..t })
+            }),
+            ("a sibling's transform", true, unchanged, |g| {
+                let t = committed(COMMITTED_X_X65536, COMMITTED_Y_X65536);
+                g.set_transform(SetTransform { node: STILL, ..t }).expect("the sibling");
+            }),
+            ("a path", true, unchanged, with_path),
+            ("the path's offset", true, with_path, |g| {
+                g.set_path(SetPath { geometry_offset: 65, ..PATH }).expect("the pointer");
+            }),
+            ("the path's length", true, with_path, |g| {
+                g.set_path(SetPath { geometry_bytes: 33, ..PATH }).expect("the pointer");
+            }),
+            ("the path's rule", true, with_path, |g| {
+                g.set_path(SetPath { fill_rule: 2, ..PATH }).expect("the pointer");
+            }),
+            ("a paint", true, unchanged, with_paint),
+            ("red", true, with_paint, |g| {
+                g.set_paint(SetPaint { red_x65535: 9, ..PAINT }).expect("the sibling");
+            }),
+            ("green", true, with_paint, |g| {
+                g.set_paint(SetPaint { green_x65535: 9, ..PAINT }).expect("the sibling");
+            }),
+            ("blue", true, with_paint, |g| {
+                g.set_paint(SetPaint { blue_x65535: 9, ..PAINT }).expect("the sibling");
+            }),
+            ("alpha", true, with_paint, |g| {
+                g.set_paint(SetPaint { alpha_x65535: 9, ..PAINT }).expect("the sibling");
+            }),
+            ("stroke", true, with_paint, |g| {
+                g.set_paint(SetPaint { stroke_width_x65536: 9, ..PAINT }).expect("the sibling");
+            }),
+            ("a node", true, unchanged, |g| {
+                let (entry, payload) = wire(
+                    Entry::CreateNode(CreateNode {
+                        node: 9,
+                        parent: ROOT,
+                        before: NO_NODE,
+                        kind: kind::TRANSFORM,
+                    }),
+                    0,
+                );
+                let delta = Delta::decode(&entry, &payload).expect("a node delta");
+                g.apply(&delta).expect("the graph takes a ninth node");
+            }),
+        ];
+        for (what, moves, setup, change) in rows {
+            let (baseline, walked) = folded(setup, unchanged, POINTER);
+            assert_eq!(walked, 3, "{what}: the baseline walked the three nodes");
+            let (after, _) = folded(setup, change, POINTER);
+            if moves {
+                assert_ne!(after, baseline, "{what} changed and the fold did not move");
+            } else {
+                assert_eq!(after, baseline, "{what} is masked and the fold moved");
+            }
+        }
+
+        // And the mask is one node's: the same frame masked on a different node
+        // folds the pointer's translation.
+        assert_ne!(
+            folded(unchanged, unchanged, STILL).0,
+            folded(unchanged, unchanged, POINTER).0,
+            "the mask followed the wrong node"
+        );
     }
 
     /// A latch onto a node the client removed is declined, and the frame goes

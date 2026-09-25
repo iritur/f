@@ -52,15 +52,17 @@
 //! crashed, under a policy whose whole content is telling those two apart. The
 //! cause has been on the wire since RFC 0008 and this is the first reader of it.
 //!
-//! **What is still owed is the delivery**, and it is named here rather than left
-//! for a reader to discover. [`Liveness`] is a value nothing constructs on a
-//! running machine: the two numbers live in the occupant's state tree, the frame
-//! is what can read that tree, and `crate::routing::Board` has no field for them
-//! because the frame that would write one is `kernel/src/component.rs` — a file
-//! this wave did not hold. A board field written by nobody is a field that can
-//! be wrong with nothing to notice, which this crate's own routing page refuses
-//! one layer over, so none was added. The diff that closes it is two words per
-//! row, copied and never interpreted, exactly as [`Budget`] is.
+//! **The delivery landed a wave later, and so did the finding it turned up.**
+//! [`Liveness`] is now built on a running machine, out of
+//! `crate::routing::at::LIVE`, which the frame fills by copying — RFC 0126. And
+//! [`answer`] is the whole of what a run does about one row, lifted out of the
+//! component so that it can be tested here: the first boot that consulted a
+//! supervisor about an *occupied* place showed that the drain's cause word had
+//! been zero on every death this tree had ever shown, because the frame never
+//! put one on the notice — so every restart in every boot log came from the
+//! branch for a place the frame built and never filled, and [`decide`] had never
+//! run on a machine. A death whose notice carries no cause is now refused as R04
+//! says, and the frame puts the cause there.
 
 use f_abi::manifest::Record;
 
@@ -250,9 +252,91 @@ pub fn fate(now: &Liveness, seen: u64) -> Option<u64> {
     Some(f_abi::control::cause::pack(f_abi::control::cause::TIMEDOUT, now.abandoned_frames))
 }
 
+/// Everything this supervisor knows about one row on one run.
+///
+/// Gathered by the component out of its board and its drain, and handed to
+/// [`answer`] whole, so that what the component does about a row is a function a
+/// host test can drive rather than a branch inside a loop that only runs at
+/// ring 3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// The packed cause a peer-gone notice for this row carried, if one
+    /// arrived — **including zero**, which is a notice that carried no cause and
+    /// is not the same thing as no notice. Conflating the two is the defect RFC
+    /// 0126 records: the drain stored `0` for *nothing died here* and the frame
+    /// posted `0` for every death, so every death read as nothing.
+    pub ended: Option<u64>,
+    /// Whether the place has an occupant now, as the frame said.
+    pub occupied: bool,
+    /// Whether this run's assembler already submitted a spawn for the row.
+    pub taken: bool,
+    /// The tally the frame handed back.
+    pub budget: Budget,
+    /// What the occupant published about its own progress.
+    pub liveness: Liveness,
+    /// This supervisor's memory of the abandoned count. Unit: frames.
+    pub seen: u64,
+}
+
+/// What this supervisor does about one row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Answer {
+    /// What it decided about refilling the place.
+    pub verdict: Verdict,
+    /// The tally as it leaves it.
+    pub budget: Budget,
+    /// A stop to submit against a live occupant, naming this packed cause —
+    /// which is [`fate`]'s answer and nothing else.
+    pub stop: Option<u64>,
+    /// What to remember as `seen` next run. Unit: frames.
+    pub seen: u64,
+}
+
+/// Answer one row.
+///
+/// Four cases, in an order that is load-bearing:
+///
+/// 1. **A row the assembler already took** is left: its spawn is on the ring.
+/// 2. **A death** is [`decide`]'s, on the cause the notice carried. A notice
+///    that carried *no* cause is decided on cause zero, which no policy
+///    restarts after (R04) — so a frame that forgot to say why is a place left
+///    empty and a red boot, rather than a restart that looks right.
+/// 3. **A live occupant** is never respawned. Its only possible act is a stop,
+///    and only when [`fate`] names one over what it published: the restart is
+///    then decided on the *next* run, when the death comes back as a notice
+///    carrying the word this run named. Deciding both here would be a verdict
+///    taken on a word the wire never carried, which is the shape of the defect
+///    in case 2.
+/// 4. **An empty place with an untouched tally** is the frame handing over a
+///    place it built and never filled, and is filled.
+///
+/// The memory moves only where there was an occupant to read: an empty place's
+/// liveness is the frame's zeroes, and remembering them would forget the reading
+/// a death was decided on.
+#[must_use]
+pub fn answer(record: &Record, facts: &Facts, now: u64) -> Answer {
+    let mut budget = facts.budget;
+    let seen = if facts.occupied { facts.liveness.abandoned_frames } else { facts.seen };
+    let leave = |budget| Answer { verdict: Verdict::Leave, budget, stop: None, seen };
+    if facts.taken {
+        return leave(budget);
+    }
+    if let Some(packed) = facts.ended {
+        let verdict = decide(record, &mut budget, f_abi::control::cause::of(packed), now);
+        return Answer { verdict, budget, stop: None, seen };
+    }
+    if facts.occupied {
+        return Answer { stop: fate(&facts.liveness, facts.seen), ..leave(budget) };
+    }
+    if budget == Budget::default() {
+        return Answer { verdict: Verdict::Restart(0), budget, stop: None, seen };
+    }
+    leave(budget)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Budget, Liveness, Verdict, decide, fate};
+    use super::{Answer, Budget, Facts, Liveness, Verdict, answer, decide, fate};
     use f_abi::control::cause;
     use f_abi::manifest::{Record, restart};
 
@@ -457,5 +541,102 @@ mod tests {
         // chooses *how many*.
         let mut spent = Budget { used: 3, opened: 100 };
         assert_eq!(decide(&restarting, &mut spent, cause::of(packed), 100), Verdict::Retire);
+    }
+
+    /// **The defect RFC 0126 records, as a row.** A peer-gone notice that
+    /// carried no cause is a death, and it is not a restart.
+    ///
+    /// Before this, the drain stored the notice's `ext` as *what ended this
+    /// place* and read zero as *nothing did* — and the frame posted zero on every
+    /// death, so a place whose occupant had faulted was filled by the branch for
+    /// a place the frame had never filled, with the tally untouched. Every boot
+    /// log said `restart 0 of 3`. The first half here is that death decided on
+    /// cause zero and left; the second is the same place with the cause the
+    /// notice should have carried, which restarts and spends the budget.
+    #[test]
+    fn a_death_whose_notice_carried_no_cause_is_not_a_restart() {
+        let record = place(3, 3000);
+        let silent = answer(&record, &Facts { ended: Some(0), ..Facts::default() }, 100);
+        assert_eq!(
+            silent.verdict,
+            Verdict::Leave,
+            "a notice with no cause on it was read as a place nothing died in"
+        );
+        assert_eq!(silent.budget, Budget::default());
+
+        let said = answer(&record, &Facts { ended: Some(cause::FAULT), ..Facts::default() }, 100);
+        assert!(matches!(said.verdict, Verdict::Restart(_)));
+        assert_eq!(said.budget.used, 1, "a restart decided by `decide` spends the budget");
+    }
+
+    /// A place with a live occupant is never refilled, and the rule that fills a
+    /// place the frame built and left empty must not reach it.
+    ///
+    /// The two rows differ in one bit — whether the frame says there is an
+    /// occupant — and the tally is untouched in both, which is exactly the
+    /// reading that used to mean *fill this*.
+    #[test]
+    fn an_untouched_tally_fills_an_empty_place_and_not_an_occupied_one() {
+        let record = place(3, 3000);
+        let empty = answer(&record, &Facts::default(), 0);
+        assert_eq!(empty.verdict, Verdict::Restart(0));
+        let occupied = answer(&record, &Facts { occupied: true, ..Facts::default() }, 0);
+        assert_eq!(
+            occupied,
+            Answer { verdict: Verdict::Leave, budget: Budget::default(), stop: None, seen: 0 }
+        );
+    }
+
+    /// A stuck occupant is stopped, naming the fate; it is not restarted on the
+    /// same run, and the restart follows when the death comes back carrying the
+    /// word that was named.
+    ///
+    /// **The two runs `E3-B05e`'s boot performs, in the order it performs them.**
+    /// The second run is handed back the tally and the memory the first one left,
+    /// exactly as the frame hands them back, and the reading the frame clears
+    /// with the occupant.
+    #[test]
+    fn a_stuck_occupant_is_stopped_for_its_fate_and_restarted_when_told_of_it() {
+        let record = place(3, 3000);
+        let first =
+            answer(&record, &Facts { occupied: true, liveness: STUCK, ..Facts::default() }, 7);
+        assert_eq!(first.verdict, Verdict::Leave, "a live occupant is not respawned over");
+        let named = first.stop.expect("a stuck occupant is stopped");
+        assert_eq!(cause::of(named), cause::TIMEDOUT);
+        assert_eq!(first.seen, 1, "the reading is remembered, so it is one fate");
+        assert_eq!(first.budget, Budget::default(), "nothing is spent on a stop");
+
+        let second = answer(
+            &record,
+            &Facts {
+                ended: Some(named),
+                budget: first.budget,
+                seen: first.seen,
+                ..Facts::default()
+            },
+            7,
+        );
+        assert!(matches!(second.verdict, Verdict::Restart(_)));
+        assert_eq!(second.budget.used, 1, "the timeout spent the budget a fault would");
+        assert_eq!(second.stop, None);
+        assert_eq!(second.seen, 1, "an empty place's zeroes do not overwrite the memory");
+    }
+
+    /// The same stuck reading on a second run is not a second stop, and a
+    /// reading that is late rather than stuck is never one.
+    #[test]
+    fn a_reading_already_seen_or_merely_late_asks_for_no_stop() {
+        let record = place(3, 3000);
+        let again = answer(
+            &record,
+            &Facts { occupied: true, liveness: STUCK, seen: 1, ..Facts::default() },
+            0,
+        );
+        assert_eq!(again.stop, None, "one abandoned frame is one fate");
+        let late = Liveness { outstanding_waits: 0, abandoned_frames: 1 };
+        let late =
+            answer(&record, &Facts { occupied: true, liveness: late, ..Facts::default() }, 0);
+        assert_eq!(late.stop, None, "a frame given up and a pipeline that recovered");
+        assert_eq!(late.verdict, Verdict::Leave);
     }
 }

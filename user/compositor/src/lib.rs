@@ -149,6 +149,14 @@ pub mod waits;
 // `f_scene::commit`'s rule. RFC 0120.
 pub mod latch;
 
+// The other end of the input driver's data channel, compiled everywhere for
+// `latch`'s reason: what `E3-B04g` asks of it is a fold over what arrived
+// compared against a word that arrived beside it, and that comparison is only
+// worth anything if a host can drive it with a relay that dropped, reordered or
+// re-stamped an entry. `crate::component` holds the ring; this holds what is
+// done with an entry once it is taken.
+pub mod inbound;
+
 // The component half is x86-64's, and only because the door is. Nothing in
 // `component.rs` is architecture-specific; the one instruction underneath it is,
 // and `f_abi::door::call` is compiled only where there is a frame to call. The

@@ -28,8 +28,10 @@
 //! filled — and what the supervisor writes below [`at::SUBMITTED`] is what it
 //! did. Between the two there is a decision, and this page is shaped so that the
 //! decision has somewhere to be: a list of manifests and an account, rather than
-//! an instruction. `kernel::component::policy::decide` is still in the frame and
-//! `cargo xtask lint-owed` still says so.
+//! an instruction. That decision is `crate::policy`'s and has been since RFC
+//! 0076; what the frame copies onto this page since `E3-B05e` includes two words
+//! an occupant published about its own progress, and the frame copying them
+//! without reading them is the whole of why they may be here.
 //!
 //! **No count of what went wrong.** The frame reads refusals off the ring it
 //! answered them on; a second copy here would be a number the two sides could
@@ -178,6 +180,22 @@ pub mod at {
     pub const ROW_USED: u32 = 16;
     /// When that window opened, in [`NOW`]'s ticks. Unit: timer ticks.
     pub const ROW_OPENED: u32 = 24;
+    /// Whether the place has an occupant **now**: the occupant's epoch plus
+    /// one, or zero for an empty place.
+    ///
+    /// **A fact and not an instruction**, and the difference is the one this
+    /// page's module comment is built on. Until `E3-B05e` a supervisor inferred
+    /// *the frame built this place and never filled it* from a tally nobody had
+    /// touched, which was sound while every row it was shown was empty. A row
+    /// with a live occupant and an untouched tally — the compositor's, on the
+    /// boot that carries its liveness — reads identically under that rule, and a
+    /// supervisor that followed it would submit a spawn into an occupied place.
+    /// So the frame says what it knows, and the component still decides.
+    ///
+    /// Plus one for [`f_abi::swap`]'s reason: an epoch counts from zero and the
+    /// first occupant must not read as no occupant at all.
+    /// Unit: none — an epoch ordinal, offset by one.
+    pub const ROW_OCCUPANT: u32 = 32;
 
     /// The root the module folds to, thirty-two bytes.
     ///
@@ -197,6 +215,36 @@ pub mod at {
     /// day the hash does.
     /// Unit: bytes.
     pub const ROOT_BYTES: usize = 32;
+
+    // --- one liveness row per place, written by the frame ---------------------
+    //
+    // **`E3-B05e`'s delivery, and every word of it is copied.** Two numbers a
+    // synchronising occupant published about itself, and this supervisor's own
+    // memory of the second, stored by the frame between runs exactly as
+    // [`ROW_USED`] and [`ROW_OPENED`] are. The frame never compares them, adds to
+    // them or branches on them — RFC 0123 names the day it does as the day RFC
+    // 0008's objection lands — and `cargo xtask lint-datapath` refuses a frame
+    // that names this crate's `policy::` at all.
+    //
+    // A block of its own rather than two more fields in a row, because a row is
+    // [`ROW_STRIDE`] wide and five fields fill it; widening the stride would move
+    // [`ROOT`], which is arithmetic both sides do. It starts where the root ends.
+
+    /// Where the liveness rows begin. Unit: bytes.
+    pub const LIVE: u32 = 256;
+    /// How far apart two of them are. Unit: bytes.
+    pub const LIVE_STRIDE: u32 = 24;
+    /// Waits the occupant's last closed frame entered and did not get out of,
+    /// as it published them. Offset within a liveness row.
+    /// Unit: waits.
+    pub const LIVE_WAITS: u32 = 0;
+    /// Frames the occupant has abandoned, as it published them. Offset within a
+    /// liveness row. Unit: frames.
+    pub const LIVE_ABANDONED: u32 = 8;
+    /// This supervisor's memory of [`LIVE_ABANDONED`] as it last read it, handed
+    /// back so that one stuck frame is one fate and not one per consultation.
+    /// Offset within a liveness row. Unit: frames.
+    pub const LIVE_SEEN: u32 = 16;
 
     // --- what the component writes, and the frame reads afterwards ------------
 
@@ -291,6 +339,144 @@ pub mod at {
     pub const SAID_USED: u32 = 8;
     /// And when its window opened. Unit: timer ticks.
     pub const SAID_OPENED: u32 = 16;
+
+    /// Where the component's account of **what it read** begins, one row per
+    /// place. Unit: bytes.
+    ///
+    /// # Why a supervisor writes back what it was told
+    ///
+    /// Because `E3-B05e` found a policy that had been deciding from a word it
+    /// was never given. The cause of a death has been specified as the `ext` of
+    /// a peer-gone notice since RFC 0008, the supervisor's drain read it from
+    /// there, and the frame posted zero: so every restart this boot had ever
+    /// shown came from the branch for *a place the frame built and never
+    /// filled*, `policy::decide` was never called on a machine, and the budget
+    /// line said `restart 0 of 3` in every log since. Nothing noticed, because
+    /// nothing on either side of the boundary could see what the other had.
+    ///
+    /// So the component says what it heard, and the frame — which knows what it
+    /// posted, because the cause is its own word — requires the two to be one.
+    /// The liveness words it heard are here for the same reason and are checked
+    /// by `cargo xtask compositor` rather than by the frame, because comparing
+    /// those is the one thing RFC 0123 forbids the frame.
+    ///
+    /// After [`REFUSAL`], in space the component half has not used.
+    pub const HEARD: u32 = 624;
+    /// How far apart two of those are. Unit: bytes.
+    pub const HEARD_STRIDE: u32 = 32;
+    /// The packed cause the peer-gone notice for this row carried, or zero for
+    /// a row nothing died in this run. Offset within a heard-row.
+    /// Unit: none — an `f_abi::control::cause` word.
+    pub const HEARD_CAUSE: u32 = 0;
+    /// [`LIVE_WAITS`] as this component read it. Unit: waits.
+    pub const HEARD_WAITS: u32 = 8;
+    /// [`LIVE_ABANDONED`] as this component read it. Unit: frames.
+    pub const HEARD_ABANDONED: u32 = 16;
+    /// What this supervisor will remember as [`LIVE_SEEN`] next run.
+    ///
+    /// Its own word and not derived by the frame from [`HEARD_ABANDONED`], even
+    /// though today they are the same number: one is evidence and the other is
+    /// policy memory, and a frame that computed the second from the first would
+    /// be deciding what a supervisor remembers.
+    /// Unit: frames.
+    pub const HEARD_SEEN: u32 = 24;
+
+    // --- one policy row per place, written by the frame -----------------------
+    //
+    // **The reversal `component::declared` named, paid.** A supervisor holds a
+    // content hash, which names a manifest and does not reach it, so the four
+    // numbers `policy::decide` reads were a function returning `user/store`'s —
+    // *right today and right by coincidence*, with a paragraph saying the day it
+    // stops being right is the day two supervised places declare different
+    // policies. `E3-B05e` is that day: the compositor declares eight restarts in
+    // sixty thousand ticks where `user/store` declares three in three thousand,
+    // and a timeout decided against the store's budget would be a restart line
+    // naming one manifest's number over another's decision.
+    //
+    // Above everything the component writes rather than below [`SUBMITTED`],
+    // because the gap there after the liveness rows is thirty-two bytes and one
+    // of these rows is forty. The gap between [`HEARD`]'s end and this is room.
+
+    /// Where the policy rows begin. Unit: bytes.
+    pub const POLICY: u32 = 1024;
+    /// How far apart two of them are. Unit: bytes.
+    pub const POLICY_STRIDE: u32 = 40;
+    /// `f_abi::manifest::Record::restart`. Unit: none — a `restart` ordinal.
+    pub const POLICY_RESTART: u32 = 0;
+    /// `Record::max_restarts`. Unit: restarts.
+    pub const POLICY_MAX_RESTARTS: u32 = 8;
+    /// `Record::budget_window_ticks`. Unit: timer ticks.
+    pub const POLICY_WINDOW: u32 = 16;
+    /// `Record::backoff_first_ticks`. Unit: timer ticks.
+    pub const POLICY_BACKOFF_FIRST: u32 = 24;
+    /// `Record::backoff_max_ticks`. Unit: timer ticks.
+    pub const POLICY_BACKOFF_MAX: u32 = 32;
+}
+
+// The layout, held by the compiler rather than by the paragraphs above. Every
+// block added to this page since RFC 0094 has been placed *in a gap*, and a gap
+// computed by hand is the arithmetic that goes wrong silently: two blocks that
+// overlap write each other's words and both sides read a plausible number.
+const _: () = assert!(at::ROW_OCCUPANT + 8 <= at::ROW_STRIDE);
+const _: () = assert!(at::ROW + PLACES_MAX as u32 * at::ROW_STRIDE <= at::ROOT);
+const _: () = assert!(at::ROOT + at::ROOT_BYTES as u32 <= at::LIVE);
+const _: () = assert!(at::LIVE_SEEN + 8 <= at::LIVE_STRIDE);
+const _: () = assert!(at::LIVE + PLACES_MAX as u32 * at::LIVE_STRIDE <= at::SUBMITTED);
+const _: () = assert!(at::SAID + PLACES_MAX as u32 * at::SAID_STRIDE <= at::DIGEST);
+const _: () = assert!(at::REFUSAL + 8 <= at::HEARD);
+const _: () = assert!(at::HEARD_SEEN + 8 <= at::HEARD_STRIDE);
+const _: () = assert!(at::HEARD + PLACES_MAX as u32 * at::HEARD_STRIDE <= at::POLICY);
+const _: () = assert!(at::POLICY_BACKOFF_MAX + 8 <= at::POLICY_STRIDE);
+const _: () = assert!(at::POLICY + PLACES_MAX as u32 * at::POLICY_STRIDE <= BYTES);
+
+/// The four numbers `crate::policy::decide` reads, and the restart policy they
+/// are read under, as the frame copied them out of the place's own manifest.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Policy {
+    /// `f_abi::manifest::restart`'s ordinal.
+    pub restart: u8,
+    /// Unit: restarts.
+    pub max_restarts: u32,
+    /// Unit: timer ticks.
+    pub window_ticks: u32,
+    /// Unit: timer ticks.
+    pub backoff_first_ticks: u32,
+    /// Unit: timer ticks.
+    pub backoff_max_ticks: u32,
+}
+
+impl Policy {
+    /// As the record `decide` takes.
+    ///
+    /// Built from `Record::EMPTY` so that a field the format gains arrives as
+    /// the zero it arrives as everywhere else, rather than as a value this
+    /// supervisor invented.
+    #[must_use]
+    pub const fn record(self) -> f_abi::manifest::Record {
+        f_abi::manifest::Record {
+            restart: self.restart,
+            max_restarts: self.max_restarts,
+            budget_window_ticks: self.window_ticks,
+            backoff_first_ticks: self.backoff_first_ticks,
+            backoff_max_ticks: self.backoff_max_ticks,
+            ..f_abi::manifest::Record::EMPTY
+        }
+    }
+}
+
+/// What this supervisor made of one row, to be written back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Said {
+    /// The verdict, as [`crate::policy::Verdict::to_wire`] will spell it.
+    pub verdict: u64,
+    /// The tally, to be stored on the place.
+    pub budget: crate::policy::Budget,
+    /// The cause the notice for this row carried, packed, or zero.
+    pub cause: u64,
+    /// The liveness it read.
+    pub heard: crate::policy::Liveness,
+    /// What it will remember as `seen`.
+    pub seen: u64,
 }
 
 /// One place this supervisor may act on, as the frame described it.
@@ -304,6 +490,17 @@ pub struct Row {
     /// The tally the frame is holding for this place, handed back so that a
     /// window spans runs rather than restarting with the supervisor.
     pub budget: crate::policy::Budget,
+    /// [`at::ROW_OCCUPANT`]: the occupant's epoch plus one, or zero for an
+    /// empty place.
+    pub occupant: u64,
+    /// What the occupant published about its own progress, copied by the frame.
+    /// Zeroes for a place whose occupant published nothing of the kind.
+    pub liveness: crate::policy::Liveness,
+    /// This supervisor's memory of the abandoned count, as it last left it.
+    /// Unit: frames.
+    pub seen: u64,
+    /// The place's own restart policy, out of its own manifest.
+    pub policy: Policy,
 }
 
 /// What the frame wrote, read once and believed thereafter.
@@ -384,6 +581,30 @@ impl Board {
                 used: u32::try_from(page.read64(base + at::ROW_USED)?).unwrap_or(0),
                 opened: page.read64(base + at::ROW_OPENED)?,
             };
+            row.occupant = page.read64(base + at::ROW_OCCUPANT)?;
+            let index = u32::try_from(index).map_err(|_| quota)?;
+            let live = at::LIVE + index.saturating_mul(at::LIVE_STRIDE);
+            row.liveness = crate::policy::Liveness {
+                outstanding_waits: page.read64(live + at::LIVE_WAITS)?,
+                abandoned_frames: page.read64(live + at::LIVE_ABANDONED)?,
+            };
+            row.seen = page.read64(live + at::LIVE_SEEN)?;
+            // A word that does not fit the field it names is refused rather than
+            // truncated, which is R04 at the one read here whose value decides a
+            // restart: a policy of `max_restarts = 2^32 + 3` read as three would
+            // be this supervisor enforcing a budget nobody declared.
+            let policy = at::POLICY + index.saturating_mul(at::POLICY_STRIDE);
+            let narrow = |offset: u32| -> Result<u32, i32> {
+                u32::try_from(page.read64(policy + offset)?).map_err(|_| quota)
+            };
+            row.policy = Policy {
+                restart: u8::try_from(page.read64(policy + at::POLICY_RESTART)?)
+                    .map_err(|_| quota)?,
+                max_restarts: narrow(at::POLICY_MAX_RESTARTS)?,
+                window_ticks: narrow(at::POLICY_WINDOW)?,
+                backoff_first_ticks: narrow(at::POLICY_BACKOFF_FIRST)?,
+                backoff_max_ticks: narrow(at::POLICY_BACKOFF_MAX)?,
+            };
         }
         let mut root = [0u8; at::ROOT_BYTES];
         for (index, chunk) in root.as_chunks_mut::<8>().0.iter_mut().enumerate() {
@@ -410,21 +631,23 @@ impl Board {
     /// supervisor that died reporting would be a supervisor whose work the frame
     /// then could not see. The frame's own place table is what the boot checks;
     /// this is the component's account of itself beside it.
-    pub fn report(
-        totals: (u64, u64, u64),
-        said: &[(crate::policy::Verdict, crate::policy::Budget)],
-    ) {
+    pub fn report(totals: (u64, u64, u64), said: &[Said]) {
         let Ok(page) = f_ring::device::Window::at(AT, BYTES) else { return };
         let (submitted, refused, told) = totals;
         let _ = page.write64(at::SUBMITTED, submitted);
         let _ = page.write64(at::REFUSED, refused);
         let _ = page.write64(at::TOLD, told);
-        for (index, (verdict, budget)) in said.iter().enumerate().take(PLACES_MAX) {
+        for (index, row) in said.iter().enumerate().take(PLACES_MAX) {
             let Ok(index) = u32::try_from(index) else { return };
             let base = at::SAID + index.saturating_mul(at::SAID_STRIDE);
-            let _ = page.write64(base + at::SAID_VERDICT, verdict.to_wire());
-            let _ = page.write64(base + at::SAID_USED, u64::from(budget.used));
-            let _ = page.write64(base + at::SAID_OPENED, budget.opened);
+            let _ = page.write64(base + at::SAID_VERDICT, row.verdict);
+            let _ = page.write64(base + at::SAID_USED, u64::from(row.budget.used));
+            let _ = page.write64(base + at::SAID_OPENED, row.budget.opened);
+            let heard = at::HEARD + index.saturating_mul(at::HEARD_STRIDE);
+            let _ = page.write64(heard + at::HEARD_CAUSE, row.cause);
+            let _ = page.write64(heard + at::HEARD_WAITS, row.heard.outstanding_waits);
+            let _ = page.write64(heard + at::HEARD_ABANDONED, row.heard.abandoned_frames);
+            let _ = page.write64(heard + at::HEARD_SEEN, row.seen);
         }
     }
 

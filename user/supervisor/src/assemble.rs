@@ -126,10 +126,33 @@ impl<'a> Spawning<'a> {
         module: f_abi::boot::Module<'a>,
         control: &'a f_ring::adopt::Client,
         board: &crate::routing::Board,
+        withheld: &[bool; crate::routing::PLACES_MAX],
     ) -> Self {
         let mut rows = [(0u64, false); crate::routing::PLACES_MAX];
-        for (slot, row) in rows.iter_mut().zip(board.rows.iter()).take(board.places) {
-            *slot = (row.manifest, false);
+        // A row whose place has an occupant starts out filled, so the member
+        // for it is skipped rather than spawned over a live instance. Until
+        // `E3-B05e` every row this component was shown was a place the frame
+        // held open, so `false` was right by construction; the first row shown
+        // with an occupant in it — the compositor's, on the boot that carries
+        // its liveness — drew a spawn the frame refused for want of account,
+        // and the refusal took the row away from the policy that should have
+        // stopped it. `routing::at::ROW_OCCUPANT` is the fact this reads.
+        //
+        // **And a row a death emptied this run starts out filled too**, for the
+        // reason `supervise` gives beside its call to [`assemble`]: this answers
+        // *what does the generation say to start*, and a place whose occupant
+        // just died is `policy::decide`'s question. The first boot that ended an
+        // occupant this can start — the compositor, for a timeout; the store's
+        // routes come from drivers an empty bus leaves `NoDevice`, so it is
+        // never started here — had this start it again before the policy was
+        // asked: the log said `heard
+        // timed out and said leave; restart 0 of 8` over a place that had been
+        // refilled, which is a restart no policy decided, and a place under
+        // `restart = "never"` would have been refilled the same way.
+        for ((slot, row), withheld) in
+            rows.iter_mut().zip(board.rows.iter()).zip(withheld.iter()).take(board.places)
+        {
+            *slot = (row.manifest, row.occupant != 0 || *withheld);
         }
         Self {
             module,
@@ -222,9 +245,13 @@ impl Start for Spawning<'_> {
 /// an ordinal and the caller carries on, because a malformed module must not turn
 /// a machine that boots into one that does not — `docs/booting-on-hardware.md`
 /// makes every component file optional, and this is that argument one level up.
+///
+/// `withheld` is the rows this run was told a death for. They are not this
+/// function's to start: [`Spawning::new`] says why.
 pub fn assemble(
     board: &crate::routing::Board,
     control: &f_ring::adopt::Client,
+    withheld: &[bool; crate::routing::PLACES_MAX],
 ) -> Option<Assembled> {
     if board.module_at == 0 || board.module_len == 0 {
         return None;
@@ -262,7 +289,7 @@ pub fn assemble(
     let bus = Bus::new();
     let _ = f_assembler::bind::bind(&mut assembly, &bus);
 
-    let mut spawning = Spawning::new(module, control, board);
+    let mut spawning = Spawning::new(module, control, board, withheld);
     let report = f_assembler::start::start(&mut assembly, &mut spawning);
     let digest = f_assembler::render::digest(&assembly);
     // Rendered and dropped. The digest is what crosses the board; the rendering
@@ -271,9 +298,15 @@ pub fn assemble(
     let rendered: Vec<u8> = f_assembler::render::topology(&assembly);
     drop(rendered);
 
+    // What *this run* submitted, and not what was already there: a row that
+    // started filled because its place is occupied, or because a death is the
+    // policy's to answer, is not a row the assembler took, and reporting it as
+    // one would take it away from `policy::answer`.
     let mut filled = [false; crate::routing::PLACES_MAX];
-    for (slot, (_, taken)) in filled.iter_mut().zip(spawning.rows.iter()) {
-        *slot = *taken;
+    for (((slot, (_, taken)), row), withheld) in
+        filled.iter_mut().zip(spawning.rows.iter()).zip(board.rows.iter()).zip(withheld.iter())
+    {
+        *slot = *taken && row.occupant == 0 && !*withheld;
     }
     Some(Assembled {
         digest,

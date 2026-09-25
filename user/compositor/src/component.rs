@@ -61,6 +61,7 @@
 //! `crate`'s own comment, which names every sibling that owes one.
 
 use f_abi::control::{is_notice, notice};
+use f_abi::input::PAYLOAD_BYTES as INPUT_PAYLOAD_BYTES;
 use f_abi::scene::PAYLOAD_BYTES;
 use f_abi::{Cqe, door, feature, state};
 use f_interface::token::Theme;
@@ -70,7 +71,7 @@ use f_ring::heap::Heap;
 use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
-use crate::latch::Reading;
+use crate::inbound::Inbound;
 use crate::pacing::Tick;
 use crate::routing::{self, at, bell, life, node, reported, stopped};
 use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
@@ -123,12 +124,12 @@ fn serve() -> ! {
     // like, and a zero length taken for a length reads as a peer problem rather
     // than as a frame that did not speak.
     if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
-        report(&board, None, stopped::NO_ROUTING);
+        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_ROUTING);
         end(stopped::NO_ROUTING)
     }
 
     let Some(parts) = laid_out(&board) else {
-        report(&board, None, stopped::BAD_ROUTING);
+        report(&board, None, &Inbound::UNCONNECTED, stopped::BAD_ROUTING);
         end(stopped::BAD_ROUTING)
     };
 
@@ -149,7 +150,7 @@ fn serve() -> ! {
     // reachable outcome rather than a name for something that aborts.
     let heap = Heap::COMPONENT;
     if !heap.valid() || (heap.bytes() as usize) < crate::HELD_BYTES + crate::HEAP_OVERHEAD {
-        report(&board, None, stopped::NO_GRAPH);
+        report(&board, None, &Inbound::UNCONNECTED, stopped::NO_GRAPH);
         end(stopped::NO_GRAPH)
     }
     // **Two boxes and not one, and `crate::tree::Held`'s own comment is the
@@ -207,6 +208,11 @@ fn serve() -> ! {
     // arrives before the frame has ticked charges that frame from the origin,
     // which is a cost that is too large rather than one that is invented.
     let mut last = Tick(0);
+    // The input ring's consumer half, `E3-B04g`. Connected or not is decided
+    // once, at layout, for `Parts::doorbell`'s reason: it is a fact about the
+    // frame that started this component.
+    let mut inbound =
+        if parts.input.is_some() { Inbound::connected() } else { Inbound::UNCONNECTED };
     let outcome = loop {
         // The control ring first, because a stop is the one thing that ends this
         // loop and work taken after it would be work done for a client the frame
@@ -216,6 +222,22 @@ fn serve() -> ! {
         }
         if route.told {
             break stopped::TOLD;
+        }
+
+        // The input ring second, and all of it, before the scene entry this turn
+        // answers. **This is where a position enters this component**, and the
+        // order is what makes the latch's window mean what `crate::latch` says:
+        // every report that had crossed when this turn began is in the predictor
+        // before a commit taken this turn closes a frame. Nothing is answered —
+        // every input entry carries `NO_CQE` and nobody is waiting — and nothing
+        // here reads a clock: the time is the driver's, in the entry, and
+        // `crate::latch::LateLatch::drained` is where it is rebuilt.
+        if let Some(input) = parts.input {
+            match drain_input(input, &mut inbound, &mut held) {
+                Ok(0) => {}
+                Ok(_) => idle = 0,
+                Err(()) => break stopped::NO_RING,
+            }
         }
 
         // Room to answer in, asked *before* an entry is taken. An entry popped
@@ -252,7 +274,16 @@ fn serve() -> ! {
             // completion ring was full would be waiting for a signal its peer has
             // no reason to send, and would be rescued only by a timer tick —
             // which is an accident and not a protocol.
-            if !parts.doorbell || room == 0 {
+            //
+            // **And a component holding the input ring does not park either.**
+            // The driver submits unasked and rings nobody — `f_ring::doorbell`
+            // is the scene ring's, and no input entry arms or answers one — so a
+            // compositor asleep on the scene ring's bell would take the next
+            // position only when a client happened to submit, which is a latch
+            // aimed at a pointer the device reported some unbounded time ago.
+            // *What would reverse this:* a driver that rings its consumer, which
+            // is `E1-B09`'s interrupt delivery arriving at ring 3.
+            if !parts.doorbell || room == 0 || inbound.is_connected() {
                 core::hint::spin_loop();
                 continue;
             }
@@ -318,42 +349,6 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
-        // And the pointer, on exactly the ordering argument above and with the
-        // same `Release`/`Acquire` pair underneath it: a frame that writes the
-        // three words writes them and then publishes the entry, so a read taken
-        // after the pop sees what was written before the submission this turn is
-        // answering. That pair, and a writer that does not write again until the
-        // answer below is reaped, is the whole of why the three reads agree; the
-        // order of the three is not, and `at::POINTER_AT_NANOS` says why neither
-        // order would be. No frame writes them yet, so today they read as zeroes.
-        //
-        // Read every turn rather than only when a commit closes, because a
-        // velocity needs a window and a window needs every report — the latch
-        // re-reads the *predictor* between the commit and the submission, and
-        // what the predictor holds is everything this loop has been handed. A
-        // report that is not newer than the newest held is refused by the
-        // predictor and counted, which is what makes a page that stopped
-        // changing cost nothing: the same three words read twice are one report.
-        //
-        // A page that stops answering is a turn with no report rather than an
-        // ended run, for the tick's reason exactly.
-        if let (Ok(at_nanos), Ok(x), Ok(y)) = (
-            board.read64(at::POINTER_AT_NANOS),
-            board.read64(at::POINTER_X_X65536),
-            board.read64(at::POINTER_Y_X65536),
-        ) {
-            held.reported(Reading {
-                at_nanos,
-                // Back to signed, in the fixed point both the sample and the
-                // transform record are written in. The word is a two's-complement
-                // `u64` because a routing page holds words and not integers with
-                // opinions, and a pointer left of the origin is an ordinary place
-                // rather than an enormous one.
-                x_x65536: x as i32,
-                y_x65536: y as i32,
-            });
-        }
-
         if let Some(answer) = held.offer(&entry, &payload, now) {
             if parts.data.post(answer).is_err() {
                 break stopped::NO_RING;
@@ -372,14 +367,52 @@ fn serve() -> ! {
         }
     };
 
-    report(&board, Some(&held), outcome);
+    report(&board, Some(&held), &inbound, outcome);
     end(outcome)
+}
+
+/// Take everything on the input ring, decode it, fold it, and hand every
+/// position to the latch.
+///
+/// Answers how many entries were taken, so the loop can tell a busy turn from an
+/// idle one. The four steps are `crate::inbound`'s header; what is here is only
+/// the ring half — the pop and the payload copy — because that is the half a
+/// host cannot drive.
+///
+/// **Zeroed and offered whatever the copy answered**, for the scene payload's
+/// reason in `serve`: an entry framing a payload outside the arena is an event
+/// whose bytes never landed, and a zeroed payload is `NOT_STAMPED`, which the
+/// decoder refuses and `Inbound` counts. An attestation carries no payload and
+/// the copy is ignored for it.
+///
+/// # Errors
+///
+/// The ring stopped validating, which is a peer that has stopped speaking.
+fn drain_input(input: Server, inbound: &mut Inbound, held: &mut Held<'_>) -> Result<u64, ()> {
+    let mut taken = 0;
+    loop {
+        let entry = match input.pop() {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return Ok(taken),
+            Err(_) => return Err(()),
+        };
+        taken += 1;
+        let mut payload = [0u8; INPUT_PAYLOAD_BYTES];
+        let _ = input.copy_out(entry.offset as usize, &mut payload);
+        if let Some(event) = inbound.take(&entry, &payload) {
+            let _ = held.drained(&event);
+        }
+    }
 }
 
 /// Everything the routing page said, in the types that use it.
 struct Parts {
     control: Client,
     data: Server,
+    /// The input driver's data channel, whose consumer end this component
+    /// holds, or `None` where the frame connected none — `input=withheld`, and
+    /// every boot that is not about input.
+    input: Option<Server>,
     /// Turns with nothing to do before the loop ends. Unit: turns.
     spins: u64,
     /// Whether the frame says it will ring a doorbell for this component.
@@ -474,7 +507,20 @@ fn laid_out(board: &Window) -> Option<Parts> {
     // it had not been promised a wakeup.
     let doorbell = board.read64(at::DOORBELL).ok()? == bell::RING;
 
-    Some(Parts { control, data, spins, plan, doorbell })
+    // The input ring, `E3-B04g`, offering and requiring nothing — the driver's
+    // manifest declares `features = []` on it. Zero is *not connected*, which is
+    // an honest answer and the control's whole difference, so it is not a
+    // refusal; a word that is not zero and does not adopt is a frame that filled
+    // this page in wrongly, and is refused as every other address here is.
+    let input_at = board.read64(at::INPUT_AT).ok()?;
+    let input = if input_at == 0 {
+        None
+    } else {
+        let len = u32::try_from(board.read64(at::INPUT_LEN).ok()?).ok()?;
+        Some(Adopted::at(input_at, len, 0, 0).ok()?.server())
+    };
+
+    Some(Parts { control, data, input, spins, plan, doorbell })
 }
 
 /// Write what this component did into the half of the routing page that is its
@@ -484,8 +530,29 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// a page this function never finished finds a zero rather than a plausible
 /// tally. RFC 0013's *read, never delivered* — the frame takes these numbers out
 /// of memory it granted, and this component is never asked for them.
-fn report(board: &Window, held: Option<&Held>, outcome: u64) {
+fn report(board: &Window, held: Option<&Held>, inbound: &Inbound, outcome: u64) {
     let mut published = 0;
+    // The input ring, `E3-B04g`, on every ending and whether or not a graph was
+    // ever held: a component that refused its routing page still says it was
+    // not connected, which is the true sentence about that run.
+    let crossing = inbound.crossing();
+    let attested = inbound.attested();
+    for (offset, value) in [
+        (reported::INPUT_CONNECTED, u64::from(inbound.is_connected())),
+        (reported::INPUT_ENTRIES, inbound.entries()),
+        (reported::INPUT_DECODED, inbound.decoded()),
+        (reported::INPUT_REFUSED, inbound.refused()),
+        (reported::INPUT_MOTIONS, inbound.motions()),
+        (reported::INPUT_CROSSING, crossing.word()),
+        (reported::INPUT_CROSSED, crossing.absorbed()),
+        (reported::INPUT_ATTESTATIONS, inbound.attestations()),
+        (reported::INPUT_ATTESTED, attested.map_or(0, |said| said.word())),
+        (reported::INPUT_ATTESTED_COUNT, attested.map_or(0, |said| said.absorbed())),
+        (reported::INPUT_UNATTESTED, inbound.unattested()),
+        (reported::INPUT_AGREED, u64::from(inbound.agrees())),
+    ] {
+        let _ = board.write64(offset, value);
+    }
     if let Some(held) = held {
         let counters = held.counters();
         let _ = board.write64(reported::DRAINED, counters.drained);
@@ -584,6 +651,9 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
             let _ = board.write64(reported::LATCH_Y, latched.latched_ty_x65536() as u64);
             let _ = board.write64(reported::LATCH_LEAD_NANOS, latched.lead_nanos());
             let _ = board.write64(reported::LATCH_EXTRAPOLATED, u64::from(latched.extrapolated()));
+            let _ = board.write64(reported::LATCH_UNMOVED_BEFORE, latched.unmoved_before());
+            let _ = board.write64(reported::LATCH_UNMOVED_AFTER, latched.unmoved_after());
+            let _ = board.write64(reported::LATCH_WALKED, u64::from(latched.walked()));
         }
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
