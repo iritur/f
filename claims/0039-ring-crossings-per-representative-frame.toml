@@ -1,0 +1,143 @@
+# `E3-B01`: how many times one representative UI frame crosses the ring.
+#
+# **This is the row `claims/0038` declined to be.** That claim counts eight
+# entries per frame over a scripted pair of frames — five creations and a paint,
+# then a removal — and says at length why it does not gate on ten: its client
+# does not reconcile, its frames were written for the test they are in, and
+# *gating on it here would be a claim borrowing a sentence it has not earned*.
+# What earns the sentence is a frame nobody chose for its crossing count, driven
+# through the reconciler and the real ring, counted by the same instrument.
+#
+# **The frame is `claims/0033-scene/scene.toml`'s, and it was not chosen here.**
+# `E3-B02j` chose that scene for *representativeness rather than reachability*
+# and argued it from design section 13: an audio timeline, 995 nodes, at the
+# moment its playhead moves — three dirty nodes. The client rebuilds the whole
+# tree every frame (`user/compositor/src/timeline.rs`), `f_scene::reconcile`
+# decides what differs, and every delta it emits goes on the ring one entry at a
+# time through the same `drive` that `claims/0038`'s workload uses. RFC 0133 is
+# the argument for this being *the* UI frame and records what a skeptic would
+# pick instead, and what that frame costs.
+#
+# **What a crossing is is `claims/0038`'s decision, unchanged**: one entry over
+# the boundary in one direction, both directions counted, the control ring not.
+# What is new is where a frame's crossings end. The component publishes its
+# counters at every commit, before that commit's completion is posted, and the
+# client takes its own count at the same moment — so the crossings of frame k
+# are those between the commit closing frame k − 1 and the commit closing frame
+# k, a partition of the run in which every crossing lands in exactly one frame.
+# The boot requires the two sides equal at **every** commit, not only in total.
+#
+# **The rows were read before the bounds were written.** `cargo xtask compositor
+# timeline` printed four for every one of the eight warm frames on its first
+# green boot, 2026-09-25, and the bounds below are that reading.
+
+name       = "ring-crossings-per-representative-frame"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E3"
+
+statement  = """
+One representative UI frame costs four entries across the ring between a client
+and the compositor: two out — the playhead's transform and the commit — and two
+back. The frame is claims/0033-scene's audio timeline at the moment its playhead
+moves, rebuilt whole by the client and reconciled, and it is under the ten that
+docs/design/ring-scene-boot.html section 09 asks for.
+
+Measured by `cargo xtask claim ring-crossings-per-representative-frame`, which
+runs `cargo xtask compositor timeline`:
+
+  ring_crossings_per_representative_frame_worst      4
+  ring_crossings_per_representative_frame_best       4
+  ring_crossings_per_representative_frame_x1000   4000
+  ring_entries_out_per_representative_frame_worst    2
+  ring_entries_back_per_representative_frame_worst   2
+  representative_frames_closed                       8
+  representative_scene_nodes_held                  995
+  build_frames_closed                               40
+  ring_crossings_per_build_frame_worst             102
+
+Every warm frame is also printed on its own line with both sides' counts. The
+scene takes forty frames to arrive — 1 709 deltas against a cap of fifty — and
+those frames are the scene loading, not a frame of it: the worst of them costs
+102, and it is published so that nobody has to take that on trust.
+
+Not reached, and named: the scene's 645 paths, 155 glyph runs and two effect
+declarations have no path to the compositor (scene.toml's `[unreachable]`).
+None of them moves in this frame, and the reconciler emits nothing for what
+does not move, so the warm frame's deltas are the deltas the whole scene would
+cost. The build frames' are not, and are not what this claim bounds.
+"""
+
+[baseline]
+system  = "none"
+notes   = "The comparison a reader wants is a compositor fed a surface per frame, where the per-frame cost is a buffer handed across rather than a count of entries — and that is not a configuration of anything under `claims/baselines/`, for `claims/0038`'s reason. What this claim compares against instead is two things in this tree: `claims/0038`'s eight, which is the same instrument over a scripted client that does not reconcile, and design section 09's own walk — *two hardware writes and no system calls per frame* — which counts a different unit and is printed beside it in RFC 0133 rather than converted into this one."
+
+[owner]
+subsystem = "the scene ring between a client and the compositor, and the reconciler in front of it"
+document  = "docs/design/ring-scene-boot.html"
+section   = "09"
+notes     = "Section 09 draws the frame budget and states the ten this claim gates on. The numbers are owned by `kernel/src/compositor.rs` for the client's counts and the per-frame lines, by `user/compositor/src/component.rs` for the component's cut at each commit (`routing::reported::CUT_*`), and by `scene/src/reconcile.rs` for what a frame costs — which is the thing that moves this number, and the only thing that should."
+
+[workload]
+path   = "kernel/src/compositor.rs"
+scene  = "claims/0033-scene/scene.toml"
+frames = 8
+notes  = "`Half::Timeline`: `f_compositor::timeline::build` writes the 995-node scene every frame, `f_scene::reconcile::Reconciler` turns each rebuild into deltas, and `drive` submits them one at a time with a commit per frame. Forty build frames grow the tree by twenty-five nodes each — the cap of fifty over two deltas a node — and eight warm frames move the playhead two pixels each. The scene is read, not copied: `user/compositor/src/timeline.rs`'s tests hold the built tree to scene.toml's parts and census and require the warm frame to be one transform over `dirty_nodes`. A change to scene.toml fails those tests, which is the scene's own hash rule applied one step downstream."
+
+[metrics]
+primary   = "ring_crossings_per_representative_frame_worst"
+secondary = [
+  "ring_crossings_per_representative_frame_best",
+  "ring_crossings_per_representative_frame_x1000",
+  "ring_entries_out_per_representative_frame_worst",
+  "ring_entries_back_per_representative_frame_worst",
+  "representative_frames_closed",
+  "representative_scene_nodes_held",
+  "build_frames_closed",
+  "ring_crossings_per_build_frame_worst",
+]
+
+[threshold]
+# **Under ten, on the worst frame, and this is the one claim in the registry
+# allowed to say it** — `E3-B01`'s exit, earned by a frame that was not chosen
+# for its count. The worst and not the mean, because the exit is per frame and a
+# mean over eight is satisfied by seven cheap frames and one that is not; the
+# route's own comment says so and the mutation recorded in RFC 0133 is exactly
+# that frame. The floor is two, because a frame that crossed less than its own
+# commit and that commit's answer crossed nothing.
+ring_crossings_per_representative_frame_worst = { min = 2, max = 9 }
+
+# The shape, exact, for `claims/0038`'s reason: this is a count over a fixed
+# workload with a fixed seed, the same on every host, so room in these bounds
+# would be room for a change nobody decided. A reconciler that started sending
+# the playhead's two draws again moves the frame to eight and stays under ten —
+# which is the change the exact rows exist to make someone re-declare.
+ring_crossings_per_representative_frame_best = { min = 4, max = 4 }
+ring_crossings_per_representative_frame_x1000 = { min = 4000, max = 4000 }
+ring_entries_out_per_representative_frame_worst = { min = 2, max = 2 }
+ring_entries_back_per_representative_frame_worst = { min = 2, max = 2 }
+
+# The denominator and the scene. Without the first the worst is over an unknown
+# number of frames; without the second it is a warm frame of a smaller scene,
+# which is the substitution this claim exists to refuse.
+representative_frames_closed = { min = 8, max = 8 }
+representative_scene_nodes_held = { min = 995, max = 995 }
+
+# The build, bounded so it is published and cannot drift unseen, and gated on
+# nothing the design says about a frame: forty frames is the cap of fifty over
+# two deltas a node, and 102 is fifty deltas and a commit each way.
+build_frames_closed = { min = 40, max = 40 }
+ring_crossings_per_build_frame_worst = { min = 102, max = 102 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so**, on `claims/0038`'s terms: a ring entry is an event both sides observe, independent of when it happened, so every row is the same number in the development container and on bare metal. The runner is named because `lint-reproduce` requires one. What a crossing *costs* is RFC 0005's and `E1-P10`'s, and is not here."
+
+[reproduce]
+command = "cargo xtask claim ring-crossings-per-representative-frame"
+
+[diagnosis]
+worst_is_over = "E3-B01's exit failing. Read the per-frame lines in the boot log: every warm frame is printed with the reconciler's delta count and both sides' crossings. More deltas than one is either the application changing more than its playhead — `user/compositor/src/timeline.rs`, and then the frame is no longer claims/0033's — or the reconciler emitting properties that did not change, which is `scene/src/reconcile.rs`'s *exactly the differences* failing and its corpus is where to look first."
+direction_rows_moved = "the shape of the frame changed while the worst stayed under ten. Out is deltas plus the commit; back is one completion per entry today, because the client asks for every one. A back row that fell is a client that started setting `NO_CQE` on its deltas, which is legitimate and a re-declaration, not a regression."
+scene_nodes_short = "the warm frames were played over a graph that is not the scene: the build refused or capped something, and the boot's verdict should have gone red first. If it did not, the verdict's census clause was weakened."
+frames_short = "the worst is over fewer frames than the workload plays, so it is a worst of an unknown sample. The boot refuses on this before printing rows."
+build_moved = "the cap the manifest declares changed, or the scene did. Neither is a regression of the frame this claim is about, and both are a re-declaration of these two rows."

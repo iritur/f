@@ -77,9 +77,12 @@
 //! is also the task that gives the wake time somewhere to be spent. No
 //! delta ring between two *components* — the client here is the frame itself,
 //! which is the arrangement every datapath boot in this tree has and what
-//! `CHAOS_GAP` in `xtask` carries as a debt. No client library: `E3-B01l` built
-//! the reconciler and nothing in this crate links it, because the side that
-//! produces deltas is the side that would.
+//! `CHAOS_GAP` in `xtask` carries as a debt. No client library in the
+//! component: `E3-B01l` built the reconciler and nothing the serve loop reaches
+//! calls it, because the side that produces deltas is the side that would. That
+//! side is the frame, which cannot be host-tested, so [`timeline`] carries the
+//! frame's one client application here and re-exports the reconciler for the
+//! frame to call; `timeline`'s own header says why and what reverses it.
 //!
 //! One thing it does not do is worth stating on its own, because a reader will
 //! look for it. **It does not decide a class or schedule against a deadline.** A
@@ -148,6 +151,12 @@ pub mod waits;
 // that being the definition of a late latch rather than a hole in
 // `f_scene::commit`'s rule. RFC 0120.
 pub mod latch;
+
+// The frame's client application, `E3-B01`: the representative scene of
+// `claims/0033-scene/scene.toml` as an immediate-mode tree, and the reconciler it
+// is diffed through. Compiled everywhere because its whole value is a host test
+// against the scene file; called by the frame and never by the component.
+pub mod timeline;
 
 // The other end of the input driver's data channel, compiled everywhere for
 // `latch`'s reason: what `E3-B04g` asks of it is a fold over what arrived

@@ -3123,7 +3123,9 @@ fn admission_demonstration(boot: &BootInfo) {
 /// before a page is spent, having admitted this boot's own machine first.
 /// `compositor=capped` sends one frame past the cap the compositor's manifest
 /// declares and one under it, `E3-B07e`, and requires the excess refused and
-/// both frames closed.
+/// both frames closed. `compositor=timeline` builds `claims/0033`'s scene
+/// through the reconciler and plays it, `E3-B01`, and counts every frame at its
+/// commit on both sides.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
 /// `objects`' are: it knows which half it asked for, what it submitted, and what
@@ -3144,6 +3146,8 @@ fn compositor_boot(
         compositor::Half::Wake
     } else if boot.has_parameter(b"compositor=capped") {
         compositor::Half::Capped
+    } else if boot.has_parameter(b"compositor=timeline") {
+        compositor::Half::Timeline
     } else {
         return None;
     };
@@ -3179,7 +3183,8 @@ fn compositor_boot(
         compositor::Half::Serve
         | compositor::Half::Starved
         | compositor::Half::Wake
-        | compositor::Half::Capped => {
+        | compositor::Half::Capped
+        | compositor::Half::Timeline => {
             let me = arch::x86_64::current_cpu();
             if !(smp::started() > 1 && smp::first_worker() != me) {
                 kprintln!(

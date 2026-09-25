@@ -1111,6 +1111,51 @@ pub mod reported {
     /// client reaped.
     /// Unit: deltas.
     pub const CAPPED: u32 = super::REPORT + 536;
+
+    // --- the counts at the last commit, `E3-B01` ------------------------------
+    //
+    // **The same three counters as `FRAMES`, `DRAINED` and `ANSWERED`, read at a
+    // different moment, and not a second count of anything.** Those three are
+    // written once, when the run ends, so a run that builds a scene in forty
+    // frames and then plays it for eight has one total over forty-eight frames
+    // of two different kinds — and `E3-B01`'s number is about the eight. What a
+    // per-frame figure needs is the counters as they stood *between* frames, and
+    // these are that: written every time a commit closes a frame, before that
+    // commit's own completion is posted.
+    //
+    // **Before the post, because the post is what orders them.** The component
+    // writes these, then publishes the completion with the ring's `Release`; the
+    // client reaps it with the ring's `Acquire`; so a client that has reaped a
+    // commit's completion reads the words that commit wrote, on either
+    // architecture, with no ordering of its own — the pair `ring/src/lib.rs`
+    // rests every payload byte on, and `at::TICK_NANOS`'s argument in the other
+    // direction. Written after the post they would be a race the client could
+    // only win by spinning, and the reading would rest on x86's store order.
+    //
+    // What *before the post* means for the numbers is exact and worth saying:
+    // `CUT_DRAINED` includes the commit, `CUT_ANSWERED` does not include its
+    // completion. So the crossings between two cuts are one frame's entries
+    // going out and, coming back, the previous commit's completion and this
+    // frame's other completions — a partition of the run in which every crossing
+    // lands in exactly one frame. The client takes its own cut at the same point
+    // — its count of completions reaped before the commit's — and the frame
+    // requires the two equal at every cut, not only at the end.
+    //
+    // *What would reverse this:* a per-frame count the component keeps itself,
+    // which is a second counter and the thing `E3-B01j`'s instrument was built
+    // to make unnecessary; or a client that pipelines frames, where the commit's
+    // completion is no longer the boundary between one frame's crossings and
+    // the next.
+
+    /// Frames closed, as of the last commit that closed one.
+    /// Unit: frames — UI frames.
+    pub const CUT_FRAMES: u32 = super::REPORT + 544;
+    /// Entries drained off the data ring as of that commit, the commit included.
+    /// Unit: entries.
+    pub const CUT_DRAINED: u32 = super::REPORT + 552;
+    /// Completions the ring accepted from this component as of that commit,
+    /// **not** including the commit's own. Unit: entries.
+    pub const CUT_ANSWERED: u32 = super::REPORT + 560;
 }
 
 /// Why the component's loop ended.

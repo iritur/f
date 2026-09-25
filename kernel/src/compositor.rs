@@ -465,6 +465,22 @@ pub enum Half {
     /// exact: two frames and sixteen crossings. Seventy more entries there would
     /// be a claim re-declared to make room for a different subject.
     Capped,
+    /// Build the representative scene through the reconciler, then play it:
+    /// `E3-B01`'s own count.
+    ///
+    /// **The parent's exit, and the one half whose frames were not written for
+    /// the test they are in.** `claims/0033-scene/scene.toml` — an audio
+    /// timeline, 995 nodes, three of them dirty when the playhead moves — is
+    /// rebuilt whole every frame by `f_compositor::timeline`, `f_scene`'s
+    /// reconciler turns each rebuild into the deltas that differ, and [`drive`]
+    /// puts every one of them on the ring. Forty frames build the scene under
+    /// the manifest's cap; eight more move the playhead, and those eight are
+    /// the UI frames RFC 0133 says `E3-B01`'s sentence is about.
+    ///
+    /// **Its own half rather than frames added to the serving one**, for the
+    /// capped half's reason: the serving half's script is `claims/0038`'s
+    /// workload and its bounds are exact.
+    Timeline,
 }
 
 impl Half {
@@ -478,6 +494,7 @@ impl Half {
             Self::Floorless => "floorless",
             Self::Wake => "wake",
             Self::Capped => "capped",
+            Self::Timeline => "timeline",
         }
     }
 
@@ -491,9 +508,12 @@ impl Half {
     const fn reported(self) -> u64 {
         match self {
             Self::Floorless => FLOORLESS_CAPABILITIES,
-            Self::Serve | Self::Starved | Self::Mute | Self::Wake | Self::Capped => {
-                BACKEND_CAPABILITIES
-            }
+            Self::Serve
+            | Self::Starved
+            | Self::Mute
+            | Self::Wake
+            | Self::Capped
+            | Self::Timeline => BACKEND_CAPABILITIES,
         }
     }
 }
@@ -600,6 +620,15 @@ pub enum Trouble {
     /// beside the heap check — and the rename is a red boot rather than a
     /// compositor serving without a quota.
     Unframed,
+    /// The timeline half's client could not have the frames its reconciler and
+    /// its tree live in. `E3-B01`.
+    NoClientMemory,
+    /// The timeline half's reconciler refused one of its own frames, or the cap
+    /// the manifest declares is too small to build the scene in the frames this
+    /// client records. The client's own tree being wrong, and red rather than
+    /// skipped: a frame the reconciler refused is a frame whose crossings were
+    /// never counted. `E3-B01`.
+    Reconciled,
 }
 
 impl Trouble {
@@ -632,6 +661,14 @@ impl Trouble {
             Self::Unframed => {
                 "the compositor's record serves no `scene` ring, so the frame has no \
                  deltas_per_frame_max to hand it and will not start it uncapped (RFC 0128)"
+            }
+            Self::NoClientMemory => {
+                "the timeline client could not have the frames its reconciler and its tree \
+                 live in"
+            }
+            Self::Reconciled => {
+                "the timeline client's reconciler refused one of its own frames, or the cap is \
+                 too small to build the scene in the frames this client records"
             }
         }
     }
@@ -757,6 +794,9 @@ pub struct Report {
     /// eight, and only the split says the count went back to zero at the commit.
     /// Unit: completions.
     pub capped: [u64; CAPPED_FRAMES],
+    /// What the timeline half recorded at every commit, `E3-B01`; nothing on
+    /// every other half.
+    pub timeline: Timeline,
 }
 
 impl Report {
@@ -788,6 +828,7 @@ impl Report {
             served: None,
             cap: 0,
             capped: [0; CAPPED_FRAMES],
+            timeline: Timeline::NOTHING,
         }
     }
 }
@@ -1524,6 +1565,7 @@ impl Report {
             Half::Floorless => self.floorless_verdict(),
             Half::Wake => self.wake_verdict(),
             Half::Capped => self.capped_verdict(),
+            Half::Timeline => self.timeline_verdict(),
         }
     }
 
@@ -1552,10 +1594,13 @@ impl Report {
             (Half::Mute | Half::Floorless, Some(_)) => {
                 Err("a half that stands no compositor up reports an instance it served")
             }
-            (Half::Serve | Half::Starved | Half::Wake | Half::Capped, None) => {
+            (Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline, None) => {
                 Err("a serving half reports no instance, so nothing says it ran in its place")
             }
-            (Half::Serve | Half::Starved | Half::Wake | Half::Capped, Some((epoch, _))) => {
+            (
+                Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline,
+                Some((epoch, _)),
+            ) => {
                 if self.board.epoch != u64::from(epoch) + 1 {
                     return Err("the component's own control ring names a different occupant \
                                 than the one the lifecycle served, so the instance that published \
@@ -2034,6 +2079,122 @@ impl Report {
             return Err(
                 "the component's published tree does not say what its board says about the \
                  frames it closed under the cap",
+            );
+        }
+        self.crossings_and_chain_held()
+    }
+
+    /// The timeline half, `E3-B01`.
+    ///
+    /// **Every clause here is about whether the count can be believed, and none
+    /// of them is the count.** The number — crossings per representative frame —
+    /// is `claims/0039`'s to bound, and a verdict that also bounded it would be
+    /// two places holding one threshold, which is how they come to disagree. What
+    /// the boot owes is that the rows it prints are over the frames it says,
+    /// counted on both sides, at every boundary, with nothing refused.
+    ///
+    /// The order is the argument. The run first: every frame closed, nothing
+    /// refused, the compositor holding the whole scene. Then each cut, both
+    /// sides — the component's words at every commit against the client's own
+    /// counts at the same moment, which is where a side that counted something
+    /// correlated with a crossing goes red frame by frame rather than in a total
+    /// that could balance two wrongs. Then each frame against the reconciler: the
+    /// entries a frame put on the ring are what the reconciler emitted plus a
+    /// commit, so a client that sent more than it was told cannot be what the
+    /// count measured. Then the cuts against the end-of-run totals, which are the
+    /// same counters read a second time. Then `E3-B01j`'s own relations.
+    fn timeline_verdict(&self) -> Result<(), &'static str> {
+        let timeline = &self.timeline;
+        if self.board.outcome != stopped::TOLD {
+            return Err(
+                "the component did not end on the frame's stop notice: its outcome word says it \
+                 fell out of its loop for a reason of its own — between two frames of a client \
+                 that reconciles 995 nodes, the idle backstop is the likeliest",
+            );
+        }
+        if self.refused != 0
+            || self.board.refused != 0
+            || self.board.capped != 0
+            || self.capped.iter().sum::<u64>() != 0
+        {
+            return Err(
+                "an entry of the timeline was refused or capped: every frame the reconciler \
+                 emits is under the cap and names nodes the compositor holds, so a refusal is \
+                 a frame whose crossings were counted and whose edit never landed",
+            );
+        }
+        if timeline.step == 0
+            || timeline.build == 0
+            || timeline.closed != timeline.build + WARM_FRAMES
+        {
+            return Err("the timeline did not close every frame it was built to: the build and \
+                 the eight warm frames");
+        }
+        let nodes = f_compositor::timeline::NODES as u64;
+        if timeline.nodes != nodes
+            || self.board.created != nodes
+            || self.board.live != nodes
+            || self.board.removed != 0
+        {
+            return Err(
+                "the compositor does not hold the scene the client built: claims/0033's census \
+                 is 995 nodes, created once each and none removed, and a warm frame over a \
+                 smaller graph is a frame of a different scene",
+            );
+        }
+        for (k, cut) in timeline.cuts[..timeline.closed].iter().enumerate() {
+            if cut.frames != k as u64 + 1 {
+                return Err("a cut the client read is not the commit it had just reaped: the \
+                     component's frame count at that moment names a different frame, so the \
+                     words beside it are another frame's");
+            }
+            if cut.drained != cut.client_out || cut.answered != cut.client_back {
+                return Err(
+                    "at a frame boundary the component and the client disagree about how many \
+                     entries had crossed in one direction or the other. Both are read at the \
+                     same commit and neither derives from the other, so one side is counting \
+                     something correlated with a crossing rather than a crossing",
+                );
+            }
+            if cut.deltas > self.cap {
+                return Err("a frame of the timeline carried more deltas than the cap it was \
+                     built under");
+            }
+            let (out, _, _, _) = timeline.window(k);
+            if out != cut.deltas + 1 {
+                return Err(
+                    "a frame put a different number of entries on the ring than the reconciler \
+                     emitted and a commit, so what was counted is not the reconciler's frame",
+                );
+            }
+        }
+        if timeline.warm().any(|k| timeline.cuts[k].deltas == 0) {
+            return Err(
+                "a warm frame emitted nothing: the playhead did not move, so the frame counted \
+                 is an idle one and not the frame claims/0033 describes",
+            );
+        }
+        let last = timeline.cuts[timeline.closed - 1];
+        if self.submitted != last.client_out
+            || self.board.drained != last.drained
+            || self.board.answered != last.answered + 1
+            || self.completed != last.client_back + 1
+        {
+            return Err(
+                "the last cut and the run's own totals are not the same counters read twice: \
+                 the run ends on that commit, so its totals are the cut plus the one \
+                 completion the cut is taken before",
+            );
+        }
+        if self.board.frames != timeline.closed as u64
+            || self.board.named != TIMELINE_FRAME_BASE + (timeline.closed as u64 - 1)
+        {
+            return Err("the component did not close the timeline's frames, ending on its last");
+        }
+        if self.board.late != 0 || self.board.waits != 0 || self.board.timeouts != 0 {
+            return Err(
+                "a frame of the timeline was late or abandoned, though every commit had a \
+                 whole scanout of room",
             );
         }
         self.crossings_and_chain_held()
@@ -2606,6 +2767,9 @@ pub fn report_lines(report: &Report) {
             Half::Capped =>
                 "the client sends one frame past the cap the compositor's manifest declares \
                  and one under it",
+            Half::Timeline =>
+                "the client builds claims/0033's scene through the reconciler and moves its \
+                 playhead, every frame rebuilt whole and counted at every commit",
         }
     );
     match report.half {
@@ -2635,7 +2799,7 @@ pub fn report_lines(report: &Report) {
                 error::pack(error::ADMISSION, error::admission::NO_STATE_TREE),
             );
         }
-        Half::Serve | Half::Starved | Half::Wake | Half::Capped => {
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline => {
             crate::kprintln!(
                 "  compositor    {} entr(y/ies) submitted, {} answered, {} refused, {} drained \
                  by the component",
@@ -2852,8 +3016,82 @@ pub fn report_lines(report: &Report) {
                 );
                 crate::kprintln!("    ui_frames_closed    {}", report.board.frames);
             }
+            // `E3-B01`'s rows, on the timeline half alone and for the serving
+            // half's reason: one half owns a row name.
+            if report.half == Half::Timeline {
+                timeline_lines(report);
+            }
         }
     }
+}
+
+/// The timeline half's frames, each one, and the rows `claims/0039` reads.
+///
+/// **Every warm frame on its own line, with both sides' counts**, for
+/// `claims/README.md`'s rule 3: a worst and a best are what the claim bounds,
+/// and the line per frame is the distribution they were taken from. The build
+/// frames are summarised rather than listed — forty lines of a number the claim
+/// does not bound would bury the eight it does — and their worst is a row,
+/// because a reader deciding whether *the first frame* is a UI frame needs it.
+fn timeline_lines(report: &Report) {
+    let timeline = &report.timeline;
+    crate::kprintln!(
+        "  compositor    the scene: {} node(s) built in {} frame(s) of {} under a cap of {}; \
+         the compositor holds {}",
+        timeline.nodes,
+        timeline.build,
+        timeline.step,
+        report.cap,
+        report.board.live,
+    );
+    let mut worst = 0;
+    let mut best = u64::MAX;
+    let mut sum = 0;
+    let mut out_worst = 0;
+    let mut back_worst = 0;
+    for k in timeline.warm() {
+        let (client_out, client_back, out, back) = timeline.window(k);
+        crate::kprintln!(
+            "  compositor    warm frame {}: {} delta(s) from the reconciler; {} out, {} back by \
+             the component, {} out, {} back by the client",
+            k - timeline.build + 1,
+            timeline.cuts[k].deltas,
+            out,
+            back,
+            client_out,
+            client_back,
+        );
+        let crossings = timeline.crossings(k);
+        worst = worst.max(crossings);
+        best = best.min(crossings);
+        sum += crossings;
+        out_worst = out_worst.max(out);
+        back_worst = back_worst.max(back);
+    }
+    let warm = timeline.warm().len() as u64;
+    let cold_worst = (0..timeline.build).map(|k| timeline.crossings(k)).max().unwrap_or(0);
+    let cold_sum: u64 = (0..timeline.build).map(|k| timeline.crossings(k)).sum();
+    crate::kprintln!(
+        "  compositor    the build: {} crossing(s) over {} frame(s), the worst {}",
+        cold_sum,
+        timeline.build,
+        cold_worst,
+    );
+    crate::kprintln!("    ring_crossings_per_representative_frame_worst    {}", worst);
+    crate::kprintln!(
+        "    ring_crossings_per_representative_frame_best    {}",
+        if warm == 0 { 0 } else { best }
+    );
+    crate::kprintln!(
+        "    ring_crossings_per_representative_frame_x1000    {}",
+        sum.saturating_mul(1000).checked_div(warm).unwrap_or(0),
+    );
+    crate::kprintln!("    ring_entries_out_per_representative_frame_worst    {}", out_worst);
+    crate::kprintln!("    ring_entries_back_per_representative_frame_worst    {}", back_worst);
+    crate::kprintln!("    representative_frames_closed    {}", warm);
+    crate::kprintln!("    representative_scene_nodes_held    {}", report.board.live);
+    crate::kprintln!("    build_frames_closed    {}", timeline.build);
+    crate::kprintln!("    ring_crossings_per_build_frame_worst    {}", cold_worst);
 }
 
 /// Find the component file this boot is about, by the name its manifest
@@ -2976,7 +3214,9 @@ pub unsafe fn demonstrate(
         // allocator, passed down; nothing is running.
         Half::Mute => unsafe { mute(frames, &record, image) },
         Half::Floorless => Ok(floorless(image)),
-        Half::Serve | Half::Starved | Half::Wake | Half::Capped => Err(Trouble::Placed),
+        Half::Serve | Half::Starved | Half::Wake | Half::Capped | Half::Timeline => {
+            Err(Trouble::Placed)
+        }
     }
 }
 
@@ -3097,6 +3337,8 @@ pub struct Placed {
     /// the routing page and carried back on every capped completion.
     /// Unit: deltas per frame.
     cap: u64,
+    /// What the timeline half recorded, `E3-B01`.
+    timeline: Timeline,
 }
 
 /// What a [`Placed`] reads off the occupant before its first instruction.
@@ -3175,7 +3417,7 @@ impl Placed {
             // which is the one number in this plan the component is asked to
             // disbelieve.
             Half::Starved => STARVED_HEAP_BYTES,
-            Half::Serve | Half::Wake | Half::Capped => routing::HEAP_BYTES,
+            Half::Serve | Half::Wake | Half::Capped | Half::Timeline => routing::HEAP_BYTES,
             Half::Mute | Half::Floorless => return Err(Trouble::Placed),
         };
         Ok(Self {
@@ -3190,6 +3432,7 @@ impl Placed {
             client: 0,
             after: None,
             cap,
+            timeline: Timeline::NOTHING,
         })
     }
 
@@ -3266,6 +3509,7 @@ impl Placed {
             served: Some((before.epoch, before.tree_at)),
             cap: self.cap,
             capped: seen.capped,
+            timeline: self.timeline,
             ..Report::nothing(self.half, self.image)
         })
     }
@@ -3356,7 +3600,12 @@ impl crate::component::Datapath for Placed {
             (at::TREE_AT, crate::process::SPAWN_TREE),
             (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
             (at::NEGOTIATED_FEATURES, 0),
-            (at::IDLE_SPINS, IDLE_SPINS),
+            // The timeline half's client reconciles 995 nodes between frames, and
+            // [`TIMELINE_IDLE_SPINS`] says why its backstop is wider.
+            (
+                at::IDLE_SPINS,
+                if self.half == Half::Timeline { TIMELINE_IDLE_SPINS } else { IDLE_SPINS },
+            ),
             // What the component needs to pace a frame, and none of it is
             // something a component could have found out for itself: RFC 0004
             // gives it no clock, nothing tells it about a display, and the
@@ -3403,7 +3652,7 @@ impl crate::component::Datapath for Placed {
 
     fn drive(
         &mut self,
-        _frames: &mut FrameAllocator,
+        frames: &mut FrameAllocator,
         wired: crate::component::Wired,
         _killer: &mut dyn crate::component::Killer,
     ) -> Result<crate::component::Drove, &'static str> {
@@ -3471,6 +3720,16 @@ impl crate::component::Datapath for Placed {
             Half::Capped => {
                 drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false, &capped_script())
             }
+            // `E3-B01`: the representative scene, built and then played, every
+            // frame reconciled from a whole tree. Its working memory is frames
+            // this client takes and gives back inside the call.
+            Half::Timeline => drive_timeline(
+                frames,
+                &producer,
+                ends,
+                (&mut env, tsc_khz, &mut doorbell),
+                &mut self.timeline,
+            ),
             Half::Wake => {
                 // The script first, one entry at a time and each one waited for,
                 // so that every submission lands on a core this client has
@@ -3581,6 +3840,15 @@ struct Seen {
     /// [`Seen::refused`], so a capped half's clean clause stays *nothing else
     /// was refused*. Unit: completions.
     capped: [u64; CAPPED_FRAMES],
+    /// Completions reaped before the last commit's own, `E3-B01`.
+    ///
+    /// **[`Seen::completed`] read at a moment, not a second count.** It is the
+    /// client's half of the cut `reported::CUT_ANSWERED` is the component's
+    /// half of: both are taken with the commit gone out and its completion not
+    /// yet back, so the timeline half can require the two sides equal at every
+    /// frame boundary rather than only at the end of the run.
+    /// Unit: completions.
+    at_commit: u64,
 }
 
 impl Seen {
@@ -3592,6 +3860,7 @@ impl Seen {
         deadline: 0,
         last_tick: 0,
         capped: [0; CAPPED_FRAMES],
+        at_commit: 0,
     };
 }
 
@@ -3676,6 +3945,9 @@ fn drive(
         if matches!(delta.body, Entry::Commit(_)) {
             delta.deadline = now.saturating_add(delta.deadline);
             seen.deadline = delta.deadline;
+            // The client's cut, `E3-B01`: what it had reaped before this
+            // commit's own completion comes back.
+            seen.at_commit = seen.completed;
         }
 
         let (entry, payload) = delta.encode();
@@ -3937,6 +4209,345 @@ fn drive_batch(
         }
     }
     Ok(batched)
+}
+
+// --- `E3-B01`: the representative frame, through the reconciler ------------
+//
+// `f_compositor::timeline`'s header is the argument for the scene and for why
+// the client's application lives in that crate; RFC 0133 is the argument for
+// which frame is *the* UI frame. What is here is the client driving it: the
+// whole tree rebuilt every frame, `f_scene`'s reconciler deciding what differs,
+// and every delta it emits put on the real ring by [`drive`] — the same
+// function, one entry at a time and each one answered, that `claims/0038`'s
+// workload goes through. Nothing here counts a crossing. The client's counts
+// are [`Seen`]'s and the component's are `E3-B01j`'s own, read at every commit
+// off `reported::CUT_*`.
+
+/// How many warm frames the timeline half plays after the scene is built.
+///
+/// Eight, and more than one for `claims/README.md`'s rule 3 — a distribution and
+/// not a summary: one frame is one observation, and a count that was four on
+/// the first warm frame and nine on the fourth would be a claim a single frame
+/// could not make. Eight rather than eighty because every one of them is a full
+/// reconciliation of 995 nodes by a quadratic search on the boot processor, and
+/// the frames are identical in shape; the number to watch is the worst, and a
+/// longer run does not move it.
+/// Unit: frames — UI frames.
+const WARM_FRAMES: usize = 8;
+
+/// The most build frames this half will take before it refuses.
+///
+/// Forty is what the manifest's cap of fifty gives — twenty-five nodes a frame,
+/// `f_compositor::timeline::build_step` — and this is room above that for a
+/// manifest declaring a smaller cap, bounded so the per-cut record is a fixed
+/// array. A cap small enough to need more is refused by name rather than run.
+/// Unit: frames.
+const BUILD_FRAMES_MAX: usize = 56;
+
+/// Every cut the timeline half can record: the build and the warm frames.
+/// Unit: frames.
+const TIMELINE_CUTS: usize = BUILD_FRAMES_MAX + WARM_FRAMES;
+
+/// The identifier of the timeline half's first frame.
+///
+/// Not [`FRAME_ONE`], and that is load-bearing rather than tidy: [`drive`]
+/// writes a better backend report onto the page after a commit naming frame one,
+/// which is `E3-B02b`'s probe on the serving half and nothing this half asks.
+/// Unit: none — a frame identifier.
+const TIMELINE_FRAME_BASE: u64 = 256;
+
+/// Idle turns the component may spend between two of this half's frames.
+///
+/// **Fifty times [`IDLE_SPINS`], because this client does work between frames
+/// that the others do not.** Every frame is a whole tree rebuilt and reconciled
+/// on the boot processor while the component spins on the other core with
+/// nothing on its ring, and the reconciler's search is quadratic in 995 nodes.
+/// The bound is still a backstop — the stop notice ends the run — and one sized
+/// for a client that reconciles nothing would end this run between frames with
+/// `stopped::IDLE`, which is a harness choosing its own failure.
+/// Unit: turns.
+const TIMELINE_IDLE_SPINS: u64 = 50 * IDLE_SPINS;
+
+/// The largest frame script: the reconciler's buffer and a commit. Unit: entries.
+const TIMELINE_SCRIPT_MAX: usize = f_compositor::tree::FRAME_DELTAS_MAX + 1;
+
+/// One cut of the timeline run, taken at a commit on both sides.
+#[derive(Clone, Copy)]
+struct Cut {
+    /// Non-commit deltas the reconciler emitted for this frame. Unit: deltas.
+    deltas: u64,
+    /// The client's entries submitted, the commit included — cumulative.
+    /// Unit: entries.
+    client_out: u64,
+    /// The client's completions reaped before the commit's own — cumulative.
+    /// Unit: entries.
+    client_back: u64,
+    /// `reported::CUT_FRAMES` as the client read it after the commit's
+    /// completion. Unit: frames.
+    frames: u64,
+    /// `reported::CUT_DRAINED`. Unit: entries.
+    drained: u64,
+    /// `reported::CUT_ANSWERED`. Unit: entries.
+    answered: u64,
+}
+
+impl Cut {
+    /// A cut before anything was sent.
+    const ZERO: Self =
+        Self { deltas: 0, client_out: 0, client_back: 0, frames: 0, drained: 0, answered: 0 };
+}
+
+/// What the timeline half recorded: every cut, and the build's shape.
+#[derive(Clone, Copy)]
+pub struct Timeline {
+    /// One per frame, build frames first. Unit: as [`Cut`].
+    cuts: [Cut; TIMELINE_CUTS],
+    /// How many of `cuts` are meaningful. Unit: frames.
+    closed: usize,
+    /// How many of them were build frames. Unit: frames.
+    build: usize,
+    /// Nodes the build grew the tree by per frame. Unit: nodes per frame.
+    step: usize,
+    /// Nodes the scene has, as the client built it. Unit: nodes.
+    nodes: u64,
+}
+
+impl Timeline {
+    /// Nothing recorded, which every half but one reports.
+    const NOTHING: Self =
+        Self { cuts: [Cut::ZERO; TIMELINE_CUTS], closed: 0, build: 0, step: 0, nodes: 0 };
+
+    /// Frame `k`'s crossings as each side counted them, between cut `k - 1` and
+    /// cut `k`: `(client out, client back, component out, component back)`.
+    /// Unit: entries.
+    fn window(&self, k: usize) -> (u64, u64, u64, u64) {
+        let now = self.cuts[k];
+        let was = if k == 0 { Cut::ZERO } else { self.cuts[k - 1] };
+        (
+            now.client_out.saturating_sub(was.client_out),
+            now.client_back.saturating_sub(was.client_back),
+            now.drained.saturating_sub(was.drained),
+            now.answered.saturating_sub(was.answered),
+        )
+    }
+
+    /// Frame `k`'s crossings by the component's count. Unit: entries.
+    fn crossings(&self, k: usize) -> u64 {
+        let (_, _, out, back) = self.window(k);
+        out + back
+    }
+
+    /// The warm frames, as indices into `cuts`.
+    const fn warm(&self) -> core::ops::Range<usize> {
+        self.build..self.closed
+    }
+}
+
+/// A block of frames big enough for `bytes`, as an order.
+const fn order_for(bytes: usize) -> u8 {
+    let mut order = 0u8;
+    while (FRAME_SIZE as usize) << order < bytes {
+        order += 1;
+    }
+    order
+}
+
+/// The reconciler, which holds the tree the compositor holds: 995 nodes and
+/// the scratch its search needs. Unit: bytes.
+const RECONCILER_BYTES: usize =
+    core::mem::size_of::<f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }>>();
+
+/// An empty reconciler, made once by its own constructor and copied from here.
+///
+/// **Why a copy out of the image and not a `write` of `Reconciler::new()`**:
+/// the kernel is built without optimisation, so a value that is written is a
+/// value that is first built on the stack — and this one is larger than half
+/// the boot processor's. The first boot of this half took a double fault in
+/// [`drive_timeline`] doing exactly that, with `rbp - rsp` the size of the
+/// value. The price is the value's bytes in the frame's constants, which is
+/// what `f_scene::reconcile`'s private fields hold empty and nothing this file
+/// could spell more cheaply without reasoning about another crate's fields:
+/// zeroed memory would do on today's field types and would stop being sound
+/// the day one of them gained a niche. Measured by the boot's own `frame` line:
+/// 1 773 568 bytes of text and rodata before this half, 1 904 640 with it.
+///
+/// *What would reverse this:* an in-place constructor in `f_scene` — one taking
+/// `&mut MaybeUninit<Self>` — or the frame being built optimised, where the
+/// write is built in place; either way this goes.
+static EMPTY_RECONCILER: f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }> =
+    f_compositor::timeline::Reconciler::new();
+
+/// The tree the application rebuilds every frame. Unit: bytes.
+const TREE_BYTES: usize =
+    core::mem::size_of::<[f_compositor::timeline::Node; f_compositor::timeline::NODES]>();
+
+/// Build the representative scene through the reconciler, then play it.
+///
+/// **The two working sets are in frames this function allocates and gives
+/// back**, because they are a quarter of a mebibyte between them and a kernel
+/// stack is not: the boot processor's is 256 KiB, and `kernel/linker.ld`'s
+/// comment on it records what the places added to that stack have already cost.
+/// The reconciler is copied in from [`EMPTY_RECONCILER`], which its own
+/// constructor made, and the tree is written a slot at a time — so no value
+/// larger than one node is ever built on the stack, and the frame never holds a
+/// reconciler that its constructor did not make.
+///
+/// # Errors
+///
+/// [`Trouble::NoClientMemory`] where the blocks cannot be had,
+/// [`Trouble::Reconciled`] where the reconciler refuses a frame — which is the
+/// client's own tree being wrong, and red rather than skipped — and whatever
+/// [`drive`] answers.
+fn drive_timeline(
+    frames: &mut FrameAllocator,
+    producer: &Producer<'_>,
+    wire: Wire<'_, '_>,
+    clock: (&mut SeededEnv, u64, &mut Bell<crate::doorbell::Ipi>),
+    record: &mut Timeline,
+) -> Result<Seen, Trouble> {
+    use f_compositor::timeline::{NODES, Node, Reconciler};
+
+    let reconciler_order =
+        crate::mem::Order::new(order_for(RECONCILER_BYTES)).ok_or(Trouble::NoClientMemory)?;
+    let tree_order =
+        crate::mem::Order::new(order_for(TREE_BYTES)).ok_or(Trouble::NoClientMemory)?;
+    let reconciler_block = frames.alloc_zeroed(reconciler_order).ok_or(Trouble::NoClientMemory)?;
+    let Some(tree_block) = frames.alloc_zeroed(tree_order) else {
+        // SAFETY: the block was handed out two lines up and nothing references
+        // it — no pointer into it has been made.
+        unsafe { frames.free(reconciler_block) };
+        return Err(Trouble::NoClientMemory);
+    };
+    let reconciler = frames.virt(reconciler_block).cast::<Reconciler<NODES>>();
+    let tree = frames.virt(tree_block).cast::<[Node; NODES]>();
+    // SAFETY: `reconciler` is the direct-map address of a block this function
+    // was just handed, frame-aligned — stronger than the reconciler's alignment,
+    // which is a `u64`'s — and at least `RECONCILER_BYTES` long by
+    // `order_for`'s construction; nothing else holds a pointer into it, and it
+    // does not overlap `EMPTY_RECONCILER`, which is in the image's constants.
+    // The bytes copied are the reconciler's own constructor's, evaluated at
+    // compile time, so every invariant its private fields carry is one
+    // `Reconciler::new` established.
+    unsafe { core::ptr::copy_nonoverlapping(&raw const EMPTY_RECONCILER, reconciler, 1) };
+    // **Slot by slot, and the first boot of this half is why.** Written as one
+    // `[Node::UNUSED; NODES]` the array was built in a 95 520-byte temporary on
+    // the boot processor's stack and copied, and the stack's guard page took a
+    // double fault — `rbp - rsp` was the array's size to the byte. The
+    // reconciler's own constructor above is written whole and was built in
+    // place; if a toolchain ever stops doing that, the same guard page is what
+    // says so, loudly, rather than a corruption.
+    let slots = tree.cast::<Node>();
+    for slot in 0..NODES {
+        // SAFETY: `slots` is the start of the second block, frame-aligned —
+        // stronger than `Node`'s alignment — and at least `TREE_BYTES` long,
+        // so `slot < NODES` is inside it; nothing else holds a pointer into it.
+        // The value is `Node::UNUSED`, which `f_scene::reconcile` names as a
+        // slot holding no node.
+        unsafe { slots.wrapping_add(slot).write(Node::UNUSED) };
+    }
+    // SAFETY: initialised above, in a block of its own, and this is the only
+    // reference ever made over it. It is handed to `play` and cannot outlive
+    // that call, which returns before the block is freed below.
+    let reconciler = unsafe { &mut *reconciler };
+    // SAFETY: as above, for the tree's block, every slot of which the loop
+    // above wrote.
+    let tree = unsafe { &mut *tree };
+
+    let run = play(reconciler, tree, producer, wire, clock, record);
+
+    // SAFETY: the block was handed out above, the one reference into it was
+    // consumed by `play`, which has returned, and nothing else was made over it.
+    unsafe { frames.free(tree_block) };
+    // SAFETY: as above, for the other block.
+    unsafe { frames.free(reconciler_block) };
+    run
+}
+
+/// The frames themselves: build, then play. [`drive_timeline`] owns the memory
+/// and this owns nothing, which is what lets the memory's lifetime be one call.
+///
+/// # Errors
+///
+/// As [`drive_timeline`].
+fn play(
+    reconciler: &mut f_compositor::timeline::Reconciler<{ f_compositor::timeline::NODES }>,
+    tree: &mut [f_compositor::timeline::Node; f_compositor::timeline::NODES],
+    producer: &Producer<'_>,
+    wire: Wire<'_, '_>,
+    clock: (&mut SeededEnv, u64, &mut Bell<crate::doorbell::Ipi>),
+    record: &mut Timeline,
+) -> Result<Seen, Trouble> {
+    use f_compositor::timeline::{self, Deltas, NODES};
+    let (env, tsc_khz, doorbell) = clock;
+
+    let cap = usize::try_from(wire.cap).unwrap_or(0);
+    let step = timeline::build_step(cap);
+    let build = timeline::build_frames(step);
+    if step == 0 || build > BUILD_FRAMES_MAX {
+        return Err(Trouble::Reconciled);
+    }
+    *record = Timeline { step, build, ..Timeline::NOTHING };
+    let mut total = Seen::NOTHING;
+    let mut deltas = Deltas::<{ f_compositor::tree::FRAME_DELTAS_MAX }>::new();
+    let first = TIMELINE_FRAME_BASE;
+    let filler = Delta {
+        user_data: 0,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        flags: 0,
+        body: Entry::Commit(Commit { frame_token: first }),
+    };
+    let mut script = [filler; TIMELINE_SCRIPT_MAX];
+    let mut sequence = 0u64;
+    for k in 0..build + WARM_FRAMES {
+        // Immediate mode: the whole scene, every frame. During the build the
+        // application presents the prefix it has; once built, the playhead
+        // moves one step a frame and nothing else does.
+        let moved = if k < build { 0 } else { (k - build) as u64 + 1 };
+        let built = timeline::build(tree, timeline::playhead_x65536(moved));
+        record.nodes = built.written as u64;
+        let upto = if k < build { ((k + 1) * step).min(NODES) } else { NODES };
+        reconciler.frame(&tree[..upto], &mut deltas).map_err(|_| Trouble::Reconciled)?;
+        let emitted = deltas.as_slice();
+        for (slot, entry) in script.iter_mut().zip(emitted) {
+            sequence += 1;
+            *slot = Delta { user_data: sequence, body: *entry, ..filler };
+        }
+        sequence += 1;
+        let named = first + k as u64;
+        script[emitted.len()] = Delta {
+            user_data: sequence,
+            deadline: SCANOUT_PERIOD_NANOS,
+            body: Entry::Commit(Commit { frame_token: named }),
+            ..filler
+        };
+        let seen = drive(producer, wire, env, tsc_khz, doorbell, false, &script[..=emitted.len()])?;
+
+        // The client's cut and the component's, at the same commit. The
+        // component's words were written before that commit's completion was
+        // posted and this side has reaped it, so they are this commit's —
+        // `reported::CUT_FRAMES` is the argument.
+        let board = wire.board;
+        record.cuts[k] = Cut {
+            deltas: emitted.len() as u64,
+            client_out: total.submitted + seen.submitted,
+            client_back: total.completed + seen.at_commit,
+            frames: board.read64(reported::CUT_FRAMES).unwrap_or(0),
+            drained: board.read64(reported::CUT_DRAINED).unwrap_or(0),
+            answered: board.read64(reported::CUT_ANSWERED).unwrap_or(0),
+        };
+        record.closed = k + 1;
+        total.submitted += seen.submitted;
+        total.completed += seen.completed;
+        total.refused += seen.refused;
+        total.deadline = seen.deadline;
+        total.last_tick = seen.last_tick;
+        for (sum, one) in total.capped.iter_mut().zip(seen.capped) {
+            *sum += one;
+        }
+    }
+    Ok(total)
 }
 
 /// [`Report::capped`] as the log prints it: four counts, oldest frame first.

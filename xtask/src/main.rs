@@ -12266,7 +12266,34 @@ const INPUT_SCALE: i64 = 65_536;
 /// the two drifting apart.
 const MOTIONS: &[(i32, i32)] = &[(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
 
-/// The two halves, and the second is what makes the first mean anything.
+/// The motions `lead` injects instead: a gesture that does **not** turn inside
+/// the predictor's window, so both predictors extrapolate and `E3-B04e`'s seam
+/// is a comparison of two predictions rather than of one copied sample.
+///
+/// Every value non-zero and no two pairs equal, and the running sums never
+/// equal to each other, for [`MOTIONS`]' reasons. Two more constraints are the
+/// predictor's and are why the numbers are small. Positive on both axes in
+/// every event, so neither half of the window disagrees with the other about
+/// direction — `f_input::predict::Held::Reversed` is what a turn produces, and
+/// it is the turning gesture's. And at most seven pixels per axis over the
+/// window's last three reports, because the driver's virtual clock puts a
+/// hundred microseconds between reports and the predictor refuses anything
+/// past twenty-four pixels a millisecond as a teleport: seven over three
+/// hundred microseconds is 23.3, six is 20.
+///
+/// Carried as a copy in `user/virtio-input/src/forecast.rs`'s
+/// `the_lead_gesture_extrapolates_on_both_axes` and
+/// `user/compositor/src/latch.rs`'s `the_lead_gesture_is_extrapolated_at_the_first_scanout`,
+/// for [`MOTIONS`]' reason, and the boot catches the copies drifting: its
+/// verdict refuses a steady gesture that held. Unit: device pixels.
+const LEAD_MOTIONS: &[(i32, i32)] = &[(3, 1), (2, 2), (1, 2), (3, 2), (2, 1)];
+
+/// The line carrying the input path's own prediction: the value and the anchor
+/// it stands on. `E3-B04e`'s input side, read by [`input_predicted`].
+const INPUT_PREDICTED: &str = "input path";
+
+/// The three runs. The second is what makes the first mean anything, and the
+/// third is the first with a gesture the predictors extrapolate.
 const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
     (
         "deliver",
@@ -12278,7 +12305,26 @@ const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
         "the same events on the same ring, with the ring not connected, so the compositor \
          must decline every frame",
     ),
+    (
+        "lead",
+        "the delivering half over a gesture that does not turn, so the compositor's latch and \
+         the driver's own predictor both extrapolate and must agree on the value and on how far \
+         it moved",
+    ),
 ];
+
+/// What each run tells the kernel and which motion it injects.
+///
+/// `lead` is `input=deliver` with `gesture=steady` beside it rather than a third
+/// half, because it is not a control: the compositor holds the ring on both, and
+/// what differs is the motion, which only this process knows — so it says which
+/// one it sent, and the kernel's verdict holds it to that.
+fn input_run(name: &str) -> (String, &'static [(i32, i32)]) {
+    match name {
+        "lead" => ("input=deliver gesture=steady".to_string(), LEAD_MOTIONS),
+        other => (format!("input={other}"), MOTIONS),
+    }
+}
 
 /// Send the emulator the pointer motions this check is made of.
 ///
@@ -12292,7 +12338,7 @@ const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
 /// # Errors
 ///
 /// Anything [`monitor_ask`] refuses, or a monitor that never greeted.
-fn monitor_inject(stream: &std::net::TcpStream) -> Result<(), String> {
+fn monitor_inject(stream: &std::net::TcpStream, motions: &[(i32, i32)]) -> Result<(), String> {
     use std::io::BufRead;
 
     stream
@@ -12311,7 +12357,7 @@ fn monitor_inject(stream: &std::net::TcpStream) -> Result<(), String> {
     }
     monitor_ask(&mut reader, &mut writer, "{\"execute\":\"qmp_capabilities\"}")?;
 
-    for (dx, dy) in MOTIONS {
+    for (dx, dy) in motions {
         std::thread::sleep(Duration::from_millis(INPUT_GAP_MS));
         let axes = format!(
             "[{{\"type\":\"rel\",\"data\":{{\"axis\":\"x\",\"value\":{dx}}}}},{{\"type\":\"rel\",\"data\":{{\"axis\":\"y\",\"value\":{dy}}}}}]"
@@ -12339,7 +12385,7 @@ fn monitor_inject(stream: &std::net::TcpStream) -> Result<(), String> {
 ///
 /// A boot that could not be started, a monitor that never connected, or one that
 /// refused an event.
-fn injected_boot(append: &str) -> Result<Watched, String> {
+fn injected_boot(append: &str, motions: &[(i32, i32)]) -> Result<Watched, String> {
     use std::io::{BufRead, Write};
 
     // Bound before the emulator is spawned and held for the whole run, so there
@@ -12411,7 +12457,7 @@ fn injected_boot(append: &str) -> Result<Watched, String> {
             std::thread::sleep(Duration::from_millis(INPUT_SETTLE_MS));
             match connection.as_ref() {
                 Some(stream) => {
-                    if let Err(why) = monitor_inject(stream) {
+                    if let Err(why) = monitor_inject(stream, motions) {
                         trouble = Some(why);
                     }
                 }
@@ -12534,6 +12580,37 @@ fn input_latch(log: &str) -> Result<(Translation, Translation), String> {
     Ok(((at(4, "x")?, at(6, "y")?), (at(9, "x")?, at(11, "y")?)))
 }
 
+/// The input path's prediction and its anchor off the kernel's `input path`
+/// line, `(predicted, anchor)`.
+///
+/// By position, for [`input_pointer`]'s reason, with the word before each
+/// number checked. The line is `input path predicted x <px> y <py> from anchor
+/// x <ax> y <ay> ...`.
+///
+/// # Errors
+///
+/// A log with no such line, or one whose numbers are not numbers.
+/// Unit: fixed-point units of 1/65536 device pixel.
+fn input_predicted(log: &str) -> Result<(Translation, Translation), String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(INPUT_PREDICTED))
+        .ok_or("the boot printed no prediction for the input path")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize, word: &str| -> Result<i64, String> {
+        if fields.get(index.wrapping_sub(1)).copied() != Some(word) {
+            return Err(format!("the prediction line is not in the format this reads: {line}"));
+        }
+        let text =
+            fields.get(index).copied().ok_or_else(|| format!("short prediction line: {line}"))?;
+        text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
+    };
+    if fields.get(7).copied() != Some("from") || fields.get(8).copied() != Some("anchor") {
+        return Err(format!("the prediction line is not in the format this reads: {line}"));
+    }
+    Ok(((at(4, "x")?, at(6, "y")?), (at(10, "x")?, at(12, "y")?)))
+}
+
 /// The exit criterion of `E3-B04d` and the run half of `E3-B04a`, as a command.
 ///
 /// # What it asserts, and why one of the assertions is not the kernel's
@@ -12587,15 +12664,15 @@ fn input(kind: Option<&str>) -> Result<(), String> {
         }
     };
 
-    let asked_x: i64 = MOTIONS.iter().map(|(dx, _)| i64::from(*dx)).sum();
-    let asked_y: i64 = MOTIONS.iter().map(|(_, dy)| i64::from(*dy)).sum();
-
     let all = chosen.len() > 1;
     for (name, what) in chosen {
         if all {
             println!("\n--- input={name}: {what}");
         }
-        let watched = injected_boot(&format!("input={name}"))?;
+        let (append, motions) = input_run(name);
+        let asked_x: i64 = motions.iter().map(|(dx, _)| i64::from(*dx)).sum();
+        let asked_y: i64 = motions.iter().map(|(_, dy)| i64::from(*dy)).sum();
+        let watched = injected_boot(&append, motions)?;
 
         match watched.ending {
             Ending::Exited(33) => {}
@@ -12605,8 +12682,9 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                      produced nothing, or the driver did not time every report exactly once, \
                      or what the compositor drained off the driver's ring is not what the \
                      driver says it sent, or the compositor latched on a half that gave it \
-                     no ring or failed to latch on the one that did. The serial log above \
-                     says which."
+                     no ring or failed to latch on the one that did, or - on `lead` - the \
+                     compositor's latch and the driver's own prediction were asked about two \
+                     scanouts, held, or disagree. The serial log above says which."
                 ));
             }
             Ending::Exited(0) => {
@@ -12634,12 +12712,12 @@ fn input(kind: Option<&str>) -> Result<(), String> {
             ));
         }
 
-        let ((ended_x, ended_y), (x0, y0), motions) = input_pointer(&watched.log)?;
+        let ((ended_x, ended_y), (x0, y0), reported) = input_pointer(&watched.log)?;
         println!(
             "\ninput={name}: this harness moved the pointer by ({asked_x}, {asked_y}) device \
              pixels in {} event(s); the driver's accumulator went from ({x0}, {y0}) to \
              ({ended_x}, {ended_y}) in units of 1/{INPUT_SCALE} of one",
-            MOTIONS.len(),
+            motions.len(),
         );
         // A start of zero on either axis is the boot RFC 0132 replaced: over a
         // pointer committed at zero, a latch that adds its position to the
@@ -12657,12 +12735,12 @@ fn input(kind: Option<&str>) -> Result<(), String> {
         // knows the answer to.
         let (x, y) = (ended_x - x0, ended_y - y0);
 
-        if motions as usize != MOTIONS.len() {
+        if reported as usize != motions.len() {
             return Err(format!(
-                "`input={name}` reported {motions} motion event(s) and this harness sent {}. \
+                "`input={name}` reported {reported} motion event(s) and this harness sent {}. \
                  A count that is short is an event the emulator dropped or the driver never \
                  drained; one that is long is a device reporting motion nobody caused.",
-                MOTIONS.len(),
+                motions.len(),
             ));
         }
         if x != asked_x * INPUT_SCALE || y != asked_y * INPUT_SCALE {
@@ -12707,16 +12785,70 @@ fn input(kind: Option<&str>) -> Result<(), String> {
                 ));
             }
         }
+
+        // `E3-B04e`: *how far it moved*, from both sides of the seam and with
+        // this process as the third witness. The compositor moved the node by
+        // `latched - committed`; the input path's own predictor ran the pointer
+        // `predicted - anchor` beyond its newest report; and this process is the
+        // only thing that knows how far the device was moved to get to that
+        // report. So the first must be the injected sum plus the second — three
+        // numbers from three places, none derived from another. The kernel has
+        // already required the two values to be one and both to extrapolate;
+        // this is the clause it cannot make, because it does not hold the list.
+        if *name == "lead" {
+            let ((cx, cy), (lx, ly)) = input_latch(&watched.log)?;
+            let ((px, py), (ax, ay)) = input_predicted(&watched.log)?;
+            let (step_x, step_y) = (px - ax, py - ay);
+            println!(
+                "input={name}: the compositor moved the node by ({}, {}); this harness injected \
+                 ({}, {}) and the input path predicted ({step_x}, {step_y}) beyond its newest \
+                 report, in units of 1/{INPUT_SCALE} device pixel",
+                lx - cx,
+                ly - cy,
+                asked_x * INPUT_SCALE,
+                asked_y * INPUT_SCALE,
+            );
+            // Vacuity first, for the kernel's reason and on this side's own
+            // numbers: a prediction that did not move off its anchor makes the
+            // equality below the turning gesture's equality in disguise.
+            if step_x == 0 || step_y == 0 {
+                return Err(format!(
+                    "`input={name}` ran a gesture that does not turn and the input path's \
+                     prediction moved ({step_x}, {step_y}) beyond its newest report. A step of \
+                     zero on either axis is a held position, and a seam over held positions \
+                     agrees by copying one sample."
+                ));
+            }
+            if lx - cx != asked_x * INPUT_SCALE + step_x
+                || ly - cy != asked_y * INPUT_SCALE + step_y
+            {
+                return Err(format!(
+                    "`input={name}`: the compositor moved the node by ({}, {}) and the input path \
+                     says the pointer moved ({}, {}) - the ({}, {}) this harness injected plus the \
+                     ({step_x}, {step_y}) it predicted. The two sides of the ring disagree on \
+                     how far the pointer moved, and this process holds the one number neither \
+                     side does.",
+                    lx - cx,
+                    ly - cy,
+                    asked_x * INPUT_SCALE + step_x,
+                    asked_y * INPUT_SCALE + step_y,
+                    asked_x * INPUT_SCALE,
+                    asked_y * INPUT_SCALE,
+                ));
+            }
+        }
     }
 
     if all {
         println!(
-            "\nboth halves held: a pointer moved outside the machine, one driver at ring 3 \
+            "\nall three runs held: a pointer moved outside the machine, one driver at ring 3 \
              timed each report exactly once and submitted what it saw unasked, a compositor \
              at ring 3 took every entry off that ring itself - the frame took none - decoded \
              and folded them into the driver's own word, and latched the pointer by exactly \
              the motion this harness injected; the identical boot with the ring not connected \
-             submitted the same events and the compositor declined every frame"
+             submitted the same events and the compositor declined every frame; and over a \
+             gesture that does not turn, the compositor's latch and the driver's own predictor \
+             extrapolated to the same scanout and agreed on the value and on how far it moved"
         );
     }
     Ok(())
@@ -13268,6 +13400,12 @@ const COMPOSITOR_HALVES: &[(&str, &str)] = &[
          the excess answered RESOURCE/QUOTA_EXHAUSTED and never offered to the batch, both
          frames closed, and nothing of the eight refused — the cap is per frame (E3-B07e)",
     ),
+    (
+        "timeline",
+        "claims/0033's scene — an audio timeline, 995 nodes — rebuilt whole every frame and
+         reconciled into deltas: forty frames build it under the cap, eight move its playhead,
+         and every frame is counted at its commit on both sides of the ring (E3-B01)",
+    ),
 ];
 
 /// Boot the compositor: a component that holds the machine's scene graph at
@@ -13341,7 +13479,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
     if all {
         println!(
             "
-compositor: ok — all six halves held. A component held the machine's scene graph at
+compositor: ok — all seven halves held. A component held the machine's scene graph at
              ring 3, took two frames of deltas across one ring, applied each whole or not
              at all, and published what it holds into the state tree its own manifest
              declares — which the frame read back rather than being told. It started on
@@ -13364,7 +13502,11 @@ compositor: ok — all six halves held. A component held the machine's scene gra
              refused it. And the sixth is `E3-B07e`: a frame of sixty deltas against the
              fifty the manifest declares had fifty applied and ten answered
              RESOURCE/QUOTA_EXHAUSTED without being offered to the batch, closed on its
-             commit, and the next frame of eight was refused nothing."
+             commit, and the next frame of eight was refused nothing. And the seventh is
+             `E3-B01`'s own: claims/0033's scene of 995 nodes rebuilt whole every frame,
+             reconciled into only what differed, built in forty frames under the cap and
+             played for eight, with both sides' counts required equal at every commit —
+             claims/0039 carries what one of those eight cost."
         );
     }
     Ok(())
@@ -13421,7 +13563,7 @@ enum Liveness {
 fn liveness_expected(half: &str) -> Result<Liveness, String> {
     match half {
         "serve" => Ok(Liveness::Restarted),
-        "starved" | "wake" | "capped" => Ok(Liveness::Left),
+        "starved" | "wake" | "capped" | "timeline" => Ok(Liveness::Left),
         "mute" | "floorless" => Ok(Liveness::NotCarried),
         other => Err(format!(
             "`compositor={other}` is a half `liveness_expected` does not name. Say whether it\n\
@@ -13894,6 +14036,7 @@ mod liveness_tests {
         assert_eq!(liveness_verdict(Liveness::NotCarried, TREE), Ok(()));
         assert!(liveness_expected("a-seventh-half").is_err());
         assert_eq!(liveness_expected("capped"), Ok(Liveness::Left));
+        assert_eq!(liveness_expected("timeline"), Ok(Liveness::Left));
         // A control copied off another instance is refused as the exit is.
         let beside = late.replace("mount of 0x1c9000", "mount of 0x2a4000");
         assert!(liveness_verdict(Liveness::Left, &beside).is_err());
@@ -27234,6 +27377,15 @@ enum Route {
     /// number would spend four boots to learn nothing about it.
     /// E3-B01j, E3-B01.
     Crossings,
+    /// `claims/0039`'s crossing count — `cargo xtask compositor timeline` —
+    /// against the claim's own table.
+    ///
+    /// Its own route and not a second command under [`Route::Crossings`],
+    /// because the two claims read different halves and print disjoint rows:
+    /// `claims/0038` is the scripted serving half and this is the representative
+    /// scene played through the reconciler, and a route that ran both would
+    /// spend a boot on rows this claim does not bound. E3-B01, RFC 0133.
+    RepresentativeCrossings,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -27408,6 +27560,13 @@ const ROUTES: &[(&str, Route)] = &[
     // instrument here is a client that does not batch, so what it measures is a
     // floor and not the design's figure. The claim file says so at length.
     ("ring-crossings-per-ui-frame", Route::Crossings),
+    // `E3-B01`'s own count, and the row `claims/0038` declined to gate on ten
+    // for: the representative scene of `claims/0033-scene/`, rebuilt every frame
+    // and reconciled, its playhead moving. It gates on *under ten* because this
+    // is the workload that sentence is about — RFC 0133 says why this frame and
+    // not a smaller one — and on exact direction rows so that a change of shape
+    // re-declares the claim rather than sliding under the bound.
+    ("ring-crossings-per-representative-frame", Route::RepresentativeCrossings),
 ];
 
 /// The registry file one claim name resolves to.
@@ -27536,6 +27695,9 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Canvas => claim_canvas(&text, &relative(&file))?,
         Route::Theme => claim_theme(&text, &relative(&file))?,
         Route::Crossings => claim_crossings(&text, &relative(&file))?,
+        Route::RepresentativeCrossings => {
+            claim_representative_crossings(&text, &relative(&file))?;
+        }
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -29638,6 +29800,45 @@ fn claim_crossings(claim: &str, file: &str) -> Result<(), String> {
          more back is a component answering entries it used to leave alone. Read
          `ui_frames_closed` before any of them — a rate over one frame is a rate over one
          frame, and the script closes two.",
+    )
+}
+
+/// `claims/0039`'s crossing count, against the claim's own table.
+///
+/// # Why the worst frame and not the mean
+///
+/// Because the exit is *per UI frame*, and a mean over eight frames is
+/// satisfied by seven cheap ones and one that is not. The boot prints every
+/// warm frame's count on its own line and the rows are the worst, the best and
+/// the mean; the threshold is on the worst. The mean is published for the
+/// conversion to `claims/0038`'s unit and bounds nothing on its own.
+///
+/// The boot has already required the two sides equal at every commit before it
+/// prints a row, so a red row here is the frame costing something different,
+/// not an accounting change.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_representative_crossings(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask compositor timeline: claims/0033's scene rebuilt every frame and \
+             reconciled, forty frames to build it and eight to play it, counted at every commit",
+            "cargo",
+            &["xtask", "compositor", "timeline"][..],
+        )],
+        "Read `ring_crossings_per_representative_frame_worst` against the per-frame lines in\n\
+         the boot log above it: every warm frame is printed with both sides' counts, and the\n\
+         worst is one of them. Over nine is E3-B01's exit failing, and the direction rows say\n\
+         which way — more out is a reconciler emitting more than differs, or an application\n\
+         that changed more than its playhead; more back is a component answering entries it\n\
+         used to leave alone. `representative_scene_nodes_held` below 995 means the frames\n\
+         were played over a smaller scene than claims/0033's, and every other row is then\n\
+         about a different frame. Do not move the build frames into the rows: they are the\n\
+         scene arriving, not a frame of it, and RFC 0133 says why.",
     )
 }
 

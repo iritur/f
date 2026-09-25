@@ -99,12 +99,14 @@
 use f_abi::input::{
     self, Crossing, Entry, Event, Key, PointerButton, PointerMotion, Scroll, axis_source, edge,
 };
+use f_input::predict::Sample;
 use f_input::stamp::StampNanos;
 use f_ring::adopt::Client;
 use f_ring::device::Region;
 
 use crate::Trouble;
 use crate::clock::Interrupt;
+use crate::forecast::{Asked, Forecast, Foreseen};
 use crate::queue::{self, Queue};
 use crate::transport::{Transport, Windows};
 
@@ -286,6 +288,15 @@ pub struct Emitted {
     pub ignored: bool,
     /// This record closed a report that had something in it.
     pub closed_report: bool,
+    /// The position this report closed on, at the reading the report was
+    /// stamped with — `None` unless the report moved the pointer.
+    ///
+    /// Beside the motion entry rather than read back out of it, and the
+    /// difference is the type: this carries the `StampNanos` the decoder opened
+    /// the report with, so the input path's own predictor is fed the reading
+    /// itself and never a number rebuilt from the entry's wire field.
+    /// `crate::forecast` is what consumes it. RFC 0134.
+    pub sample: Option<Sample>,
 }
 
 impl Decoder {
@@ -384,6 +395,11 @@ impl Decoder {
                 let mut at = 0;
                 if self.moved {
                     self.moved = false;
+                    out.sample = Some(Sample {
+                        at: stamp,
+                        x_x65536: self.x_x65536,
+                        y_x65536: self.y_x65536,
+                    });
                     out.events[at] = Some(self.entry(
                         stamp,
                         Entry::PointerMotion(PointerMotion {
@@ -657,6 +673,9 @@ pub struct Driver {
     decoder: Decoder,
     out: Outbound,
     counters: Counters,
+    /// The input path's own predictor, fed where a report closes and never
+    /// sent. `crate::forecast` is why it exists. RFC 0134.
+    forecast: Forecast,
 }
 
 impl Driver {
@@ -698,6 +717,7 @@ impl Driver {
             decoder: Decoder::starting_at(class, origin),
             out,
             counters: Counters::default(),
+            forecast: Forecast::new(),
         })
     }
 
@@ -726,6 +746,13 @@ impl Driver {
             records += 1;
 
             let emitted = self.decoder.feed(&mut self.clock, record);
+            // Where the report closed and before anything is submitted: the
+            // input path's record is of what the device said, and a report the
+            // ring then had no room for is still a report this predictor saw —
+            // which the boot catches as two windows rather than hiding.
+            if let Some(sample) = emitted.sample {
+                let _ = self.forecast.observe(sample);
+            }
             if emitted.ignored {
                 self.counters.ignored = self.counters.ignored.saturating_add(1);
             }
@@ -817,6 +844,19 @@ impl Driver {
     #[must_use]
     pub const fn at(&self) -> (i32, i32) {
         self.decoder.at()
+    }
+
+    /// Where this driver's own predictor puts the pointer at the scanout the
+    /// frame told it about. `None` where it was told none or saw no motion.
+    #[must_use]
+    pub fn foresee(&self, asked: Asked) -> Option<Foreseen> {
+        self.forecast.at(asked)
+    }
+
+    /// Positions this driver's own predictor took. Unit: reports.
+    #[must_use]
+    pub const fn predictor_reports(&self) -> u64 {
+        self.forecast.reports()
     }
 
     /// Whether the fold went onto the ring as an attestation.

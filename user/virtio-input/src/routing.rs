@@ -227,6 +227,24 @@ pub mod at {
     pub const ORIGIN_X_X65536: u32 = 200;
     /// The same along y. Unit: as [`ORIGIN_X_X65536`].
     pub const ORIGIN_Y_X65536: u32 = 208;
+    /// The scanout this component's own predictor is asked about, `E3-B04e`.
+    ///
+    /// **A target and not a reading**, which is RFC 0120's distinction and the
+    /// whole of why the frame may write it: it is when the display the frame
+    /// declares will next show a frame, not when anything happened, and no
+    /// question about when the user moved is answered by it. The frame writes
+    /// the display's period onto the compositor's page and this instant onto
+    /// this one — two statements about one display, made by the one party that
+    /// declares it — and the compositor paces its frame against that period and
+    /// mints its own aim out of it. The boot then requires the compositor's aim
+    /// to *be* this instant rather than assuming it, because two predictors asked
+    /// about two instants disagree for a reason that is not a defect. RFC 0134.
+    ///
+    /// Zero is **nothing told**, and this component then predicts nothing rather
+    /// than predicting to the beginning of time — `f_abi::input::NOT_STAMPED`'s
+    /// reason, on a target instead of a reading.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub const SCANOUT_AT_NANOS: u32 = 216;
 }
 
 /// Where the component's own half of the page starts.
@@ -366,6 +384,52 @@ pub mod reported {
     /// And along y. See [`POINTER_X_X65536`].
     /// Unit: device pixels from the origin, scaled by 65 536.
     pub const POINTER_Y_X65536: u32 = super::REPORT + 128;
+    /// The instant this component's own predictor was asked about — the
+    /// routing page's [`super::at::SCANOUT_AT_NANOS`], as this component read
+    /// it, or zero where it predicted nothing.
+    ///
+    /// **The input path's half of `E3-B04e`'s seam starts here**, and the six
+    /// words after it are the rest. They are this component's answer to *where
+    /// will the pointer be at that scanout*, from a predictor fed by the reports
+    /// it stamped, before any of them crossed a ring — so the compositor's latch,
+    /// which answers the same question from the reports it decoded off that ring,
+    /// is a second instance holding a second state, and neither number is copied
+    /// from the other. `crate::forecast` is the argument. RFC 0134.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub const PREDICTED_FOR_NANOS: u32 = super::REPORT + 136;
+    /// Where this component's predictor put the pointer at that instant, along
+    /// x. Two's complement in a word, for [`POINTER_X_X65536`]'s reason.
+    /// Unit: device pixels from the origin, scaled by 65 536.
+    pub const PREDICTED_X_X65536: u32 = super::REPORT + 144;
+    /// And along y. Unit: as [`PREDICTED_X_X65536`].
+    pub const PREDICTED_Y_X65536: u32 = super::REPORT + 152;
+    /// The newest report that prediction stands on, along x — its *anchor*,
+    /// which `f_input::predict::Predicted` carries beside the value so that
+    /// *how far the prediction moved the pointer* is a subtraction a reader
+    /// makes against a number the predictor held, not against one this page
+    /// derived. Unit: as [`PREDICTED_X_X65536`].
+    pub const ANCHOR_X_X65536: u32 = super::REPORT + 160;
+    /// And along y. Unit: as [`PREDICTED_X_X65536`].
+    pub const ANCHOR_Y_X65536: u32 = super::REPORT + 168;
+    /// How far forward that prediction was extrapolated, after the predictor's
+    /// own damping. Zero where it held. Unit: nanoseconds.
+    pub const PREDICTED_LEAD_NANOS: u32 = super::REPORT + 176;
+    /// One where that prediction is an extrapolation and zero where it is the
+    /// newest report held — `f_input::predict::Basis::extrapolated`, carried.
+    ///
+    /// **The word the boot refuses a vacuous seam on.** A held prediction on
+    /// both sides of a ring agrees by copying one sample, and a check that
+    /// counted that agreement would pass on a latch that ignored its predictor
+    /// altogether. Unit: none — a flag.
+    pub const PREDICTED_EXTRAPOLATED: u32 = super::REPORT + 184;
+    /// How many positions this component's predictor took, as it counted them.
+    ///
+    /// Beside [`MOTIONS`] rather than inferred from it, because they are
+    /// counted on two different paths through this component — one where a
+    /// report closes and one where an entry is submitted — and a predictor fed
+    /// a different number of positions than crossed is a seam comparing two
+    /// windows. Unit: reports.
+    pub const PREDICTOR_REPORTS: u32 = super::REPORT + 192;
 }
 
 /// Why the component's loop ended.

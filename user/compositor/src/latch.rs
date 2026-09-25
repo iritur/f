@@ -651,7 +651,11 @@ impl LateLatch {
     /// compositor decides the instant, says which one it decided, and the other
     /// side asks its own predictor the same question. Nothing is sent and
     /// nothing is received: this is a reading a test and a boot take, which is
-    /// `crate::waits::Published`'s arrangement.
+    /// `crate::waits::Published`'s arrangement. In the boot the other side is
+    /// the driver's own predictor, which cannot be told this instant — it has
+    /// been reaped before it is minted — so it is told the display's first
+    /// scanout instead, and the frame requires this number to equal that one
+    /// rather than assuming it. RFC 0134.
     /// Unit: nanoseconds, in the channel's epoch.
     #[must_use]
     pub const fn aimed_at_nanos(&self) -> u64 {
@@ -1659,6 +1663,66 @@ mod tests {
             assert!(latch.restore(&mut graph), "the graph refused the client's own transform");
         }
         assert_eq!(latch.restores(), latch.latches());
+    }
+
+    /// **The arithmetic `cargo xtask input lead` rests on**, and the two-instance
+    /// seam at the boot's own numbers.
+    ///
+    /// The motion that run injects does not turn inside the window, so the latch
+    /// aimed at the display's first scanout — the instant the frame tells the
+    /// driver's own predictor about, and the instant this component aims its one
+    /// frame at in that boot — **extrapolates**, and *latched minus committed* is
+    /// the motion plus a step the predictor took beyond the newest report. A
+    /// second instance fed the same reports directly answers the same value;
+    /// that is the equality the boot makes across the ring, and here it pins
+    /// that the fixture reaches the branch the boot needs rather than
+    /// `Held::ImplausibleSpeed` or `Held::Reversed` — seven pixels over three
+    /// hundred microseconds is under the teleport ceiling, and a copy of this
+    /// list that drifted past it would hold, which the boot refuses.
+    ///
+    /// The motion is `xtask`'s `LEAD_MOTIONS`, written again for
+    /// `the_boots_motion_is_held_and_not_extrapolated`'s reason.
+    #[test]
+    fn the_lead_gesture_is_extrapolated_at_the_first_scanout() {
+        const LEAD_MOTIONS: [(i32, i32); 5] = [(3, 1), (2, 2), (1, 2), (3, 2), (2, 1)];
+        const TICK_NANOS: u64 = 100_000;
+
+        let mut latch = LateLatch::riding(POINTER);
+        let mut path = Predictor::new();
+        let (mut x_x65536, mut y_x65536) = (COMMITTED_X_X65536, COMMITTED_Y_X65536);
+        for (at, (dx, dy)) in LEAD_MOTIONS.iter().enumerate() {
+            x_x65536 += dx * 65_536;
+            y_x65536 += dy * 65_536;
+            let reading = Reading { at_nanos: TICK_NANOS * (at as u64 + 1), x_x65536, y_x65536 };
+            assert!(latch.observed(reading));
+            assert!(path.observe(Sample {
+                at: StampNanos::from_wire_nanos(reading.at_nanos),
+                x_x65536,
+                y_x65536,
+            }));
+        }
+        let predicted = path
+            .predict_at(StampNanos::from_wire_nanos(PERIOD_NANOS))
+            .expect("the input path predicted");
+        assert!(predicted.basis().extrapolated(), "the lead gesture held: {predicted:?}");
+
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        commit_a_frame(&mut graph, &mut batch);
+        let latched = latch
+            .latch(&mut graph, 0, Aim { scanout_nanos: PERIOD_NANOS })
+            .expect("the lead gesture latches");
+        assert!(latched.extrapolated());
+        assert_eq!(latched.latched_tx_x65536(), i64::from(predicted.x_x65536()));
+        assert_eq!(latched.latched_ty_x65536(), i64::from(predicted.y_x65536()));
+        assert_eq!(latched.lead_nanos(), predicted.lead_nanos());
+        // How far it moved, as the harness closes it: the motion it injected
+        // plus the step the input path predicted beyond its newest report.
+        let step_x = i64::from(predicted.x_x65536()) - i64::from(predicted.anchor_x_x65536());
+        let step_y = i64::from(predicted.y_x65536()) - i64::from(predicted.anchor_y_x65536());
+        assert!(step_x > 0 && step_y > 0, "the prediction ran the pointer nowhere");
+        assert_eq!(latched.moved_x_x65536(), 11 * 65_536 + step_x);
+        assert_eq!(latched.moved_y_x65536(), 8 * 65_536 + step_y);
     }
 
     /// One way to change the committed frame, for the test below.

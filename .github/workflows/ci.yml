@@ -688,6 +688,11 @@ jobs:
       # at a time — and the other four would build four more kernels to print
       # nothing this table reads. E3-B01j.
       - run: cargo xtask claim ring-crossings-per-ui-frame
+      # `claims/0039`'s nine rows: `E3-B01`'s own count, the representative scene
+      # rebuilt every frame and reconciled, gating on the worst of eight warm
+      # frames being under ten. One half again — the timeline half is the only
+      # one that prints these rows. RFC 0133.
+      - run: cargo xtask claim ring-crossings-per-representative-frame
       # E3-B06c. Section 11's inversion, as two boots. `declare` stands
       # `user/panel` up at ring 3 holding the *client's* end of a ring — the only
       # component in this tree that submits rather than answers — has it declare

@@ -356,7 +356,19 @@ fn serve() -> ! {
         let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
         last = now;
 
+        let closed = held.counters().frames;
         if let Some(answer) = held.offer(&entry, &payload, now) {
+            // **The cut, `E3-B01`**, when this entry closed a frame: the three
+            // counters as they stand now, before the commit's completion is
+            // posted, so the ring's `Release` below is what makes them visible
+            // to a client that reaps it. `crate::routing::reported::CUT_FRAMES`
+            // argues the moment; nothing here is counted that was not already.
+            let counters = *held.counters();
+            if counters.frames != closed {
+                let _ = board.write64(reported::CUT_DRAINED, counters.drained);
+                let _ = board.write64(reported::CUT_ANSWERED, counters.answered);
+                let _ = board.write64(reported::CUT_FRAMES, counters.frames);
+            }
             if parts.data.post(answer).is_err() {
                 break stopped::NO_RING;
             }
