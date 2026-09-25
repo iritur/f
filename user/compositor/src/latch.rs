@@ -632,6 +632,8 @@ impl LateLatch {
     /// where the graph refused it, which would be the graph refusing a node it
     /// accepted a statement ago; it is not counted in [`LateLatch::restores`],
     /// so a reader comparing that against [`LateLatch::latches`] sees it.
+    #[must_use = "a refused restore leaves a transform no client sent in the graph; \
+                  `crate::tree::Counters::unrestored` is where the answer is kept"]
     pub fn restore(&mut self, graph: &mut Arena) -> bool {
         let Some(owed) = self.owed.take() else { return true };
         let restored = graph.set_transform(owed).is_ok();

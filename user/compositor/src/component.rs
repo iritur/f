@@ -693,6 +693,20 @@ fn report(
         let _ = board.write64(reported::POINTER_UNSTAMPED, latch.unstamped());
         let _ = board.write64(reported::LATCHES, latch.latches());
         let _ = board.write64(reported::LATCH_DECLINES, latch.declines());
+        // The restore, RFC 0131: the tally, the refusals, and the graph's own
+        // answer for the pointer's node — `reported::RESTORES` says why the last
+        // is the one a tally cannot fake.
+        let _ = board.write64(reported::RESTORES, latch.restores());
+        let _ = board.write64(reported::UNRESTORED, counters.unrestored);
+        let held_at = held.pointer_transform();
+        let _ = board.write64(
+            reported::LATCH_HELD_X,
+            held_at.map_or(0, |transform| transform.tx_x65536 as u64),
+        );
+        let _ = board.write64(
+            reported::LATCH_HELD_Y,
+            held_at.map_or(0, |transform| transform.ty_x65536 as u64),
+        );
         let _ = board.write64(reported::LATCH_AIM_NANOS, latch.aimed_at_nanos());
         if let Ok(latched) = latch.last() {
             let _ = board.write64(reported::LATCH_ENTRY, u64::from(latched.before_entry()));

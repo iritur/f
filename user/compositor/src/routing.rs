@@ -1156,6 +1156,39 @@ pub mod reported {
     /// Completions the ring accepted from this component as of that commit,
     /// **not** including the commit's own. Unit: entries.
     pub const CUT_ANSWERED: u32 = super::REPORT + 560;
+
+    // --- the restore, RFC 0131 ------------------------------------------------
+    //
+    // **What the latch's patch left behind, published so a boot can see it.**
+    // RFC 0131 takes the patch back out of the graph once the frame it was made
+    // for has been submitted, and until these words nothing outside this
+    // component could tell a restore that happened from one that did not: the
+    // count stayed in `crate::latch::LateLatch`, the answer was dropped, and
+    // the input boot closes one frame, so no second latch ever read the first
+    // one's leftovers as *committed*. The audit of `E3-B01i` found all three.
+    //
+    // Four words and two readings. [`RESTORES`] and [`UNRESTORED`] are this
+    // component's tally, and the frame requires the first equal to [`LATCHES`]
+    // and the second zero. [`LATCH_HELD_X`] and [`LATCH_HELD_Y`] are the graph's
+    // own answer for the pointer's node when the run ended, and the frame holds
+    // them against the transform its client committed — so a restore that
+    // counted itself and never wrote the graph, which keeps the tally perfect,
+    // is caught by the reading it cannot reach. *What would reverse this:* a
+    // latch that never enters the retained graph — RFC 0131's own reversal —
+    // at which point there is nothing to restore and these four go with it.
+
+    /// Latched frames whose patch was taken back out of the graph.
+    /// `crate::latch::LateLatch::restores`. Unit: frames — UI frames.
+    pub const RESTORES: u32 = super::REPORT + 568;
+    /// Latched frames whose restore the graph refused.
+    /// `crate::tree::Counters::unrestored`. Unit: frames — UI frames.
+    pub const UNRESTORED: u32 = super::REPORT + 576;
+    /// The translation along x the graph holds for the pointer's node when the
+    /// run ended, zero where no node was named or it carries no transform.
+    /// Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub const LATCH_HELD_X: u32 = super::REPORT + 584;
+    /// The same along y. Unit: as [`LATCH_HELD_X`].
+    pub const LATCH_HELD_Y: u32 = super::REPORT + 592;
 }
 
 /// Why the component's loop ended.

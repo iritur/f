@@ -1121,6 +1121,41 @@ impl Report {
                  three setup nodes and two committed transforms, on both halves",
             );
         }
+        // **RFC 0131's restore, which no boot could see until these clauses.**
+        // The latch writes its patch into the retained graph for one submission
+        // and takes it back out once the frame has left; the component kept the
+        // count to itself, dropped the answer, and this boot closes one frame, so
+        // no later latch ever read a leftover patch as *committed*. Three
+        // clauses, on both halves. The tally first: every latched frame
+        // restored — the withholding half latches nothing and so restores
+        // nothing — and none refused, which is the word that tells a restore the
+        // graph refused from one nobody asked for. Then the graph's own answer
+        // for the pointer's node when the run ended, against the transform this
+        // client committed: a count cannot fake that, so a restore that tallied
+        // itself and never wrote the graph leaves the patch there and lands on
+        // the third clause and nowhere else.
+        if seen.board.restores != seen.board.latches {
+            return Err(
+                "the compositor restored a different number of frames than it latched, so a \
+                 latch's patch outlived the frame it was made for and the retained graph holds \
+                 a transform no client sent (RFC 0131)",
+            );
+        }
+        if seen.board.unrestored != 0 {
+            return Err(
+                "the compositor's graph refused to take a latch's patch back out, though it had \
+                 accepted the node a statement earlier",
+            );
+        }
+        if signed(seen.board.latch_held_x) != COMMITTED_TX_X65536
+            || signed(seen.board.latch_held_y) != COMMITTED_TY_X65536
+        {
+            return Err(
+                "when the run ended the compositor's graph held a translation for the pointer's \
+                 node that is not the one this frame committed: a latch's patch was left in the \
+                 retained graph, whatever the compositor's own count of restores says",
+            );
+        }
         // And the tree, read back out of the page the component publishes into
         // rather than off its board. The two come from one set of counters,
         // which is exactly why disagreeing is worth failing on.

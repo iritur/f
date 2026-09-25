@@ -3240,6 +3240,40 @@ pub unsafe fn demonstrate(
                 spawned_line(record, &subject.place, consulted.spawned);
                 mounted_line(record, &subject.place, mount(tree, &subject.place, &mut report)?);
                 publish(&mut subject.place, &mut supervisor, &ledger_ring, &mut report)?;
+
+                // --- 3. the refilled occupant, served -------------------------
+                //
+                // **What lets step 0's identity fail**, `E3-B05e`'s audit. Step 0
+                // serves the place's first occupant, epoch zero, and a component
+                // that reported zero without reading its ring agreed with it — the
+                // auditor built one and the boot stayed green. The occupant the
+                // restart just spawned is epoch one, so the same client served
+                // against it asks the same question of a number that can be
+                // wrong. Same client, same life, same core: the only difference is
+                // the occupant, which is the thing under test. Its readings go
+                // into the client's own record of the refill and never over the
+                // first occupant's, whose reading is the one a supervisor judged.
+                //
+                // Nothing is copied and nobody is consulted: the supervisor has
+                // already decided, and a second reading on its row would be a
+                // second judgement nothing asked for.
+                let occupant = subject.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+                // SAFETY: as step 0 — `cpu` is started and idle, every
+                // consultation above ran to completion on it, and `occupant` is
+                // the instance the restart spawned into this place with its
+                // address space live and no core inside it.
+                let ran = unsafe {
+                    serve_ring3(occupant, frames, features, on, life, &mut *client, None)
+                };
+                let (announced, death, driven) = ran?;
+                report.scheduled += 1;
+                scheduled_line(Name(record.label()), on.0, life, announced, death);
+                let after = tree_after(occupant);
+                if state_after_line(Name(record.label()), occupant.tree_snapshot, after) {
+                    report.moved = report.moved.saturating_add(1);
+                }
+                retained = retained.saturating_add(client.retained(frames));
+                driven.map_err(Failure::Datapath)?;
             }
         }
         let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
@@ -5033,12 +5067,66 @@ pub struct Wired {
     /// client says which page its component wrote into, and the lifecycle says
     /// which page it copied from and which it unmounted. Unit: bytes, physical.
     pub tree_physical: u64,
+    /// The physical page the occupant's **own page tables** translate
+    /// `process::SPAWN_TREE` to, walked when the client is handed the occupant,
+    /// or zero where nothing is mapped there.
+    ///
+    /// A second reading of [`Wired::tree_physical`] and not a copy of it, which
+    /// is the whole reason it exists: the lifecycle's lines print the
+    /// bookkeeping field and the root's mount word — one written from the other
+    /// — so a served line printing the field as well was one number three times,
+    /// which the audit of `E3-B05e` said. The walk is the page the component's
+    /// stores land in, read off the tables the hardware walks, so the two agree
+    /// because `spawn` mapped the page it recorded and not because they are one
+    /// word. *What would reverse this:* a tree the frame reaches by a grant
+    /// rather than a fixed address, where the walk has no address to start from.
+    /// Unit: bytes, physical.
+    pub tree_mapped: u64,
     /// The occupant's heap, as a kernel address, or zero for a component that
     /// declared none. Unit: bytes, a kernel address.
     pub heap: u64,
     /// Which occupant of the place this is — the `epoch` [`spawn`] wrote into
     /// its control ring's header. Unit: instances, counting from zero.
     pub epoch: u32,
+}
+
+/// The physical page an occupant's own page tables translate `virt` to, or zero
+/// where they translate it to nothing.
+///
+/// **A reader of the hardware's format, deliberately not `paging`'s.** Four
+/// levels, nine bits each, and the address field of a present entry — what the
+/// processor walks when the component stores into `virt`. `paging` keeps its
+/// own constants for the same format private, and borrowing them would make
+/// this a second call into the code that built the tables rather than a second
+/// look at what it built; the two constants below are the architecture's and
+/// cannot drift from it. A large page anywhere above the last level is
+/// answered zero: an occupant's tree is one 4 KiB page, `spawn` maps it as one,
+/// and a walk that found anything else has found a page nobody recorded.
+///
+/// # Safety
+///
+/// `space` must be an address space this kernel built, out of frames it still
+/// owns, so every table the walk reaches is one [`paging::entry_read`] may read.
+unsafe fn mapped_page(frames: &FrameAllocator, space: &UserSpace, virt: u64) -> u64 {
+    /// Present: the entry maps something. The x86-64 architecture's bit 0.
+    const PRESENT: u64 = 1;
+    /// Page size: this entry is a large page rather than a table. Bit 7.
+    const LARGE: u64 = 1 << 7;
+    /// The physical address an entry carries: bits 12 through 51.
+    const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
+    let mut table = space.root();
+    for shift in [39u32, 30, 21, 12] {
+        let slot = ((virt >> shift) & 0x1ff) as usize;
+        // SAFETY: `table` is the space's root or an address taken out of a
+        // present, non-large entry of one of its tables — a table this kernel
+        // built — and `slot` is nine bits, so below 512. The caller's guarantee.
+        let entry = unsafe { paging::entry_read(frames, table, slot) };
+        if entry & PRESENT == 0 || (shift != 12 && entry & LARGE != 0) {
+            return 0;
+        }
+        table = entry & ADDRESS;
+    }
+    table
 }
 
 /// Map the transfer window into an occupant's address space.
@@ -5430,6 +5518,9 @@ unsafe fn serve_ring3(
         tsc_khz,
         tree: occupant.tree,
         tree_physical: occupant.tree_physical,
+        // SAFETY: `occupant.space` is an address space this kernel built out of
+        // frames it owns, and no core is inside it — the caller's guarantee.
+        tree_mapped: unsafe { mapped_page(frames, &occupant.space, crate::process::SPAWN_TREE) },
         heap: occupant.heap,
         epoch: occupant.epoch,
     };

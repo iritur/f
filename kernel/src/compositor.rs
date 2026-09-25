@@ -778,12 +778,34 @@ pub struct Report {
     /// compositor` can hold it equal to the page the lifecycle copied the
     /// supervisor's reading from and the page it unmounted when it stopped the
     /// occupant. RFC 0129.
+    ///
+    /// **The page is walked, not remembered** — `Wired::tree_mapped`, the
+    /// translation the occupant's own page tables give its tree address — while
+    /// the lifecycle's two lines print its bookkeeping and its root's mount word.
+    /// So the harness's page comparison is two readings of where the tree is.
+    /// What it is not is an instance identity: a refill is spawned out of the
+    /// account its predecessor's frames were refunded to and can land on the
+    /// same page, which is why [`Report::refilled`] rests on the epoch.
     /// Unit: instances, and bytes, physical.
     pub served: Option<(u32, u64)>,
+    /// The place's next occupant, served after the supervisor restarted it —
+    /// on the serving half, which is the one half whose place is restarted, and
+    /// `None` on every other.
+    ///
+    /// **What makes [`Report::served`]'s identity able to fail.** That one is
+    /// epoch zero against epoch zero, which agree whether or not the component
+    /// reads its ring; this one is epoch one, so a component reporting a
+    /// constant says the wrong occupant here. [`Refill`] is the argument.
+    pub refilled: Option<Refilled>,
     /// The cap the frame read off the compositor's `scene` server ring and wrote
     /// onto its routing page, `E3-B07e`. Zero on the two halves that stand
     /// nothing up. Unit: deltas per frame.
     pub cap: u64,
+    /// The cap the compositor's record declares as compiled: [`Report::cap`]
+    /// on every run but the recapped one, where the frame wrote [`RECAPPED`]
+    /// and this says what it was moved from. Zero on the two halves that stand
+    /// nothing up. Unit: deltas per frame.
+    pub declared: u64,
     /// Completions the client reaped that said `RESOURCE/QUOTA_EXHAUSTED` with
     /// [`Report::cap`] as the detail, by the frame they were sent in — the
     /// first commit this client submitted closes index zero, and anything past
@@ -826,7 +848,9 @@ impl Report {
             heap: 0,
             bells: Bells::default(),
             served: None,
+            refilled: None,
             cap: 0,
+            declared: 0,
             capped: [0; CAPPED_FRAMES],
             timeline: Timeline::NOTHING,
         }
@@ -1131,6 +1155,16 @@ pub struct Board {
     /// Deltas it refused because their frame had staged its cap, `E3-B07e`.
     /// Unit: deltas.
     pub capped: u64,
+    /// Latched frames whose patch it took back out of the graph, RFC 0131.
+    /// Unit: frames — UI frames.
+    pub restores: u64,
+    /// Latched frames whose restore the graph refused. Unit: frames — UI frames.
+    pub unrestored: u64,
+    /// The pointer node's translation along x as the graph held it when the run
+    /// ended. Unit: device pixels, scaled by 65 536, as a two's-complement `u64`.
+    pub latch_held_x: u64,
+    /// The same along y. Unit: as [`Board::latch_held_x`].
+    pub latch_held_y: u64,
 }
 
 impl Board {
@@ -1214,6 +1248,10 @@ impl Board {
             latch_walked: board.read64(reported::LATCH_WALKED).ok()?,
             epoch: board.read64(reported::EPOCH).ok()?,
             capped: board.read64(reported::CAPPED).ok()?,
+            restores: board.read64(reported::RESTORES).ok()?,
+            unrestored: board.read64(reported::UNRESTORED).ok()?,
+            latch_held_x: board.read64(reported::LATCH_HELD_X).ok()?,
+            latch_held_y: board.read64(reported::LATCH_HELD_Y).ok()?,
         })
     }
 }
@@ -1606,9 +1644,50 @@ impl Report {
                                 than the one the lifecycle served, so the instance that published \
                                 is not the instance in the place");
                 }
-                Ok(())
+                self.refill_held(epoch)
             }
         }
+    }
+
+    /// The place's next occupant, which is where [`Report::served_held`]'s
+    /// comparison can fail. `E3-B05e`'s audit, and [`Refill`] is the argument.
+    ///
+    /// **Required only where it was served, and refused where it could not have
+    /// been.** Whether the serving half's place is restarted at all is the
+    /// supervisor's judgement, which RFC 0123 keeps out of the frame — so a
+    /// serving half with no refill is left to `cargo xtask compositor`, which
+    /// requires the restart and then this occupant's line. What the frame holds
+    /// is identity, which is transport: the refill is the occupant after the one
+    /// served, its component read *that* number off its own ring, and it served
+    /// the script its predecessor did. A refill on any other half is a place
+    /// restarted that nothing asked to restart.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the boot log.
+    fn refill_held(&self, epoch: u32) -> Result<(), &'static str> {
+        let Some(refilled) = self.refilled else { return Ok(()) };
+        if self.half != Half::Serve {
+            return Err("a half whose place is never restarted served a refilled occupant");
+        }
+        if u64::from(refilled.epoch) != u64::from(epoch) + 1 {
+            return Err("the occupant served after the restart is not the place's next one: its \
+                        epoch is not one past the occupant that timed out");
+        }
+        if refilled.reported != u64::from(refilled.epoch) + 1 {
+            return Err("the refilled occupant's component says it is a different occupant than \
+                        the one the lifecycle served — the epoch it reports is not the one the \
+                        frame wrote into its control ring, so it did not read its ring, or read \
+                        somebody else's");
+        }
+        if refilled.frames != self.board.frames
+            || refilled.submitted != self.submitted
+            || refilled.drained != refilled.submitted
+        {
+            return Err("the refilled occupant did not serve the script its predecessor served, \
+                        so what identified it is a component that never ran the client's frames");
+        }
+        Ok(())
     }
 
     /// What both serving halves owe about crossings and about the chain.
@@ -2020,16 +2099,17 @@ impl Report {
         let excess = u64::from(CAPPED_DELTAS) - self.cap;
         if self.capped[0] != excess {
             return Err(
-                "the frame past the cap was not refused exactly its excess: fifty of sixty \
-                 applied and ten answered RESOURCE/QUOTA_EXHAUSTED with the cap as the detail. \
-                 Sixty applied is a cap nobody enforces; fewer refused is a cap counted from \
-                 somewhere other than the frame's first delta",
+                "the frame past the cap was not refused exactly its excess: the cap's worth of \
+                 sixty applied and the rest answered RESOURCE/QUOTA_EXHAUSTED with the cap as the \
+                 detail. Sixty applied is a cap nobody enforces; another count refused is a cap \
+                 counted from somewhere other than the frame's first delta, or against a number \
+                 other than the one on the routing page",
             );
         }
         if self.capped[1..] != [0; CAPPED_FRAMES - 1] {
             return Err(
                 "the frame after the capped one was refused something, though it carried eight \
-                 deltas against a cap of fifty — the count did not go back to zero at the commit, \
+                 deltas against a larger cap — the count did not go back to zero at the commit, \
                  so it is a quota over the run rather than over a frame",
             );
         }
@@ -2746,6 +2826,22 @@ pub fn report_lines(report: &Report) {
             tree_at,
         );
     }
+    // And the place's next occupant, on the half that restarts it — the line
+    // whose epochs can disagree. `cargo xtask compositor` holds its epoch
+    // against the lifecycle's spawn line after the restart.
+    if let Some(refilled) = report.refilled {
+        crate::kprintln!(
+            "  compositor    served its place's next occupant: occupant epoch {}, whose own \
+             control ring says epoch {} (reported plus one: {}); its tree is the page at {:#x}; \
+             {} frame(s) closed over {} entr(y/ies)",
+            refilled.epoch,
+            refilled.reported.saturating_sub(1),
+            refilled.reported,
+            refilled.tree_at,
+            refilled.frames,
+            refilled.drained,
+        );
+    }
     crate::kprintln!(
         "  compositor    a component holding the scene graph at ring 3, and the {} half: {}",
         report.half.name(),
@@ -2819,6 +2915,18 @@ pub fn report_lines(report: &Report) {
                 report.board.capped,
                 FramesCapped(report.capped),
             );
+            // The recapped run says what it moved, on its own line so the one
+            // above reads the same on every run. `cargo xtask compositor
+            // recapped` requires this line and the two numbers in it to differ,
+            // so a frame that ignored the parameter is not a second cap.
+            if report.cap != report.declared {
+                crate::kprintln!(
+                    "  compositor    recapped: the record declares {} and the frame wrote {} — \
+                     the same record with its scene ring's cap moved and nothing else changed",
+                    report.declared,
+                    report.cap,
+                );
+            }
             crate::kprintln!(
                 "  compositor    {} frame(s) closed, {} delta(s) applied, {} node(s) created, {} \
                  removed, {} live, last frame {}",
@@ -3167,6 +3275,61 @@ pub(crate) fn frame_cap(record: &Record) -> Option<u64> {
     (ring.deltas_per_frame_max != 0).then_some(u64::from(ring.deltas_per_frame_max))
 }
 
+/// The boot parameter that runs the capped half at [`RECAPPED`] rather than at
+/// the manifest's own cap. `cargo xtask compositor recapped` passes it beside
+/// `compositor=capped`, so the half, its script and its verdict are the capped
+/// half's and the cap is the only thing that moves.
+const RECAPPED_PARAMETER: &[u8] = b"compositor.recapped";
+
+/// The second cap the capped half runs at, `E3-B07e`'s audit.
+///
+/// Thirty, the auditor's suggestion, and the constraints are what make it a
+/// number rather than a preference: inside the range the batch allows
+/// (`f_abi::manifest::FRAME_DELTAS_CAP_MAX`), strictly between the capped
+/// half's two frames so the first reaches it and the second stays under it —
+/// the straddle clause in [`Report::capped_verdict`] — and far enough from the
+/// manifest's fifty that a compositor counting against a constant is off by
+/// twenty rather than by one. Unit: deltas per frame.
+const RECAPPED: u32 = 30;
+const _: () = assert!(
+    RECAPPED != 0
+        && RECAPPED <= f_abi::manifest::FRAME_DELTAS_CAP_MAX
+        && RECAPPED > UNCAPPED_DELTAS
+        && RECAPPED < CAPPED_DELTAS
+);
+
+/// The compositor's record with its framed ring's cap moved to `cap`, and
+/// nothing else changed.
+///
+/// # Why derived here and not compiled from a second manifest
+///
+/// **A second manifest is a second copy of three hundred lines that must stay
+/// identical but for one number**, and nothing in this tree checks that two
+/// manifests agree — `cargo xtask lint-manifests` judges each one alone. The
+/// day the heap or the class moved in one and not the other, the second capped
+/// run would be a run of a different component and would still be green. A
+/// record derived here from the one the place was filled from cannot drift:
+/// the difference is one field by construction, which is `mute`'s argument for
+/// its own variant.
+///
+/// What it costs, said rather than hidden: the occupant the lifecycle spawned
+/// was spawned from the record as compiled, and only the word on its routing
+/// page comes from this one. That is honest today because the cap is read in
+/// exactly one place — [`frame_cap`], onto the page — and nothing at spawn or
+/// admission reads it. *What would reverse this:* a spawn or an admission that
+/// sizes anything from the cap, at which point the variant must be a compiled
+/// record the place is filled from, and the way to produce it without a second
+/// file is `xtask` compiling the one manifest twice with the field overridden.
+fn recapped(record: &Record, cap: u32) -> Record {
+    let mut varied = *record;
+    for ring in &mut varied.ring {
+        if ring.framed_server() {
+            ring.deltas_per_frame_max = cap;
+        }
+    }
+    varied
+}
+
 /// Put the compositor's record past the admission a spawn performs, or describe a
 /// machine below the bottom of the ladder and be refused — the two halves that
 /// stand no component up.
@@ -3337,8 +3500,47 @@ pub struct Placed {
     /// the routing page and carried back on every capped completion.
     /// Unit: deltas per frame.
     cap: u64,
+    /// The cap the compositor's record declares as compiled — [`Placed::cap`]
+    /// except on the recapped run, where the two must differ.
+    /// Unit: deltas per frame.
+    declared: u64,
     /// What the timeline half recorded, `E3-B01`.
     timeline: Timeline,
+    /// The place's next occupant, served after the restart, `E3-B05e`.
+    refill: Refill,
+}
+
+/// The same three readings as [`Placed`]'s own, of the occupant the lifecycle
+/// spawned into the place after it stopped the one that timed out.
+///
+/// # Why a second occupant is served at all
+///
+/// **Because the identity check could not fail on one.** Every place's first
+/// occupant is epoch zero, so the served occupant's epoch and the epoch its
+/// component reads off its own control ring agree whether or not the component
+/// reads anything: the audit of `E3-B05e` made the component report *zero*
+/// without looking and `cargo xtask compositor serve` stayed green. The refill
+/// is epoch one, so the same comparison over it is a comparison between two
+/// numbers that can differ, and a component that does not read its ring now
+/// says one where the frame wrote two.
+///
+/// Its readings are kept apart from the first occupant's, and never replace
+/// them, because the verdict, the rows and `claims/0038`'s crossing count are
+/// the first occupant's and the reading a supervisor judged was that one's.
+/// What is taken from this one is identity and that it served.
+#[derive(Clone, Copy)]
+struct Refill {
+    /// What was taken before its core ran.
+    before: Option<Before>,
+    /// What the client saw while it ran.
+    seen: Option<Result<Seen, Trouble>>,
+    /// What was taken after its core came back.
+    after: Option<After>,
+}
+
+impl Refill {
+    /// Nothing served yet.
+    const NOTHING: Self = Self { before: None, seen: None, after: None };
 }
 
 /// What a [`Placed`] reads off the occupant before its first instruction.
@@ -3411,7 +3613,28 @@ impl Placed {
         // Before the lifecycle builds anything, beside the heap check and for
         // its reason: a compositor with no cap to hand it is refused while
         // nothing has been spent, rather than started and told zero.
-        let cap = frame_cap(&record).ok_or(Trouble::Unframed)?;
+        let declared = frame_cap(&record).ok_or(Trouble::Unframed)?;
+        // **The capped half at a second cap, `E3-B07e`'s audit.** Every boot and
+        // every test held the cap at the manifest's fifty, so a compositor that
+        // ignored the word on its page and wrote fifty in passed all of them. On
+        // `compositor.recapped` the record is taken again with its framed ring's
+        // cap moved to [`RECAPPED`] and **nothing else changed**, and the cap is
+        // read out of that record by the same [`frame_cap`] — `mute`'s device for
+        // its declaration, for its reason: the only difference between the two
+        // runs is the thing under test, and there is no second manifest to drift
+        // from the first. [`recapped`] argues why a derived record and not a
+        // compiled one.
+        let cap = if half == Half::Capped && boot.has_parameter(RECAPPED_PARAMETER) {
+            let cap = frame_cap(&recapped(&record, RECAPPED)).ok_or(Trouble::Unframed)?;
+            // A variant that lands on the declared cap tests nothing the declared
+            // run did not, and would read as the second value it is not.
+            if cap == declared {
+                return Err(Trouble::Unframed);
+            }
+            cap
+        } else {
+            declared
+        };
         let described = match half {
             // What the manifest declares, or — on the starved half — two pages,
             // which is the one number in this plan the component is asked to
@@ -3432,7 +3655,9 @@ impl Placed {
             client: 0,
             after: None,
             cap,
+            declared,
             timeline: Timeline::NOTHING,
+            refill: Refill::NOTHING,
         })
     }
 
@@ -3507,12 +3732,63 @@ impl Placed {
                 spared: spared.saturating_sub(was_spared),
             },
             served: Some((before.epoch, before.tree_at)),
+            refilled: self.refilled(),
             cap: self.cap,
+            declared: self.declared,
             capped: seen.capped,
             timeline: self.timeline,
             ..Report::nothing(self.half, self.image)
         })
     }
+
+    /// Whether the occupant the lifecycle is serving now is the place's refill.
+    ///
+    /// Read off the first run's last reading rather than counted, because the
+    /// lifecycle calls this client's three hooks in one order per occupant and
+    /// the first occupant's `ended` is what closes its run. So everything after
+    /// it is the next occupant's, and nothing before it can be.
+    const fn refilling(&self) -> bool {
+        self.after.is_some()
+    }
+
+    /// The refill's identity and what it served, or `None` where no refill was
+    /// served — whole, or not at all, so a refill whose core never came back is
+    /// the absence the verdict refuses rather than a half-filled row.
+    fn refilled(&self) -> Option<Refilled> {
+        let (Some(before), Some(Ok(seen)), Some(after)) =
+            (self.refill.before, self.refill.seen, self.refill.after)
+        else {
+            return None;
+        };
+        let board = after.board.unwrap_or_default();
+        Some(Refilled {
+            epoch: before.epoch,
+            tree_at: before.tree_at,
+            reported: board.epoch,
+            frames: board.frames,
+            submitted: seen.submitted,
+            drained: board.drained,
+        })
+    }
+}
+
+/// The place's next occupant, as the client that served it saw it. `E3-B05e`.
+#[derive(Clone, Copy)]
+pub struct Refilled {
+    /// Which occupant the lifecycle handed a core: the epoch `spawn` wrote into
+    /// its control ring's header. Unit: instances.
+    pub epoch: u32,
+    /// The page its own page tables put its tree on. Unit: bytes, physical.
+    pub tree_at: u64,
+    /// The epoch its component read off that control ring, plus one — zero for
+    /// a component that never finished its board. Unit: none — an epoch plus one.
+    pub reported: u64,
+    /// Frames it closed. Unit: frames — UI frames.
+    pub frames: u64,
+    /// Entries the client put on its ring. Unit: entries.
+    pub submitted: u64,
+    /// Entries it took off that ring. Unit: entries.
+    pub drained: u64,
 }
 
 /// The worker core's four doorbell counts, in [`Bells`]' order.
@@ -3638,15 +3914,25 @@ impl crate::component::Datapath for Placed {
         // plausible address.
         board.write64(at::MAGIC, routing::MAGIC).map_err(|_| Trouble::Channel(0).why())?;
 
-        self.before = Some(Before {
+        let before = Before {
             nodes: blank.nodes(),
             blank: blank.snapshot(),
             words,
             counts: counts(wired.cpu),
             epoch: wired.epoch,
-            tree_at: wired.tree_physical,
+            // The page the occupant's **own page tables** put its tree address
+            // on, and not the page the lifecycle's bookkeeping says it gave it:
+            // the liveness and timeout lines print that one, so the served line
+            // printing the walk is what makes the harness's page comparison two
+            // readings rather than one field three times. `Wired::tree_mapped`.
+            tree_at: wired.tree_mapped,
             cpu: wired.cpu,
-        });
+        };
+        if self.refilling() {
+            self.refill.before = Some(before);
+        } else {
+            self.before = Some(before);
+        }
         Ok(())
     }
 
@@ -3657,7 +3943,13 @@ impl crate::component::Datapath for Placed {
         _killer: &mut dyn crate::component::Killer,
     ) -> Result<crate::component::Drove, &'static str> {
         let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0).why())?;
-        self.client = crate::arch::x86_64::current_cpu();
+        // The refill's run changes nothing the first run published: the path,
+        // the doorbell's accounting and the client's core are the first
+        // occupant's story, and [`Refill`] keeps only what the second one said.
+        let refilling = self.refilling();
+        if !refilling {
+            self.client = crate::arch::x86_64::current_cpu();
+        }
         // Both ends adopted rather than described, because this client is not
         // the grantor of either: `spawn` wrote the control ring's header out of
         // the occupant's own account, and `prepare` wrote the data ring's before
@@ -3764,16 +4056,20 @@ impl crate::component::Datapath for Placed {
         if self.half == Half::Wake {
             doorbell.submitted(true);
         }
-        self.rung = (
-            match doorbell.path() {
-                Path::Polling => "Polling",
-                Path::KernelIpi => "KernelIpi",
-                Path::UserInterrupt => "UserInterrupt",
-            },
-            doorbell.operations(),
-            doorbell.rings(),
-        );
-        self.seen = Some(driven);
+        if refilling {
+            self.refill.seen = Some(driven);
+        } else {
+            self.rung = (
+                match doorbell.path() {
+                    Path::Polling => "Polling",
+                    Path::KernelIpi => "KernelIpi",
+                    Path::UserInterrupt => "UserInterrupt",
+                },
+                doorbell.operations(),
+                doorbell.rings(),
+            );
+            self.seen = Some(driven);
+        }
         if told.is_err() {
             return Err(Trouble::Channel(0).why());
         }
@@ -3806,13 +4102,18 @@ impl crate::component::Datapath for Placed {
         for (slot, id) in words.iter_mut().zip(node::WRITTEN) {
             *slot = reader.value(id).unwrap_or(0);
         }
-        self.after = Some(After {
+        let after = After {
             board: Board::of(&board),
             reported: board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0),
             fold: reader.snapshot(),
             words,
             counts,
-        });
+        };
+        if self.refilling() {
+            self.refill.after = Some(after);
+        } else {
+            self.after = Some(after);
+        }
     }
 }
 

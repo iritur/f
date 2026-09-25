@@ -485,6 +485,7 @@ that can start behind work that cannot.
   *needs:* E3-B05c, E0-D10, E0-P18
 - [ ] **E3-B05e** `M` What happens when a wait does not arrive.
   *exit:* a timeout is a named fate, the supervisor decides it, and a boot shows a compositor restarted for one — RFC 0008 is paid, so the policy that decides is above the frame rather than inside it.
+  *narrowed:* **in its meaning, not its words, by RFC 0129 on 2026-09-25**, and recorded here because RFC 0084 puts a narrowing in this file rather than in the evidence under a closed line: *restarted for one* is met by an occupant whose core had already returned when the supervisor stopped it, as the store's restart is. No boot shows a stop interrupting a compositor that is still stuck, and a stuck one is what *what happens when a wait does not arrive* most naturally describes. The reversal is an occupant that holds its core across a consultation, which is RFC 0129's first reversal condition.
   *needs:* E3-B05b, E1-B05
 - [ ] **E3-B05f** `S` The synchronisation state is in the compositor's own tree.
   *exit:* waits outstanding, last value signalled and timeouts are read back at boot out of the component's subtree.

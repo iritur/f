@@ -93,7 +93,7 @@
 //! published rung to be the one this component started with. The three together
 //! are the clause, and none of them is it alone.
 
-use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal};
+use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal, SetTransform};
 use f_abi::{Cqe, Sqe, error, flags};
 use f_interface::backend::{Capabilities, Capability, select};
 use f_interface::token::{Report, Resolved, Theme, Token, resolve};
@@ -185,6 +185,22 @@ pub struct Counters {
     /// says why the two refusals are two words.
     /// Unit: deltas.
     pub capped: u64,
+    /// Latched frames whose patch the graph refused to take back out, RFC 0131.
+    ///
+    /// **The restore's own answer, kept rather than dropped.** `crate::latch::
+    /// LateLatch::restores` counts the restores that landed, so a shortfall
+    /// against `LateLatch::latches` says *something did not come back* and not
+    /// which thing: a restore that was never attempted and one the graph refused
+    /// read the same in that subtraction. This is the second of the two, counted
+    /// where [`Held::close`] is handed the answer, so a reader can tell a build
+    /// that forgot to restore (a shortfall with this at zero) from a graph that
+    /// refused a node it accepted a statement earlier (this above zero). Board
+    /// only — the manifest's state tree is full — and the frame requires it
+    /// zero. *What would reverse this:* a restore that cannot be refused, which
+    /// is a graph whose transform store is not fallible, and then this word and
+    /// the `bool` it counts both go.
+    /// Unit: frames — UI frames.
+    pub unrestored: u64,
 }
 
 impl Counters {
@@ -206,6 +222,7 @@ impl Counters {
         late: 0,
         answered: 0,
         capped: 0,
+        unrestored: 0,
     };
 
     /// Entries that crossed this boundary in either direction.
@@ -817,6 +834,22 @@ impl<'a> Held<'a> {
         &self.counters
     }
 
+    /// The transform the graph holds for the node the pointer rides, as the
+    /// graph answers it now — `None` where no node was named or it carries none.
+    ///
+    /// **The restore's other witness, and the one a count cannot fake**, RFC
+    /// 0131. `LateLatch::restores` is this component's tally of restores it
+    /// believes landed; this is the arena's own record of what the node holds,
+    /// asked after the run and never remembered. A restore that counted itself
+    /// without writing the graph keeps the tally equal to the latches and leaves
+    /// the patch in the graph, and only this reading moves. The frame compares
+    /// it against the transform its own client committed, which is a number
+    /// nothing in this component told it.
+    #[must_use]
+    pub fn pointer_transform(&self) -> Option<SetTransform> {
+        self.graph.transform_of(self.latch.node()).ok().flatten()
+    }
+
     /// How many nodes the graph holds now.
     ///
     /// Asked of the arena rather than summed from `created` and `removed`,
@@ -1048,9 +1081,16 @@ impl<'a> Held<'a> {
         // graph.** It was the submitted frame's and never the client's, and a
         // retained graph still holding it would hand the next frame's latch its
         // own previous patch to call *committed*. `crate::latch`'s *the patch is
-        // the submitted frame's* is the argument; the `bool` is dropped because
-        // `LateLatch::restores` beside `LateLatch::latches` already says it.
-        let _restored = self.latch.restore(self.graph);
+        // the submitted frame's* is the argument.
+        //
+        // **The answer is counted and not dropped**, RFC 0131 and its audit: a
+        // refused restore leaves a transform no client sent in the retained
+        // graph, and `LateLatch::restores` falling short of `latches` says so
+        // without saying whether the restore was refused or never asked.
+        // `Counters::unrestored` is the half that tells them apart.
+        if !self.latch.restore(self.graph) {
+            self.counters.unrestored += 1;
+        }
     }
 }
 
@@ -1169,6 +1209,11 @@ mod tests {
     /// test that hard-coded the bits would be asserting against the same
     /// arithmetic it is checking.
     fn plan() -> Plan {
+        capped_at(CAP)
+    }
+
+    /// [`plan`], told a cap of `cap` in place of the manifest's.
+    fn capped_at(cap: u32) -> Plan {
         let mut bits = 0;
         for capability in Capability::ALL {
             bits |= 1 << capability.index();
@@ -1178,7 +1223,7 @@ mod tests {
             scanout_period_nanos: PERIOD_NANOS,
             margin_nanos: MARGIN_NANOS,
             pointer_node: NO_NODE,
-            deltas_per_frame_max: CAP,
+            deltas_per_frame_max: cap,
         }
     }
 
@@ -1368,6 +1413,18 @@ mod tests {
         nodes: core::ops::RangeInclusive<u32>,
         token: u64,
     ) -> u64 {
+        frame_under(held, clock, nodes, token, CAP)
+    }
+
+    /// [`frame_of`] against a cap of `cap`, which every capped answer must
+    /// carry as its detail.
+    fn frame_under(
+        held: &mut Held<'_>,
+        clock: &mut Ticking,
+        nodes: core::ops::RangeInclusive<u32>,
+        token: u64,
+        cap: u32,
+    ) -> u64 {
         let quota = error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED);
         let mut capped = 0;
         for node in nodes {
@@ -1376,7 +1433,7 @@ mod tests {
                 .offer(&entry, &payload, clock.next())
                 .expect("an offer with no flag completes");
             if answer.result != 0 {
-                assert_eq!((answer.result, answer.ext), (quota, u64::from(CAP)), "node {node}");
+                assert_eq!((answer.result, answer.ext), (quota, u64::from(cap)), "node {node}");
                 capped += 1;
             }
         }
@@ -1419,6 +1476,61 @@ mod tests {
         assert_eq!(held.live(), u64::from(CAP) + 8);
         assert_eq!(held.counters().capped, 10);
         assert_eq!(held.counters().token, 0x22);
+    }
+
+    /// The cap the manifest declares, read out of the manifest itself.
+    ///
+    /// **So the test below cannot drift into being a test at fifty.** Every other
+    /// test here is told [`CAP`], and a compositor that ignored the word it was
+    /// told and wrote fifty passes all of them — the audit of `E3-B07e` built
+    /// that compositor and watched `compositor=capped` stay green. A second
+    /// constant beside [`CAP`] would be a second number that could be edited to
+    /// agree with it; the file is the one the frame reads, so the guard is
+    /// against the value a hard-coded cap would actually carry.
+    fn declared_cap() -> u32 {
+        const MANIFEST: &str = include_str!("../manifest.toml");
+        MANIFEST
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("deltas_per_frame_max"))
+            .and_then(|rest| rest.trim().strip_prefix('='))
+            .and_then(|value| value.trim().replace('_', "").parse().ok())
+            .expect("user/compositor/manifest.toml declares no deltas_per_frame_max")
+    }
+
+    /// A cap other than the manifest's, inside the range the batch allows and
+    /// between the two frames below. Unit: deltas per frame.
+    const OTHER_CAP: u32 = 30;
+
+    /// **`E3-B07e`'s enforcement at a cap the manifest does not declare**, so a
+    /// compositor that counts against anything but the word it was told goes red
+    /// here. Sixty against thirty: thirty applied, thirty answered
+    /// `RESOURCE/QUOTA_EXHAUSTED` with thirty as the detail, the frame closed;
+    /// then eight, all applied. Every number below is derived from
+    /// [`OTHER_CAP`], and the guard first says it is not the manifest's.
+    #[test]
+    fn a_cap_other_than_the_manifests_is_the_cap_enforced() {
+        assert_ne!(
+            OTHER_CAP,
+            declared_cap(),
+            "a test at the manifest's own cap cannot tell a told cap from a written-in one"
+        );
+        assert!(OTHER_CAP > 8 && OTHER_CAP < 60 && OTHER_CAP <= DELTAS_MAX as u32);
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, capped_at(OTHER_CAP), &Theme::DEFAULT);
+        let mut clock = Ticking::new();
+
+        let excess = 60 - u64::from(OTHER_CAP);
+        assert_eq!(frame_under(&mut held, &mut clock, 1..=60, 0x31, OTHER_CAP), excess);
+        assert_eq!(held.counters().frames, 1, "the capped frame did not close");
+        assert_eq!(held.counters().edits, u64::from(OTHER_CAP));
+        assert_eq!(held.live(), u64::from(OTHER_CAP), "the graph holds more or fewer than the cap");
+        assert_eq!(held.counters().capped, excess);
+        assert_eq!(held.counters().refused, 0);
+
+        assert_eq!(frame_under(&mut held, &mut clock, 61..=68, 0x32, OTHER_CAP), 0);
+        assert_eq!(held.live(), u64::from(OTHER_CAP) + 8);
+        assert_eq!(held.counters().capped, excess, "the cap outlived its frame");
     }
 
     /// A clock that ticks once per entry offered.
