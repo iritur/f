@@ -1497,6 +1497,7 @@ fn main() -> ExitCode {
         "lint-claims" => lint_claims(),
         "lint-units" => lint_units(),
         "lint-callbacks" => lint_callbacks(),
+        "lint-projections" => lint_projections(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-testing-status" => lint_testing_status(),
         "lint-debt" => lint_debt(),
@@ -1768,6 +1769,8 @@ cargo xtask <command>
   lint-claims        No document cites a claim value the claim no longer has
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
+  lint-projections   E3-B03k: no projection branches on the text or label role;
+                     each is a row of its per-role table, shaped like another's
   lint-claim-owners  R09: every claim names the document that owns it
   lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
   lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
@@ -16301,6 +16304,11 @@ fn lint_all() -> Result<(), String> {
     // than one honestly listed as review.
     lint_units()?;
     lint_callbacks()?;
+    // `E3-B03k`'s exit, made a check rather than a sentence: no projection of
+    // the declared tree branches on `Role::Text` or `Role::Label`. Beside the
+    // callback rule because both refuse a shape of control flow by reading
+    // the files it would be written in. RFC 0140.
+    lint_projections()?;
     // The third rule of that shape, and the newest: a colour outside the one
     // module that resolves one, carried with no record of the ground it was
     // checked against. RFC 0079 ends by naming it the reversal to watch first
@@ -16762,6 +16770,1361 @@ fn lint_callbacks() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// How one file that is part of a projection may name a role.
+///
+/// Three answers, because the files are of three kinds and one rule stated over
+/// all of them would be either too weak for the file that should name no role
+/// or unsatisfiable for the file whose job is a table of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoleUse {
+    /// Holds the projection's per-role tables: each `fn` named here takes a
+    /// `Role` and is an exhaustive `match` on it, which RFC 0104 requires.
+    /// `Role::Text` and `Role::Label` are rows of each table once — alone, or
+    /// as one alternative of a grouped arm — and appear nowhere else in the
+    /// file's shipped code. Several, because the display projection's ink file
+    /// holds two: the ink a role takes and the floor it owes.
+    Tables(&'static [&'static str]),
+    /// Walks a tree and may name the roles it has to — a canvas, a lane, a clip
+    /// — and never the two [`TEXT_ROLES`].
+    Walk,
+    /// Names no role at all, and reads a node's role only by handing it to
+    /// `kind_of`, where the per-role decision already is.
+    Free,
+}
+
+/// The two roles `E3-B03k` names, which no projection may branch on.
+const TEXT_ROLES: [&str; 2] = ["Role::Text", "Role::Label"];
+
+/// The same two as an `impl` of `Role` spells them.
+const TEXT_SELVES: [&str; 2] = ["Self::Text", "Self::Label"];
+
+/// What a projection may call on a role outside its tables: the vocabulary's
+/// own per-role answers, which `interface/src/node.rs`'s `vocabulary!` emits
+/// from the one list every role is written in. A method defined anywhere else
+/// is a per-role decision made outside the rows.
+const ROLE_METHODS: [&str; 6] =
+    ["index", "name", "since", "family", "is_operable", "accepts_parent"];
+
+/// Every file a projection of the declared tree is made of, and how each may
+/// name a role. `E3-B03k`, RFC 0140.
+///
+/// The screen reader is `reader.rs` and the arrangement `canvas.rs` linearises
+/// for it; the display projection is `emit.rs`, which chooses a kind,
+/// `token.rs`, which chooses the ink it is painted in and the floor that ink
+/// owes, and `draw.rs` with the paragraph it sets, which chooses what text is
+/// drawn. The agent and remote projections are rows too although the exit
+/// names two: the rule is about projections and not about the two a task
+/// happened to be written against, and both already satisfy it.
+const PROJECTIONS: &[(&str, RoleUse, &str)] = &[
+    ("interface/src/reader.rs", RoleUse::Tables(&["phrasing"]), "the screen reader"),
+    ("interface/src/canvas.rs", RoleUse::Walk, "the screen reader's arrangement"),
+    ("interface/src/agent.rs", RoleUse::Tables(&["affordance"]), "the agent projection"),
+    ("semantic/src/emit.rs", RoleUse::Tables(&["kind_of"]), "the display projection's kind"),
+    (
+        "interface/src/token.rs",
+        RoleUse::Tables(&["of", "ink_for"]),
+        "the display projection's ink, and the floor it owes",
+    ),
+    ("semantic/src/draw.rs", RoleUse::Free, "the display projection's text"),
+    ("semantic/src/remote.rs", RoleUse::Tables(&["presentable"]), "the remote projection"),
+    ("text/src/paragraph.rs", RoleUse::Free, "a paragraph set in lines"),
+];
+
+/// What a file names when it sets text in lines, which is what makes it part
+/// of a projection whether or not it has a row.
+const SETS_TEXT: [&str; 2] = ["f_text::paragraph", "paragraph::Setting"];
+
+/// `E3-B03k`: no text-specific branch in any projection.
+///
+/// # What a text-specific branch is, and why a table row is not one
+///
+/// The exit forbids *a text-specific branch in either projection*, and each
+/// projection holds an exhaustive `match` on `Role` with an arm for
+/// `Role::Text` and one for `Role::Label` — RFC 0104 requires it. So the word
+/// has to be defined before it can be checked, and the definition is this: **a
+/// branch is text-specific when text takes a path through the projection that
+/// no other role takes.** A row of the per-role table is not one, on two
+/// conditions this lint holds rather than asserts:
+///
+/// 1. **The row is a value, not code.** Its right-hand side is a literal — a
+///    struct, a variant, a constructor applied to one — with no call, no
+///    condition, no block. Every role then leaves the table by the same edge
+///    and reaches the same code after it; what differs is data that code
+///    treats uniformly.
+/// 2. **The value is not text's alone.** With its string literals set aside,
+///    the text row is equal to the row of some role that is not text. A row
+///    shaped like nobody else's is a decision only text reaches — a phrase
+///    shape, a kind, a flow no other role has — and that is a branch wearing a
+///    table's clothes. A grouped arm — `Role::Label | Role::Text | Role::Image
+///    => …` — that holds a role which is not text is a shared row by
+///    construction: one value, several roles, and text is one of them. A
+///    grouped arm of the two text roles alone is not, and must equal some
+///    other arm like any single row.
+///
+/// The noun a reader says (`"text"`, `"label"`) differs per role by design,
+/// and a string literal is what RFC 0104 confines the language to, so literals
+/// are set aside in the comparison: a noun is the one thing a row is *meant*
+/// to own. Everything else about text is a row it shares.
+///
+/// Outside the tables, neither role may be named at all in a projection's
+/// shipped code: an `if node.role == Role::Text`, a second `match` with a
+/// `Role::Label` arm, a `matches!` — each is a path only those roles take. A
+/// glob or grouped import of `Role`'s variants is refused too, because it lets
+/// a bare `Text` pattern past every needle here. A role is compared only with
+/// a named role or with another role; its index and name are never compared,
+/// since `role.index() != 21` is `Role::Text` spelled as a number; and the
+/// only methods called on it are [`ROLE_METHODS`]. A file whose row says
+/// [`RoleUse::Free`] may not name `Role` at all, and every mention of `role`
+/// on a line is the argument of a `kind_of(…)` there — counted, so a second
+/// read beside the first is not excused by it.
+///
+/// # Outside the projections
+///
+/// A projection can take a path only text takes without naming text in its
+/// own file, by calling something that does: `const PROSE: Role = Role::Text`
+/// in the vocabulary, a method `impl Role { fn is_prose(self) … Self::Text }`,
+/// a free function comparing a role with `Role::Label`. So every shipped file
+/// of the tree is read too. In an `impl` of `Role`, neither text role may be
+/// named, as `Self::` or as `Role::`. A `const` or `static` whose type is a
+/// role, an array of them or an `Option` of one may not hold a text role.
+/// Anywhere else a text role may appear only as a value handed to a call or a
+/// tuple — preceded by `(` or `,`, followed by `,`, `)` or `.`, on a line that
+/// neither compares nor matches — which is how a declaration names one
+/// (`Node::new(id, parent, Role::Label)`), and never in a comparison, a
+/// pattern or a binding. `Role` may not be renamed (`use … Role as R`, `type R
+/// = Role`), and `Role::from_name` and `Role::from_index` may not be handed a
+/// literal, since each is a text role spelled so no needle reads it.
+///
+/// # The other direction
+///
+/// A file that sets text in lines — names [`SETS_TEXT`], or imports
+/// `paragraph` from `f_text` through a grouped `use` in whatever layout
+/// rustfmt leaves it — is part of the display projection by what it does, so
+/// it must be a row. That is how the rasteriser `E3-B02e`, `E3-B02h` and
+/// `E3-B03g` will build becomes subject to this rule the day it calls the text
+/// path, rather than the day somebody remembers to add it. A file under a
+/// `tests/`, `benches/` or `examples/` directory is not shipped and not a
+/// projection, so a conformance test for the paragraph is not one.
+///
+/// # What it cannot see
+///
+/// Stated because it is textual and a textual check claims what it reads and no
+/// more.
+///
+/// - A text role handed as a value into a local binding, an array or an
+///   `Option` outside a `const` or `static` of roles — `let prose =
+///   [Role::Surface, Role::Text];` — and compared later through what holds it,
+///   or used as a pattern.
+/// - A function outside the projection files that decides by a role's index or
+///   name — `r.index() == 21` — since only projection files are read for that.
+/// - A branch on a noun a table returned (`phrasing(role).noun == "text"`),
+///   because string literals are not read.
+/// - A row moved to another role's value: the reader's text row given a group's
+///   `entered: true`, the ink table's text row given the status ink. By the
+///   second condition that is a shared value and so not a branch;
+///   `f_semantic::draw`'s tests hold the tree's current answer for both, and
+///   are where either change goes red.
+/// - A screen reader written in a file that neither has a row nor sets text, or
+///   a crate that reaches the paragraph through `use f_text as t`.
+///
+/// Each of those is a construct a reviewer sees, and none is what somebody
+/// writes by habit, which is the shape of this tree's other textual lints and
+/// the reason they name their residue.
+fn lint_projections() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for (file, uses, _) in PROJECTIONS {
+        let path = root().join(file);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => findings.extend(projection_findings(file, &text, *uses)),
+            Err(e) => findings.push(format!("  {file}  is a row of PROJECTIONS and reads as {e}")),
+        }
+    }
+    let mut read = 0usize;
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        if rel.starts_with("xtask/") || rel.starts_with("third_party/") || !shipped_path(&rel) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        read += 1;
+        let projection = PROJECTIONS.iter().any(|(file, _, _)| *file == rel);
+        if !projection {
+            findings.extend(unlisted_setter(&rel, &text));
+        }
+        findings.extend(vocabulary_findings(&rel, &text, projection));
+    }
+
+    if findings.is_empty() {
+        let tables: usize = PROJECTIONS
+            .iter()
+            .map(|(_, uses, _)| if let RoleUse::Tables(names) = uses { names.len() } else { 0 })
+            .sum();
+        println!(
+            "lint-projections: ok  ({} projection file(s) holding {tables} per-role table(s), and \
+             {read} shipped file(s) read for a text predicate; text and label are rows, never \
+             branches)",
+            PROJECTIONS.len(),
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} text-specific branch(es) in a projection:\n{}\n\n\
+         E3-B03k: one tree produces a rendered paragraph and a spoken phrase with no\n\
+         text-specific branch in either projection. A projection draws text because a\n\
+         node holds text, and says a role through the one per-role table every role\n\
+         goes through. RFC 0140 is the definition this reads.\n\n\
+         Make it a row: a literal in the table, shaped like some other role's row, or\n\
+         a decision by content kind that every role takes.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// Is this a file that ships: not under a `tests/`, `benches/` or `examples/`
+/// directory, which cargo builds only for a test, a benchmark or an example.
+fn shipped_path(rel: &str) -> bool {
+    !["tests/", "benches/", "examples/"]
+        .iter()
+        .any(|dir| rel.starts_with(dir) || rel.contains(&format!("/{dir}")))
+}
+
+/// A file's lines as shipped code: comments, strings and `#[cfg(test)]` items
+/// removed.
+fn shipped_lines(text: &str) -> Vec<String> {
+    let mut carry = Carry::default();
+    let mut tests = TestItems::default();
+    text.lines().map(|raw| tests.shipped(&strip_to_code(raw, &mut carry))).collect()
+}
+
+/// A file with no row that sets text in lines.
+fn unlisted_setter(rel: &str, text: &str) -> Vec<String> {
+    if !shipped_path(rel) {
+        return Vec::new();
+    }
+    let found = |at: usize| {
+        vec![format!("  {rel}:{}  sets text in lines and is not a row of PROJECTIONS", at + 1)]
+    };
+    // A `use` statement gathered to its `;` with the whitespace taken out, so a
+    // grouped import reads the same in any layout.
+    let mut statement: Option<(usize, String)> = None;
+    for (at, code) in shipped_lines(text).iter().enumerate() {
+        if SETS_TEXT.iter().any(|needle| code.contains(needle)) {
+            return found(at);
+        }
+        let head = code.trim_start();
+        if statement.is_none()
+            && ["use ", "pub use ", "pub(crate) use "].iter().any(|k| head.starts_with(k))
+        {
+            statement = Some((at, String::new()));
+        }
+        if let Some((first, gathered)) = statement.as_mut() {
+            gathered.extend(code.chars().filter(|c| !c.is_whitespace()));
+            if code.contains(';') {
+                if imports_the_paragraph(gathered) {
+                    return found(*first);
+                }
+                statement = None;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Does a `use` statement, whitespace removed, name `paragraph` as a segment of
+/// a path under `f_text` — `use f_text::{bidi::…, paragraph::{…}};`?
+fn imports_the_paragraph(statement: &str) -> bool {
+    let Some((_, tree)) = statement.split_once("f_text::") else {
+        return false;
+    };
+    tree.match_indices("paragraph").any(|(at, word)| {
+        let before = tree[..at].chars().next_back();
+        let after = tree[at + word.len()..].chars().next();
+        matches!(before, None | Some('{' | ',')) && matches!(after, Some(':' | ',' | '}' | ';'))
+    })
+}
+
+/// The first and last line of a per-role table's body, by bracket depth over
+/// code: the `fn {name}(` whose line takes a `Role`, which tells `Floors::of`
+/// from `Duty::of` in a file that has both.
+fn table_extent(lines: &[String], name: &str) -> Option<(usize, usize)> {
+    let needle = format!("fn {name}(");
+    let from = lines.iter().position(|code| code.contains(&needle) && code.contains(": Role)"))?;
+    let mut depth = 0i64;
+    let mut opened = false;
+    for (at, code) in lines.iter().enumerate().skip(from) {
+        for c in code.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if opened && depth == 0 {
+            return Some((from, at));
+        }
+    }
+    None
+}
+
+/// One arm of a per-role table, on one line or grouped over several.
+#[derive(Debug)]
+struct Arm {
+    /// Which of the file's tables it is in.
+    table: usize,
+    /// Its first and last line, as indices.
+    first: usize,
+    last: usize,
+    /// Each alternative of its pattern, trimmed: `Role::Text`, or whatever
+    /// else was written there.
+    roles: Vec<String>,
+    /// What it evaluates to, as written after `=>`.
+    body: String,
+}
+
+impl Arm {
+    /// Does it hold a role that is not one of the two text roles? A grouped
+    /// arm that does is a row text shares by construction.
+    fn holds_another_role(&self) -> bool {
+        self.roles.iter().any(|r| is_role_path(r) && !TEXT_ROLES.contains(&r.as_str()))
+    }
+}
+
+/// `Role::Ident` and nothing more: not a guard, not a binding.
+fn is_role_path(pattern: &str) -> bool {
+    pattern
+        .strip_prefix("Role::")
+        .is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_alphanumeric() || c == '_'))
+}
+
+/// Every arm of the table on `lines[from..=to]`: a pattern that starts with
+/// `Role::`, continued on lines that start with `|`, ended by the line with
+/// `=>`. Blank lines — a comment, stripped — are passed over.
+fn table_arms(lines: &[String], table: usize, from: usize, to: usize) -> Vec<Arm> {
+    let mut arms = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for (at, line) in lines.iter().enumerate().take(to + 1).skip(from) {
+        let code = line.trim();
+        if code.is_empty() {
+            continue;
+        }
+        if open.is_some() && !code.starts_with('|') {
+            // A pattern that neither continued nor ended: not an arm.
+            open = None;
+        }
+        if open.is_none() && code.starts_with("Role::") {
+            open = Some((at, String::new()));
+        }
+        let Some((first, pattern)) = open.as_mut() else {
+            continue;
+        };
+        let Some((head, body)) = code.split_once("=>") else {
+            pattern.push_str(code);
+            pattern.push(' ');
+            continue;
+        };
+        pattern.push_str(head);
+        let roles = pattern
+            .split('|')
+            .map(|alternative| alternative.trim().to_string())
+            .filter(|alternative| !alternative.is_empty())
+            .collect();
+        arms.push(Arm { table, first: *first, last: at, roles, body: body.trim().to_string() });
+        open = None;
+    }
+    arms
+}
+
+/// Why an arm's body is code rather than a value, or `None` when it is a value.
+fn arm_is_code(body: &str) -> Option<&'static str> {
+    let Some(value) = body.strip_suffix(',') else {
+        return Some("does not end on its own line, so it is more than a value");
+    };
+    for (needle, why) in [
+        ("if ", "decides something"),
+        ("match ", "decides something"),
+        ("=>", "decides something"),
+        ("&&", "decides something"),
+        ("||", "decides something"),
+        (";", "is a block"),
+        ("?", "can leave early"),
+        ("return", "can leave early"),
+        ("let ", "is a block"),
+    ] {
+        if value.contains(needle) {
+            return Some(why);
+        }
+    }
+    for (at, _) in value.match_indices('(') {
+        let name =
+            value[..at].rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("");
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Some("calls something");
+        }
+    }
+    None
+}
+
+/// Is `code[at..at + len]` a whole word: no identifier character on either
+/// side? A `.` before it is allowed, since `node.role` is the word `role`.
+fn stands_alone(code: &str, at: usize, len: usize) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    !code[..at].chars().next_back().is_some_and(ident)
+        && !code[at + len..].chars().next().is_some_and(ident)
+}
+
+/// How many times `word` stands alone on the line.
+fn words(code: &str, word: &str) -> usize {
+    code.match_indices(word).filter(|(at, _)| stands_alone(code, *at, word.len())).count()
+}
+
+/// How many `kind_of(…)` calls on the line are handed a role and nothing else:
+/// `kind_of(node.role)`, `kind_of(role)`.
+fn handed_to_kind_of(code: &str) -> usize {
+    code.match_indices("kind_of(")
+        .filter(|(at, needle)| {
+            let rest = &code[at + needle.len()..];
+            let argument = rest.split(')').next().unwrap_or("").trim();
+            (argument == "role" || argument.ends_with(".role"))
+                && argument.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        })
+        .count()
+}
+
+/// The operand ending just before `code[..at]`: a path, a field, a call, an
+/// index, read backwards over balanced brackets and stopped by anything else.
+fn operand_before(code: &str, at: usize) -> &str {
+    let bytes = code.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    let mut start = end;
+    let mut depth = 0i64;
+    while start > 0 {
+        let b = bytes[start - 1];
+        match b {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            b'.' | b':' | b'_' | b'*' | b'&' => {}
+            _ if b.is_ascii_alphanumeric() => {}
+            _ => break,
+        }
+        start -= 1;
+    }
+    code.get(start..end).unwrap_or("")
+}
+
+/// The operand starting just after `code[..at]`, read forwards the same way.
+fn operand_after(code: &str, at: usize) -> &str {
+    let bytes = code.as_bytes();
+    let mut start = at;
+    while start < bytes.len() && bytes[start] == b' ' {
+        start += 1;
+    }
+    let mut end = start;
+    let mut depth = 0i64;
+    while end < bytes.len() {
+        let b = bytes[end];
+        match b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            b'.' | b':' | b'_' | b'*' | b'&' => {}
+            _ if b.is_ascii_alphanumeric() => {}
+            _ => break,
+        }
+        end += 1;
+    }
+    code.get(start..end).unwrap_or("")
+}
+
+/// An operand with its `*`, `&` and one `Some(…)` taken off.
+fn bare(operand: &str) -> &str {
+    let operand = operand.trim_start_matches(['*', '&']);
+    operand.strip_prefix("Some(").and_then(|o| o.strip_suffix(')')).unwrap_or(operand)
+}
+
+/// Is the operand a role read from somewhere: `role`, `node.role`?
+fn reads_a_role(operand: &str) -> bool {
+    let operand = bare(operand);
+    operand == "role" || operand.ends_with(".role")
+}
+
+/// Is the operand a role named by its variant: `Role::Canvas`,
+/// `node::Role::Track`?
+fn names_a_role(operand: &str) -> bool {
+    let operand = bare(operand);
+    operand.rsplit_once("Role::").is_some_and(|(path, variant)| {
+        (path.is_empty() || path.ends_with("::"))
+            && !variant.is_empty()
+            && variant.chars().all(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// Why a line of a projection file, outside its tables, reads a role in a way
+/// no row answers for — or `None`.
+fn role_read(code: &str) -> Option<&'static str> {
+    let compares = ["==", "!=", "<=", ">=", " < ", " > ", "matches!", "match "]
+        .iter()
+        .any(|op| code.contains(op));
+    for asked in ["role.index()", "role.name()"] {
+        let asked_here =
+            code.match_indices(asked).any(|(at, _)| stands_alone(code, at, "role".len()));
+        if asked_here && compares {
+            return Some(
+                "compares a role's index or name, which singles one role out by a number or a \
+                 noun instead of a row",
+            );
+        }
+    }
+    for (at, _) in code.match_indices("role.") {
+        if !stands_alone(code, at, "role".len()) {
+            continue;
+        }
+        let rest = &code[at + "role.".len()..];
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if rest[name.len()..].starts_with('(') && !ROLE_METHODS.contains(&name.as_str()) {
+            return Some(
+                "calls a method on a role that the vocabulary does not emit: a per-role decision \
+                 outside the rows",
+            );
+        }
+    }
+    for op in ["==", "!="] {
+        for (at, _) in code.match_indices(op) {
+            let (left, right) = (operand_before(code, at), operand_after(code, at + op.len()));
+            let (l, r) = (reads_a_role(left), reads_a_role(right));
+            if (l && !(r || names_a_role(right))) || (r && !(l || names_a_role(left))) {
+                return Some(
+                    "compares a role with something that is not a named role: a predicate \
+                     defined where no row is",
+                );
+            }
+        }
+    }
+    None
+}
+
+/// One projection file against its row.
+fn projection_findings(rel: &str, text: &str, uses: RoleUse) -> Vec<String> {
+    let mut findings = Vec::new();
+    let lines = shipped_lines(text);
+
+    let names: &[&str] = if let RoleUse::Tables(names) = uses { names } else { &[] };
+    let mut tables: Vec<(&str, usize, usize)> = Vec::new();
+    for name in names {
+        match table_extent(&lines, name) {
+            Some((from, to)) => tables.push((name, from, to)),
+            None => findings.push(format!(
+                "  {rel}  holds no `fn {name}(role: Role)`, which is a per-role table its row \
+                 names"
+            )),
+        }
+    }
+    let arms: Vec<Arm> = tables
+        .iter()
+        .enumerate()
+        .flat_map(|(t, &(_, from, to))| table_arms(&lines, t, from, to))
+        .collect();
+
+    let mut rows = vec![[0usize; 2]; tables.len()];
+    for (at, code) in lines.iter().enumerate() {
+        let line = at + 1;
+        if code.contains("Role::*") || code.contains("Role::{") {
+            findings.push(format!(
+                "  {rel}:{line}  imports `Role`'s variants, so a bare `Text` or `Label` pattern \
+                 would name a role no needle here reads"
+            ));
+        }
+        let table = tables.iter().position(|&(_, from, to)| (from..=to).contains(&at));
+        for (k, role) in TEXT_ROLES.iter().enumerate() {
+            if !cites(code, role) {
+                continue;
+            }
+            let Some(t) = table else {
+                findings.push(format!(
+                    "  {rel}:{line}  names `{role}` outside the per-role table: a path only \
+                     that role takes"
+                ));
+                continue;
+            };
+            rows[t][k] += 1;
+            let Some(arm) = arms.iter().find(|a| a.table == t && (a.first..=a.last).contains(&at))
+            else {
+                findings.push(format!(
+                    "  {rel}:{line}  names `{role}` in the table other than as a row of its own"
+                ));
+                continue;
+            };
+            if !arm.roles.iter().any(|r| r == role) {
+                findings.push(format!(
+                    "  {rel}:{line}  `{}` is not a row for `{role}`",
+                    arm.roles.join(" | ")
+                ));
+                continue;
+            }
+            if let Some(why) = arm_is_code(&arm.body) {
+                findings.push(format!("  {rel}:{line}  the `{role}` row {why}: `{}`", arm.body));
+                continue;
+            }
+            let shared = arm.holds_another_role()
+                || arms.iter().any(|other| {
+                    other.table == t && other.body == arm.body && other.holds_another_role()
+                });
+            if !shared {
+                findings.push(format!(
+                    "  {rel}:{line}  the `{role}` row is shaped like no other role's: `{}` is a \
+                     decision only it reaches",
+                    arm.body
+                ));
+            }
+        }
+        match uses {
+            RoleUse::Free => {
+                if words(code, "Role") > 0 {
+                    findings
+                        .push(format!("  {rel}:{line}  names a role in a file that names none"));
+                }
+                if words(code, "role") > handed_to_kind_of(code) {
+                    findings.push(format!(
+                        "  {rel}:{line}  reads a role other than by handing it to `kind_of`"
+                    ));
+                }
+            }
+            RoleUse::Tables(_) | RoleUse::Walk if table.is_none() => {
+                if let Some(why) = role_read(code) {
+                    findings.push(format!("  {rel}:{line}  {why}"));
+                }
+            }
+            RoleUse::Tables(_) | RoleUse::Walk => {}
+        }
+    }
+    for (t, &(name, _, _)) in tables.iter().enumerate() {
+        for (k, role) in TEXT_ROLES.iter().enumerate() {
+            if rows[t][k] != 1 {
+                findings.push(format!(
+                    "  {rel}  `fn {name}` has {} row(s) for `{role}`, and a per-role table has one",
+                    rows[t][k]
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// A line that opens an `impl` of `Role`, inherent or of a trait.
+fn implements_role(code: &str) -> bool {
+    let words: Vec<&str> = code
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.first() != Some(&"impl") {
+        return false;
+    }
+    match words.iter().position(|w| *w == "for") {
+        Some(at) => words.get(at + 1) == Some(&"Role"),
+        None => words.get(1) == Some(&"Role"),
+    }
+}
+
+/// The type a `const` or `static` item on this line declares, whitespace
+/// removed, if the line declares one.
+fn item_type(code: &str) -> Option<String> {
+    let mut rest = code.trim_start();
+    for visibility in ["pub(crate) ", "pub(super) ", "pub "] {
+        if let Some(after) = rest.strip_prefix(visibility) {
+            rest = after;
+            break;
+        }
+    }
+    let rest = rest.strip_prefix("const ").or_else(|| rest.strip_prefix("static "))?;
+    // `const fn` is a function, whose parameters are not the item's type.
+    if rest.starts_with("fn ") || rest.starts_with("unsafe fn ") {
+        return None;
+    }
+    let (_, after) = rest.split_once(':')?;
+    let ty = after.split_once('=').map_or(after, |(ty, _)| ty);
+    Some(ty.chars().filter(|c| !c.is_whitespace()).collect())
+}
+
+/// Is the type a role, an array or slice of roles, or an `Option` of one?
+fn holds_roles(ty: &str) -> bool {
+    let mut ty = ty.replace("'static", "");
+    ty.retain(|c| !matches!(c, '&' | '[' | ']' | ';'));
+    let rest = ty.strip_prefix("Option<Role>").or_else(|| ty.strip_prefix("Role"));
+    rest.is_some_and(|length| !length.contains(['(', ',', '<']))
+}
+
+/// Is every mention of a text role on this line a value handed to a call or a
+/// tuple? `previous` is the last character of the code line before, which is
+/// what precedes a mention at the start of this one.
+fn handed_as_a_value(code: &str, previous: Option<char>) -> bool {
+    if ["==", "!=", "=>", "matches!", "if let", "while let"].iter().any(|n| code.contains(n)) {
+        return false;
+    }
+    for role in TEXT_ROLES {
+        for (at, _) in code.match_indices(role) {
+            let end = at + role.len();
+            if code[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            // Back over a path to it: `node::Role::Label` is `Role::Label`.
+            let mut start = at;
+            while code[..start].ends_with("::") {
+                start = code[..start - 2]
+                    .char_indices()
+                    .rev()
+                    .find(|&(_, c)| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |(k, c)| k + c.len_utf8());
+            }
+            let before = code[..start].trim_end().chars().next_back().or(previous);
+            let after = code[end..].trim_start().chars().next();
+            if !matches!(before, Some('(' | ',')) || !matches!(after, None | Some(',' | ')' | '.'))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The routes to a text-only predicate that do not pass through a projection
+/// file's own text, read in every shipped file; `projection` says the file is a
+/// row of [`PROJECTIONS`], where [`projection_findings`] already refuses a text
+/// role and a variant import outside the tables.
+fn vocabulary_findings(rel: &str, text: &str, projection: bool) -> Vec<String> {
+    let mut findings = Vec::new();
+    let lines = shipped_lines(text);
+    let mut depth = 0i64;
+    let mut parens = 0i64;
+    // The depth outside an `impl` of `Role`, and whether its block has opened.
+    let mut impl_role: Option<(i64, bool)> = None;
+    // The paren depth outside a `matches!(` still open.
+    let mut in_matches: Option<i64> = None;
+    // Inside a `const` or `static` of roles, until its `;`.
+    let mut role_item = false;
+    let mut previous: Option<char> = None;
+    for (at, code) in lines.iter().enumerate() {
+        let line = at + 1;
+        if impl_role.is_none() && implements_role(code.trim()) {
+            impl_role = Some((depth, false));
+        }
+        if let Some(ty) = item_type(code)
+            && holds_roles(&ty)
+        {
+            role_item = true;
+        }
+
+        let names_text = TEXT_ROLES.iter().find(|role| cites(code, role));
+        let names_self = TEXT_SELVES.iter().find(|role| cites(code, role));
+        if impl_role.is_some()
+            && let Some(role) = names_text.or(names_self)
+        {
+            findings.push(format!(
+                "  {rel}:{line}  names `{role}` in an impl of `Role`: a predicate only that role \
+                 answers, defined where no row is"
+            ));
+        } else if let Some(role) = names_text
+            && !projection
+        {
+            let why = if role_item {
+                Some("binds it in a `const` or `static` of roles")
+            } else if in_matches.is_some() {
+                Some("matches it")
+            } else if !handed_as_a_value(code, previous) {
+                Some("compares, matches or binds it")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                findings.push(format!(
+                    "  {rel}:{line}  names `{role}` other than as a value handed to a call: it {why}, \
+                     which is a path only that role takes, outside the rows"
+                ));
+            }
+        }
+        if !projection && (code.contains("Role::*") || code.contains("Role::{")) {
+            findings.push(format!(
+                "  {rel}:{line}  imports `Role`'s variants, so a bare `Text` or `Label` would \
+                 name a role no needle here reads"
+            ));
+        }
+        let renames = code.match_indices("Role as ").any(|(k, _)| stands_alone(code, k, 4))
+            || (code.trim_start().starts_with("type ") && code.trim_end().ends_with("= Role;"))
+            || (code.trim_start().starts_with("pub type ") && code.trim_end().ends_with("= Role;"));
+        if renames {
+            findings.push(format!(
+                "  {rel}:{line}  renames `Role`, so `R::Text` would name a role no needle here \
+                 reads"
+            ));
+        }
+        let literal_name = cites(code, "Role::from_name(\"");
+        let literal_index = code.match_indices("Role::from_index(").any(|(k, needle)| {
+            code[k + needle.len()..].trim_start().starts_with(|c: char| c.is_ascii_digit())
+        });
+        if literal_name || literal_index {
+            findings.push(format!(
+                "  {rel}:{line}  asks for a role by a literal, which is a role spelled so no \
+                 needle here reads it"
+            ));
+        }
+
+        let parens_before = parens;
+        for c in code.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    if let Some((outside, false)) = impl_role
+                        && depth == outside + 1
+                    {
+                        impl_role = Some((outside, true));
+                    }
+                }
+                '}' => depth -= 1,
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                _ => {}
+            }
+        }
+        if let Some((outside, true)) = impl_role
+            && depth <= outside
+        {
+            impl_role = None;
+        }
+        if in_matches.is_some_and(|outside| parens <= outside) {
+            in_matches = None;
+        }
+        if in_matches.is_none() && code.contains("matches!(") && parens > parens_before {
+            in_matches = Some(parens_before);
+        }
+        if role_item && code.trim_end().ends_with(';') {
+            role_item = false;
+        }
+        if let Some(last) = code.trim_end().chars().next_back() {
+            previous = Some(last);
+        }
+    }
+    findings
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    /// A projection with a table, shaped the way the ones in the tree are.
+    const TABLE: &str = "\
+pub const fn phrasing(role: Role) -> Phrasing {
+    match role {
+        Role::Surface => Phrasing { noun: \"window\", entered: true },
+        Role::Separator => Phrasing { noun: \"separator\", entered: false },
+        Role::Label => Phrasing { noun: \"label\", entered: false },
+        Role::Text => Phrasing { noun: \"text\", entered: false },
+        Role::Canvas => Phrasing { noun: \"canvas\", entered: true },
+    }
+}
+
+fn say(node: &Node) -> Phrasing {
+    // A comment naming Role::Text is prose, not a branch.
+    let said = phrasing(node.role);
+    if node.role == Role::Canvas { return said; }
+    said
+}
+";
+
+    /// Two tables in one file with grouped arms, shaped the way `token.rs`'s
+    /// ink and duty tables are, with a `fn of` that takes no role above them.
+    const INKS: &str = "\
+pub const fn of(self, duty: Duty) -> u32 {
+    match duty { Duty::Read => 4500, Duty::See => 3000 }
+}
+
+pub const fn of(role: Role) -> Self {
+    match role {
+        // A comment between arms.
+        Role::Separator => Self::See,
+        Role::Surface
+        | Role::Label
+        | Role::Text
+        | Role::Status => Self::Read,
+    }
+}
+
+pub const fn ink_for(role: Role) -> Self {
+    match role {
+        Role::Separator => Self::Edge,
+        Role::Status => Self::TextMuted,
+        Role::Surface
+        | Role::Label
+        | Role::Text => Self::Text,
+    }
+}
+";
+
+    fn with(extra: &str) -> String {
+        format!("{TABLE}{extra}")
+    }
+
+    fn table(text: &str) -> Vec<String> {
+        projection_findings("x.rs", text, RoleUse::Tables(&["phrasing"]))
+    }
+
+    fn inks(text: &str) -> Vec<String> {
+        projection_findings("token.rs", text, RoleUse::Tables(&["of", "ink_for"]))
+    }
+
+    /// Everything the tree-wide read finds in a file that is no projection.
+    fn elsewhere(text: &str) -> Vec<String> {
+        vocabulary_findings("interface/src/node.rs", text, false)
+    }
+
+    #[test]
+    fn a_table_whose_text_rows_are_shared_values_passes() {
+        assert_eq!(table(TABLE), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_comparison_with_the_text_role_outside_the_table_is_a_branch() {
+        let findings =
+            table(&with("fn draw(node: &Node) { if node.role == Role::Text { set(); } }\n"));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("outside the per-role table"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_second_match_with_a_label_arm_is_a_branch() {
+        let findings = table(&with(
+            "fn walk(role: Role) -> u8 {\n    match role {\n        Role::Label => 1,\n        _ => 0,\n    }\n}\n",
+        ));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("`Role::Label` outside"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_row_that_calls_something_is_code_and_not_a_value() {
+        let text = TABLE.replace(
+            "Role::Text => Phrasing { noun: \"text\", entered: false },",
+            "Role::Text => paragraph_phrasing(role),",
+        );
+        let findings = table(&text);
+        assert!(findings.iter().any(|f| f.contains("calls something")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_row_that_decides_is_code_and_not_a_value() {
+        let text = TABLE.replace(
+            "Role::Label => Phrasing { noun: \"label\", entered: false },",
+            "Role::Label => if WIDE { Phrasing { noun: \"label\", entered: true } } else { P },",
+        );
+        let findings = table(&text);
+        assert!(findings.iter().any(|f| f.contains("decides something")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_row_shaped_like_no_other_role_is_a_branch_in_a_tables_clothes() {
+        let text = TABLE.replace(
+            "Role::Text => Phrasing { noun: \"text\", entered: false },",
+            "Role::Text => Phrasing { noun: \"text\", entered: false, paragraph: true },",
+        );
+        let findings = table(&text);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("shaped like no other role's"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_constructor_is_a_value_and_a_shared_one_passes() {
+        let text = "\
+pub const fn presentable(role: Role) -> Result<Flow, Unpresentable> {
+    match role {
+        Role::Separator => Ok(Flow::Own),
+        Role::Label => Ok(Flow::Own),
+        Role::Text => Ok(Flow::Own),
+        Role::Canvas => Err(Unpresentable::Pixels),
+    }
+}
+";
+        assert_eq!(
+            projection_findings("r.rs", text, RoleUse::Tables(&["presentable"])),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Several tables per file, grouped arms, and the `fn of` that takes no
+    /// role told from the one that does. A grouped arm holding a role that is
+    /// not text is a shared row; one of the text roles alone must equal some
+    /// other arm; a text row split out to a value nobody else has is refused
+    /// in either table.
+    #[test]
+    fn several_tables_with_grouped_arms_are_rows_and_a_split_one_is_not() {
+        assert_eq!(inks(INKS), Vec::<String>::new());
+        let split = INKS.replace(
+            "        | Role::Label\n        | Role::Text => Self::Text,",
+            "        | Role::Label => Self::Text,\n        Role::Text => Self::Surface1,",
+        );
+        let findings = inks(&split);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("shaped like no other role's: `Self::Surface1,`"));
+        let alone = INKS.replace(
+            "        Role::Surface\n        | Role::Label\n        | Role::Text => Self::Text,",
+            "        Role::Surface => Self::Text,\n        Role::Label | Role::Text => Self::Ink,",
+        );
+        let findings = inks(&alone);
+        assert_eq!(findings.len(), 2, "one per text role: {findings:?}");
+        let alone_but_shared = INKS.replace(
+            "        Role::Surface\n        | Role::Label\n        | Role::Text => Self::Text,",
+            "        Role::Surface => Self::Text,\n        Role::Label | Role::Text => Self::Text,",
+        );
+        assert_eq!(inks(&alone_but_shared), Vec::<String>::new());
+        let guarded = INKS.replace(
+            "        | Role::Text\n        | Role::Status => Self::Read,",
+            "        | Role::Status => Self::Read,\n        Role::Text if WIDE => Self::See,",
+        );
+        let findings = inks(&guarded);
+        assert!(
+            findings.iter().any(|f| f.contains("is not a row for `Role::Text`")),
+            "{findings:?}"
+        );
+        let missing = INKS.replace(
+            "        | Role::Text => Self::Text,",
+            "        | Role::Marker => Self::Text,",
+        );
+        let findings = inks(&missing);
+        assert!(
+            findings.iter().any(|f| f.contains("`fn ink_for` has 0 row(s) for `Role::Text`")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn importing_the_variants_is_refused() {
+        let findings = table(&with("use crate::node::Role::*;\n"));
+        assert!(findings.iter().any(|f| f.contains("imports `Role`'s variants")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_missing_table_or_a_missing_row_is_refused() {
+        let findings = table("fn say() {}\n");
+        assert!(findings.iter().any(|f| f.contains("holds no `fn phrasing(")), "{findings:?}");
+        let text = TABLE
+            .replace("        Role::Label => Phrasing { noun: \"label\", entered: false },\n", "");
+        let findings = table(&text);
+        assert!(findings.iter().any(|f| f.contains("0 row(s) for `Role::Label`")), "{findings:?}");
+    }
+
+    /// In a projection file, a role is compared only with a named role or
+    /// another role; its index and name are not compared; and only the
+    /// vocabulary's own methods are called on it. Each refusal is a predicate
+    /// that names no text role in this file — `PROSE`, 21, a noun, a method
+    /// defined elsewhere — and each allowed line is one the tree has.
+    #[test]
+    fn a_role_is_read_in_a_projection_only_as_the_rows_read_it() {
+        for refused in [
+            "fn say(node: &Node) { if node.role == crate::node::PROSE { set(); } }\n",
+            "fn say(node: &Node) { if Some(node.role) == PROSE { set(); } }\n",
+            "fn say(node: &Node) { if node.role.index() != 21 { set(); } }\n",
+            "fn say(node: &Node) { if node.role.name() == \"text\" { set(); } }\n",
+            "fn say(node: &Node) { if node.role.is_prose() { set(); } }\n",
+        ] {
+            let findings = table(&with(refused));
+            assert_eq!(findings.len(), 1, "{refused}: {findings:?}");
+        }
+        for allowed in [
+            "fn among(node: &Node) { siblings.filter(|s| s.role == node.role); }\n",
+            "fn lane(node: &Node) -> bool { node.role != Role::Canvas && node.parent == canvas }\n",
+            "fn wire(node: &Node) { admit_role(node.role.index() as u16, &Interface); }\n",
+            "fn fam(node: &Node) -> bool { node.role.family() == Family::Content }\n",
+        ] {
+            assert_eq!(table(&with(allowed)), Vec::<String>::new(), "{allowed}");
+        }
+    }
+
+    #[test]
+    fn a_role_free_file_names_no_role_and_reads_one_only_through_kind_of() {
+        let clean = "fn draw(node: &Node) { if marks(kind_of(node.role)) { set(); } }\n";
+        assert_eq!(projection_findings("d.rs", clean, RoleUse::Free), Vec::<String>::new());
+        let named = "fn draw(node: &Node) { if node.role == Role::Command { set(); } }\n";
+        let findings = projection_findings("d.rs", named, RoleUse::Free);
+        assert!(findings.iter().any(|f| f.contains("names a role in a file")), "{findings:?}");
+        assert!(findings.iter().any(|f| f.contains("other than by handing it")), "{findings:?}");
+        let text = "fn draw(node: &Node) { if node.role == Role::Text { set(); } }\n";
+        let findings = projection_findings("d.rs", text, RoleUse::Free);
+        assert!(findings.iter().any(|f| f.contains("outside the per-role table")), "{findings:?}");
+        // A role read beside the one handed to `kind_of`, a role bound by a
+        // pattern, and the type named in a signature: each is a read the line
+        // test used to excuse or never saw.
+        for read in [
+            "        if marks(kind_of(node.role)) || node.role.name() == \"text\" {\n",
+            "        let Node { role, .. } = node;\n",
+            "        let Node { role: r, .. } = node;\n",
+            "fn base(r: Role) -> BaseDirection { LeftToRight }\n",
+        ] {
+            let findings = projection_findings("d.rs", read, RoleUse::Free);
+            assert!(!findings.is_empty(), "{read}");
+        }
+    }
+
+    #[test]
+    fn a_test_item_and_a_comment_are_not_shipped_code() {
+        let text = with(
+            "// if node.role == Role::Text\n#[cfg(test)]\nmod tests {\n    fn t() { let _ = Role::Text; }\n}\n",
+        );
+        assert_eq!(table(&text), Vec::<String>::new());
+    }
+
+    /// A text predicate defined outside every projection: a constant, a
+    /// method of `Role`, a free function. Each is refused where it is
+    /// defined, because the projection that calls it names no text role.
+    #[test]
+    fn a_text_predicate_defined_outside_the_rows_is_refused_where_it_is_defined() {
+        for defined in [
+            "pub const PROSE: Role = Role::Text;\n",
+            "pub static PROSE: Option<Role> = Some(Role::Label);\n",
+            "pub const PROSE: [Role; 2] = [\n    Role::Surface,\n    Role::Text,\n];\n",
+            "impl Role {\n    pub const fn is_prose(self) -> bool {\n        matches!(self, Self::Text | Self::Label)\n    }\n}\n",
+            "impl Prose for Role {\n    fn prose(self) -> bool {\n        self == Role::Label\n    }\n}\n",
+            "fn prose(r: Role) -> bool { r == Role::Text }\n",
+            "fn prose(r: Role) -> bool {\n    matches!(\n        r,\n        Role::Text\n    )\n}\n",
+            "fn prose(r: Role) -> bool {\n    match r {\n        Role::Text | Role::Label => true,\n        _ => false,\n    }\n}\n",
+            "fn prose(r: Role) -> bool {\n    let prose = Role::Text;\n    r == prose\n}\n",
+            "fn prose(r: Role) -> bool { if let Role::Text = r { true } else { false } }\n",
+        ] {
+            let findings = elsewhere(defined);
+            assert!(!findings.is_empty(), "{defined}");
+        }
+        // Inside a projection file the impl is refused by this read; the rest
+        // there is `projection_findings`' to refuse.
+        let method =
+            "impl Role {\n    const fn prose(self) -> bool { matches!(self, Self::Text) }\n}\n";
+        assert_eq!(vocabulary_findings("interface/src/reader.rs", method, true).len(), 1);
+    }
+
+    /// How a declaration names a text role — a value handed to a call or a
+    /// tuple — is not a predicate, and the tree has each of these.
+    #[test]
+    fn a_declaration_may_hand_a_text_role_to_a_call() {
+        for declared in [
+            "        Node::new(DEVICE_LABEL, OUTPUT, Role::Label).with_content(text(\"Device\")),\n",
+            "pub const DECLARED: [(u64, Role); 2] = [\n    (SURFACE, Role::Surface),\n    (LABEL, Role::Label),\n];\n",
+            "        declared(agreed, LABEL, GROUP, NO_NODE, Role::Label, NO_INTENT)?,\n",
+            "    .admit_role(u16::try_from(Role::Label.index()).unwrap_or(u16::MAX), &Interface)\n",
+            "    Node::new(\n        NOTE,\n        SURFACE,\n        f_interface::node::Role::Text,\n    )\n",
+            "impl Role {\n    pub const fn index(self) -> usize { self as usize }\n}\n",
+            "pub(crate) const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];\n",
+            "pub const fn declare(role: Role) -> Node {\n    Node::new(NOTE, PARENT, Role::Label).with(role)\n}\n",
+        ] {
+            assert_eq!(elsewhere(declared), Vec::<String>::new(), "{declared}");
+        }
+    }
+
+    #[test]
+    fn renaming_role_or_asking_for_one_by_a_literal_is_refused() {
+        for spelled in [
+            "use f_interface::node::Role as R;\n",
+            "type R = Role;\n",
+            "pub type Vocabulary = Role;\n",
+            "use crate::node::Role::{Label, Text};\n",
+            "fn prose(r: Role) -> bool { Role::from_name(\"text\") == Some(r) }\n",
+            "fn prose(r: Role) -> bool { Role::from_index(21) == Some(r) }\n",
+        ] {
+            assert!(!elsewhere(spelled).is_empty(), "{spelled}");
+        }
+        for fine in [
+            "let ordinal = node.role as u16;\n",
+            "let role = Role::from_name(name.as_str());\n",
+            "let role = Role::from_index(held.role().get() as usize);\n",
+        ] {
+            assert_eq!(elsewhere(fine), Vec::<String>::new(), "{fine}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_sets_text_and_has_no_row_is_found() {
+        let found =
+            unlisted_setter("user/compositor/src/raster.rs", "use f_text::paragraph::Setting;\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        let quiet = unlisted_setter("user/compositor/src/raster.rs", "// f_text::paragraph\n");
+        assert_eq!(quiet, Vec::<String>::new());
+    }
+
+    /// The import layout rustfmt produces once a `use` line is long, and a
+    /// grouped import that names the module itself.
+    #[test]
+    fn a_grouped_import_of_the_paragraph_is_found_in_any_layout() {
+        for imported in [
+            "use f_text::{\n    bidi::BaseDirection,\n    paragraph::{Line, Setting},\n};\n",
+            "use f_text::{bidi, paragraph};\n",
+            "pub use f_text::{paragraph::Setting as Lines, line};\n",
+        ] {
+            let found = unlisted_setter("semantic/src/raster.rs", imported);
+            assert_eq!(found.len(), 1, "{imported}: {found:?}");
+            assert!(found[0].contains("semantic/src/raster.rs:1"), "{found:?}");
+        }
+        for other in ["use f_text::{bidi, line};\n", "use crate::paragraphs::{Setting};\n"] {
+            assert_eq!(unlisted_setter("semantic/src/raster.rs", other), Vec::<String>::new());
+        }
+    }
+
+    /// A conformance test for the paragraph, a benchmark and an example are
+    /// not shipped and so not projections.
+    #[test]
+    fn a_test_a_benchmark_or_an_example_is_not_a_setter() {
+        for rel in [
+            "text/tests/paragraph_more.rs",
+            "semantic/benches/set.rs",
+            "user/panel/examples/set.rs",
+            "tests/set.rs",
+        ] {
+            let found = unlisted_setter(rel, "use f_text::paragraph::Setting;\n");
+            assert_eq!(found, Vec::<String>::new(), "{rel}");
+            assert!(!shipped_path(rel), "{rel}");
+        }
+        assert!(shipped_path("text/src/paragraph.rs"));
+        assert!(shipped_path("user/contests/src/lib.rs"));
+    }
+
+    #[test]
+    fn the_projections_as_they_stand_have_no_text_specific_branch() {
+        // The fixtures above show the lint can fail; this shows the tree is on
+        // the other side of that line, and a row pointing at a moved file is a
+        // finding rather than a silent pass.
+        assert!(lint_projections().is_ok(), "{:?}", lint_projections());
+    }
+
+    /// The mutants two audits of `E3-B03k` wrote against this tree, applied in
+    /// memory to the files as they stand, each through the reads the lint
+    /// gives that file: every one must draw a finding, and the files as they
+    /// stand none. The fixtures above hold the reads; this holds that the rows
+    /// point them at the right files — the ink tables of `token.rs` included —
+    /// and a mutant whose line has moved fails here rather than passing
+    /// silently, so moving an anchor means editing this test.
+    #[test]
+    fn the_audits_mutants_of_the_tree_are_each_found() {
+        let read = |rel: &str| {
+            std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let found = |rel: &str, text: &str| -> usize {
+            let row = PROJECTIONS.iter().find(|(file, _, _)| *file == rel);
+            let listed = row.map_or(0, |(_, uses, _)| projection_findings(rel, text, *uses).len());
+            listed + vocabulary_findings(rel, text, row.is_some()).len()
+        };
+        let edit = |text: &str, from: &str, to: &str| {
+            assert_eq!(text.matches(from).count(), 1, "the line a mutant edits moved: {from}");
+            text.replacen(from, to, 1)
+        };
+        let draw = read("semantic/src/draw.rs");
+        let reader = read("interface/src/reader.rs");
+        let token = read("interface/src/token.rs");
+        let emit = read("semantic/src/emit.rs");
+        let node = read("interface/src/node.rs");
+        let marks = "        if marks(kind_of(node.role)) {\n";
+        let prose = "{\n    const fn prose(self) -> bool {\n        matches!(self, Self::Text | Self::Label)\n    }\n}\n";
+        let cases = [
+            (
+                "a direct text arm",
+                "semantic/src/draw.rs",
+                edit(
+                    &draw,
+                    marks,
+                    "        if marks(kind_of(node.role)) || node.role == Role::Text {\n",
+                ),
+            ),
+            (
+                "a destructured role",
+                "semantic/src/draw.rs",
+                edit(&draw, marks, &format!("        let Node {{ role, .. }} = node;\n{marks}")),
+            ),
+            (
+                "a second read beside kind_of",
+                "semantic/src/draw.rs",
+                edit(
+                    &draw,
+                    marks,
+                    "        if marks(kind_of(node.role)) || node.role.name() == \"text\" {\n",
+                ),
+            ),
+            (
+                "an index compared",
+                "semantic/src/draw.rs",
+                edit(
+                    &draw,
+                    marks,
+                    "        if marks(kind_of(node.role)) && node.role.index() != 21 {\n",
+                ),
+            ),
+            (
+                "a constant compared in the reader",
+                "interface/src/reader.rs",
+                edit(
+                    &reader,
+                    "        let phrasing = phrasing(node.role);\n",
+                    "        let phrasing = if node.role == crate::node::PROSE { QUIET } else { phrasing(node.role) };\n",
+                ),
+            ),
+            (
+                "the constant",
+                "interface/src/node.rs",
+                format!("{node}\npub const PROSE: Role = Role::Text;\n"),
+            ),
+            (
+                "a method of Role in the reader",
+                "interface/src/reader.rs",
+                format!("{reader}\nimpl Role {prose}"),
+            ),
+            (
+                "a method of Role in the vocabulary",
+                "interface/src/node.rs",
+                format!("{node}\nimpl Role {prose}"),
+            ),
+            (
+                "that method called in emit",
+                "semantic/src/emit.rs",
+                edit(
+                    &emit,
+                    "        let kind = kind_of(node.role);\n",
+                    "        let kind = kind_of(node.role);\n        if node.role.is_prose() {\n            continue;\n        }\n",
+                ),
+            ),
+            (
+                "a text ink in paint",
+                "interface/src/token.rs",
+                edit(
+                    &token,
+                    "            None => Token::ink_for(node.role),\n",
+                    "            None => if node.role == Role::Text { Token::TextMuted } else { Token::ink_for(node.role) },\n",
+                ),
+            ),
+            (
+                "a text ink nobody else has",
+                "interface/src/token.rs",
+                edit(
+                    &edit(
+                        &token,
+                        "            | Role::Text\n            | Role::Image\n            | Role::Command\n",
+                        "            | Role::Image\n            | Role::Command\n",
+                    ),
+                    "            Role::Entry => Self::FieldText,\n",
+                    "            Role::Entry => Self::FieldText,\n            Role::Text => Self::Surface1,\n",
+                ),
+            ),
+        ];
+        for (what, rel, text) in &cases {
+            assert!(found(rel, text) > 0, "{what}, in {rel}, drew no finding");
+        }
+        for (rel, text) in [
+            ("semantic/src/draw.rs", &draw),
+            ("interface/src/reader.rs", &reader),
+            ("interface/src/token.rs", &token),
+            ("semantic/src/emit.rs", &emit),
+            ("interface/src/node.rs", &node),
+        ] {
+            assert_eq!(found(rel, text), 0, "{rel} as it stands");
+        }
+    }
 }
 
 /// R09, over the registry.

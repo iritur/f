@@ -49,7 +49,7 @@
 //! invocation in `interface/src/node.rs` and taken out again — stops this
 //! crate's build at four sites, of which this file is one:
 //! `error[E0004]: non-exhaustive patterns: 'Role::Gauge' not covered` at
-//! `interface/src/reader.rs:199`, the match in [`phrasing`]. The other three
+//! `interface/src/reader.rs:224`, the match in [`phrasing`]. The other three
 //! are the two exhaustive matches in `interface/src/token.rs` and the one in
 //! `interface/src/agent.rs`, whose lines are not quoted here because those
 //! files are not this one's to keep accurate. The count was three until
@@ -194,6 +194,31 @@ pub struct Phrasing {
 /// [`Role::Choice`], which holds items and is therefore a place a listener is
 /// inside. Arrangement is entered at the canvas and the lane, and flat at what
 /// is placed on them.
+///
+/// # Whether the text rows are a text-specific branch
+///
+/// `E3-B03k` forbids a text-specific branch in this projection, and the
+/// [`Role::Text`] and [`Role::Label`] rows below are arms of a `match`. They are
+/// not branches in the sense that exit means, and the reason is one a machine
+/// checks rather than one a reader is asked to accept. A text-specific branch is
+/// **a path through the projection that text takes and no other role does.**
+/// Every role leaves this function by the same edge, carrying a [`Phrasing`]
+/// that [`Reader::read`]'s one walk treats alike; and each of the two rows is a
+/// value another role's row already is — text and a label are said exactly
+/// as a [`Role::Separator`], an [`Role::Image`] and a [`Role::Status`] are, flat
+/// and uncounted — save for the noun, which RFC 0104 makes the one thing a row
+/// owns. What the reading does with a text node's words it does with every
+/// node's: [`Utterance::content`] is the content, whole, whatever the role.
+///
+/// So the table is the per-role decision every role goes through, and a
+/// text-specific branch would be one of three other things: a row shaped like
+/// no other role's, a row that calls or decides instead of being a value, or
+/// either role named anywhere else in this file's shipped code. `cargo xtask
+/// lint-projections` refuses all three, and this function is the per-role
+/// table that lint's row for this file names. RFC 0140 is the definition. *What would reverse
+/// it:* a listener who needs text read differently from every other flat
+/// content — by sentence, say — at which point that difference is a field of
+/// [`Phrasing`] some other role can share, and not an `if` in [`Reader::read`].
 #[must_use]
 pub const fn phrasing(role: Role) -> Phrasing {
     match role {
@@ -682,7 +707,7 @@ mod tests {
     ///
     /// The compile error is the compiler's: [`phrasing`] is a `match` over a
     /// closed enum with no wildcard, so `error[E0004]` is what a twenty-third
-    /// variant produces at `interface/src/reader.rs:199`. What this test holds
+    /// variant produces at `interface/src/reader.rs:224`. What this test holds
     /// is the two things the compiler cannot: that the arms are still one per
     /// role rather than a wildcard somebody added in a hurry, and that no arm
     /// has been collapsed into a catch-all.

@@ -853,6 +853,12 @@ impl Token {
     /// twenty-third role added to `node.rs` fails to compile here, and whoever
     /// adds it is asked what colour it is rather than discovering later that it
     /// is whatever a wildcard arm said.
+    ///
+    /// The display projection paints through this table and [`Duty::of`], so
+    /// both are per-role tables `cargo xtask lint-projections` reads (RFC
+    /// 0140): the text and label rows are values, each shared with a role that
+    /// is not text, and neither role is named anywhere else in this file's
+    /// shipped code.
     #[must_use]
     pub const fn ink_for(role: Role) -> Self {
         match role {

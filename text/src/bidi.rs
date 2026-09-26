@@ -236,9 +236,25 @@ const fn direction_of(level: u8) -> BidiClass {
 ///
 /// A paragraph separator stays with the paragraph it ends, so this is one past
 /// the first `B`, or the whole text when there is none.
+///
+/// **CR LF is one separator, not two.** Both scalars are class `B`, so P1 read
+/// a scalar at a time ends a paragraph between them and makes the LF a
+/// paragraph of its own — which a line setter then turns into a line ending
+/// between CR and LF, inside the one cluster GB3 makes of them and at the one
+/// position LB5 forbids. The Unicode Standard's newline guidelines (section
+/// 5.8) treat the pair as one newline function and ICU's `ubidi` steps over
+/// the LF for that reason, so this does too. Neither conformance file holds a
+/// case with two paragraphs, so no corpus result can move; the evidence is
+/// `cr_lf_is_one_paragraph_separator`. *What would reverse this:* a revision
+/// of P1 that says the pair is two paragraphs, which would put UAX #9 at odds
+/// with UAX #14 and UAX #29 over the same position.
 #[must_use]
 pub fn paragraph_len(text: &[char]) -> usize {
-    text.iter().position(|&c| bidi_class(c) == B).map_or(text.len(), |at| at + 1)
+    match text.iter().position(|&c| bidi_class(c) == B) {
+        None => text.len(),
+        Some(at) if text[at] == '\r' && text.get(at + 1) == Some(&'\n') => at + 2,
+        Some(at) => at + 1,
+    }
 }
 
 /// Resolve one paragraph's embedding levels: P2 and P3 when asked, then X1
@@ -253,7 +269,8 @@ pub fn paragraph_len(text: &[char]) -> usize {
 ///
 /// [`Refusal::WrongLength`] if `work` is not as long as `text`,
 /// [`Refusal::TooLong`] past `u32::MAX - 1` scalars, and
-/// [`Refusal::SecondParagraph`] for a paragraph separator anywhere but last.
+/// [`Refusal::SecondParagraph`] for a paragraph separator anywhere but last,
+/// a closing CR LF counting as one separator as [`paragraph_len`] counts it.
 pub fn resolve(
     text: &[char],
     base: BaseDirection,
@@ -268,7 +285,9 @@ pub fn resolve(
     }
     for (i, (&c, slot)) in text.iter().zip(work.iter_mut()).enumerate() {
         let class = bidi_class(c);
-        if class == B && i + 1 != n {
+        // The CR of a closing CR LF is the first half of the last separator.
+        let closing = c == '\r' && i + 2 == n && text[i + 1] == '\n';
+        if class == B && i + 1 != n && !closing {
             return Err(Refusal::SecondParagraph { at: i });
         }
         *slot = Slot { original: class, class, ..Slot::EMPTY };
@@ -1129,6 +1148,30 @@ mod tests {
         let first = resolve(&text[..2], BaseDirection::FirstStrong, &mut work[..2]).unwrap();
         let second = resolve(&text[2..], BaseDirection::FirstStrong, &mut work[2..]).unwrap();
         assert_eq!((first.level, second.level), (0, 1));
+    }
+
+    /// P1 over a CR LF: one separator, kept with the paragraph it ends. A lone
+    /// CR and a lone LF each still end one, and LF CR is two separators,
+    /// because CR LF is the only pair the newline guidelines name.
+    #[test]
+    fn cr_lf_is_one_paragraph_separator() {
+        let text = ['a', '\r', '\n', 'b'];
+        assert_eq!(paragraph_len(&text), 3, "the LF goes with the CR, not after it");
+        assert_eq!(paragraph_len(&['a', '\r', 'b']), 2);
+        assert_eq!(paragraph_len(&['a', '\n', '\r', 'b']), 2);
+        assert_eq!(paragraph_len(&['\r']), 1);
+        let mut work = [Slot::EMPTY; 4];
+        assert!(resolve(&text[..3], BaseDirection::FirstStrong, &mut work[..3]).is_ok());
+        assert_eq!(
+            resolve(&['a', '\n', '\r'], BaseDirection::FirstStrong, &mut work[..3]),
+            Err(Refusal::SecondParagraph { at: 1 }),
+            "LF CR is two separators"
+        );
+        assert_eq!(
+            resolve(&text, BaseDirection::FirstStrong, &mut work),
+            Err(Refusal::SecondParagraph { at: 1 }),
+            "a CR LF with text after it still ends a paragraph there"
+        );
     }
 
     #[test]

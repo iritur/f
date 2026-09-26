@@ -189,6 +189,7 @@ jobs:
       - run: cargo xtask lint-claims
       - run: cargo xtask lint-units
       - run: cargo xtask lint-callbacks
+      - run: cargo xtask lint-projections
       - run: cargo xtask lint-claim-owners
       # Nine of these ran in `cargo xtask verify` and in no workflow at all, so
       # nine executable policies were enforced on a laptop and not on a merge.

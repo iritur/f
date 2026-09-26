@@ -92,6 +92,23 @@
 //! restores it (RFC 0114). `f-text` is in `cargo xtask test-host` on the arm
 //! runner, and every answer here is a boolean per position.
 //!
+//! # A set paragraph ends its lines only where the text path offers
+//!
+//! `f_text::paragraph` promises that every line it sets ends at a position
+//! `f_text::line::opportunities` offers over the *whole* text (`Line::end`),
+//! and the promise is where a paragraph split can go wrong — a CR LF split in
+//! two, or a slice's end offered by LB3 where the text has no break. So every
+//! case's text of both files is also set, twice, with a seat of half an em a
+//! scalar: in a measure of one pixel, where no segment fits and **the line
+//! ends must be exactly the opportunities**; and in one no line fills, where
+//! **every line end must be offered and every mandatory one taken**. The lines
+//! must tile the text in both. The one refusal allowed is
+//! `Unset::SeparatorMidLine`, for a text whose U+001C to U+001E ends a
+//! paragraph where UAX #14 offers nothing, and it is counted. This is here and
+//! not in a file of its own because this file is already the `IMPORT_READERS`
+//! row that may read both corpora (RFC 0114), and a second reader of the same
+//! files would be a second row for the same bytes.
+//!
 //! ```text
 //! cargo test -p f-text --test break_conformance
 //! ```
@@ -100,10 +117,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::exit;
 
+use f_text::bidi::BaseDirection;
 use f_text::corpus::Script;
 use f_text::grapheme::{Clusters, cluster_boundaries};
 use f_text::line::{Decision, Outcome, decisions, opportunities};
 use f_text::line_break::{LineBreak, UNICODE_VERSION};
+use f_text::metric::{Advance, NotAMetric, Px, Scale};
+use f_text::paragraph::{Setting, Unset};
 use f_text::property::line_break;
 
 /// The name this target answers to when cargo's harness protocol asks.
@@ -560,6 +580,23 @@ struct Run {
     /// Mandatory breaks in `LineBreakTest.txt` by LB3 to LB5 from the
     /// property, by rule. Unit: positions.
     mandatory_by_rule: BTreeMap<&'static str, usize>,
+    /// Case texts set as a paragraph whose line ends held, and texts refused
+    /// as `Unset::SeparatorMidLine`, per file. Unit: texts.
+    set: BTreeMap<Corpus, (usize, usize)>,
+    /// Case texts whose setting was wrong, all of them counted. Unit: texts.
+    set_wrong: usize,
+}
+
+/// The seat [`Run::set_in_lines`] fills: half an em a scalar, whatever it is.
+/// Not a shaper; a width a reader can count, so that what the check holds is
+/// where lines end, which is the paragraph's, and not a glyph's advance.
+fn seat(run: &[char]) -> Result<Advance, NotAMetric> {
+    Advance::in_design_units(500 * i32::try_from(run.len()).unwrap_or(i32::MAX))
+}
+
+/// A 1000-unit grid at a 32-pixel em: sixteen pixels a scalar.
+fn seat_scale() -> Scale {
+    Scale::new(1000, 32 * 64).unwrap_or_else(|why| panic!("the seat's scale: {why:?}"))
 }
 
 /// Parse `÷ 0020 × 0308 ÷ # ÷ [0.2] SPACE (Other) × [9.0] …` into scalars,
@@ -811,6 +848,80 @@ fn arm_findings(arms: &[Arm], witnesses: &BTreeMap<(Corpus, String), usize>) -> 
 impl Run {
     fn finding(&mut self, text: String) {
         self.findings.push(Finding::Said(text));
+    }
+
+    /// The case's text set as a paragraph, in a measure nothing fits and in
+    /// one everything fits; what the module header's last section holds.
+    fn set_in_lines(&mut self, corpus: Corpus, case: &Case) {
+        let n = case.text.len();
+        if n == 0 {
+            return;
+        }
+        let text: String = case.text.iter().collect();
+        let offered: Vec<(usize, bool)> =
+            opportunities(&case.text).map(|o| (o.at, o.mandatory)).collect();
+        let every: Vec<usize> = offered.iter().map(|&(at, _)| at).collect();
+        let hard: Vec<usize> = offered.iter().filter(|&&(_, m)| m).map(|&(at, _)| at).collect();
+        let mut setting = Box::new(Setting::new());
+        let mut wrong = None;
+        let mut refused = false;
+        for (px, nothing_fits) in [(1, true), (1 << 20, false)] {
+            let Ok(measure) = Px::new(px) else {
+                wrong = Some(format!("{px} px is not a measure"));
+                break;
+            };
+            match setting.set(&text, BaseDirection::FirstStrong, seat_scale(), measure, seat) {
+                Ok(lines) => {
+                    let ends: Vec<usize> = lines.iter().map(|l| l.end).collect();
+                    let starts: Vec<usize> = lines.iter().map(|l| l.start).collect();
+                    let mut from = vec![0];
+                    from.extend(ends.iter().copied().take(ends.len().saturating_sub(1)));
+                    let tiled = starts == from && ends.last() == Some(&n);
+                    let right = if nothing_fits {
+                        ends == every
+                    } else {
+                        ends.iter().all(|e| every.contains(e))
+                            && hard.iter().all(|h| ends.contains(h))
+                    };
+                    if !(tiled && right) {
+                        wrong = Some(format!(
+                            "{px} px: lines end at {ends:?} starting at {starts:?}; the whole text \
+                             offers {every:?}, mandatory {hard:?}"
+                        ));
+                    }
+                }
+                Err(Unset::SeparatorMidLine { at })
+                    if !every.contains(&at)
+                        && matches!(
+                            case.text.get(at.wrapping_sub(1)),
+                            Some('\u{1C}'..='\u{1E}')
+                        ) =>
+                {
+                    refused = true;
+                }
+                Err(other) => wrong = Some(format!("{px} px: refused, {other:?}")),
+            }
+        }
+        match wrong {
+            None => {
+                let tally = self.set.entry(corpus).or_default();
+                if refused {
+                    tally.1 += 1;
+                } else {
+                    tally.0 += 1;
+                }
+            }
+            Some(why) => {
+                self.set_wrong += 1;
+                if self.set_wrong <= SHOWN {
+                    self.finding(format!(
+                        "{}:{} set as a paragraph: {why}",
+                        corpus.file(),
+                        case.line
+                    ));
+                }
+            }
+        }
     }
 
     /// The within-cluster assertion over one text: `path` judged against the
@@ -1094,7 +1205,10 @@ fn run_file(run: &mut Run, corpus: Corpus, text: &str) {
         }
         data += 1;
         match parse(index + 1, line) {
-            Ok(case) => run.case(corpus, &case),
+            Ok(case) => {
+                run.case(corpus, &case);
+                run.set_in_lines(corpus, &case);
+            }
             Err(why) => {
                 run.finding(format!("{}:{} does not parse: {why}", corpus.file(), index + 1));
             }
@@ -1235,6 +1349,8 @@ fn conformance() -> i32 {
         unknown: BTreeMap::new(),
         misattributed: 0,
         mandatory_by_rule: BTreeMap::new(),
+        set: BTreeMap::new(),
+        set_wrong: 0,
     };
     // The control. With `EXCLUDED` empty the checks above run over nothing and
     // could not fail, so they are fed entries each must refuse: a rule the
@@ -1332,6 +1448,36 @@ fn conformance() -> i32 {
                 tally.ran
             ));
         }
+    }
+    let mut set_total = 0;
+    for corpus in Corpus::ALL {
+        let (held, refused) = run.set.get(&corpus).copied().unwrap_or_default();
+        set_total += held + refused;
+        println!(
+            "  {:<32} set as a paragraph: {held} held (every line end offered over the whole \
+             text; every offer taken in 1 px, every mandatory one in 1 048 576 px), {refused} \
+             refused as U+001C-U+001E, which ends a paragraph where UAX #14 offers no break",
+            corpus.file()
+        );
+        if held == 0 {
+            run.finding(format!(
+                "{}: no case text was set as a paragraph, and a run of nothing is not a pass",
+                corpus.file()
+            ));
+        }
+    }
+    let cases: usize = Corpus::ALL.iter().map(|c| c.cases()).sum();
+    if set_total + run.set_wrong != cases {
+        run.finding(format!(
+            "{set_total} case texts set as a paragraph and {} wrong, of {cases} cases: a case \
+             went unset",
+            run.set_wrong
+        ));
+    }
+    if run.set_wrong > SHOWN {
+        let finding =
+            format!("{} case texts set wrongly as a paragraph, {SHOWN} shown", run.set_wrong);
+        run.finding(finding);
     }
     println!(
         "  corpus entries                   {} texts: no break inside a cluster held over {}",
