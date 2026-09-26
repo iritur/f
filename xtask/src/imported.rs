@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Everything in `xtask` that opens a file under `third_party/`: the check that
 //! reads each import's `PROVENANCE.md` against the bytes it describes, and the
-//! generator that re-spells two of Unicode's data files as Rust tables in
-//! `text/src/`. RFC 0114, RFC 0138.
+//! generator that re-spells Unicode's data files as Rust tables in `text/src/`.
+//! RFC 0114, RFC 0138, RFC 0139.
 //!
 //! # Why one file
 //!
@@ -36,11 +36,26 @@
 //!   whole code space; later ones override it for their ranges and must not
 //!   overlap each other, so the order they are applied in decides nothing. An
 //!   overlap is a refusal, because resolving it would be a precedence rule of
-//!   this tree's.
+//!   this tree's. A file with no `@missing` line is read only if it lists every
+//!   code point itself — `DerivedGeneralCategory.txt` does, `Cn` included — so
+//!   no default is needed and none is chosen; one unlisted scalar is a refusal.
+//!   A binary property's default is the file's own sentence, `All omitted code
+//!   points have <Property>=No`, and a file that does not say it is refused
+//!   (RFC 0139).
+//! - **One property of several.** `DerivedCoreProperties.txt` and
+//!   `emoji-data.txt` each hold many properties, and the generator reads the
+//!   lines of the one a row names and no others: by its short name in the
+//!   middle field for an enumerated property (`InCB`), by its name in the last
+//!   for a binary one (`Extended_Pictographic`). Nothing is merged across
+//!   properties.
 //! - **Totals.** Where the file states `# Total code points: N` under a
 //!   `# <Property>=<Value>` heading, the resolved table must agree, which is the
 //!   upstream file checking this reading of its defaults — `L` is 1,095,407 code
-//!   points only if every unassigned scalar landed where the file says.
+//!   points only if every unassigned scalar landed where the file says. A total
+//!   with no heading counts too when every line since the last total carried one
+//!   value, which is how `GraphemeBreakProperty.txt` states its fourteen; a
+//!   total after lines of two values is not attributed to either. A binary
+//!   property's `# Total elements: N` is held the same way.
 //! - **Names** are the file's short values, which are the names UAX #9's rules
 //!   use. A long name appears only where the file spells one in a heading, and
 //!   an underscore is dropped from a variant because Rust's camel case requires
@@ -75,10 +90,10 @@ const DATA_EXTENSIONS: &[&str] = &["txt"];
 /// How one upstream file becomes one table.
 ///
 /// A row of [`SHAPES`] and a row of `DERIVED_DATA` are the whole cost of a new
-/// table. `E3-B03f`'s `Line_Break` and `Grapheme_Cluster_Break` are both
-/// [`Shape::Ranges`] — `every_break_property_this_import_holds_is_a_row` reads
-/// both files through the same parser today, so the claim that they are a row
-/// and not a rewrite is a test rather than a hope.
+/// table. `E3-B03f`'s `Line_Break`, `Grapheme_Cluster_Break`, `East_Asian_Width`
+/// and `General_Category` are [`Shape::Ranges`] rows like `Bidi_Class`;
+/// `Indic_Conjunct_Break` and `Extended_Pictographic` needed the two shapes
+/// after it, because their files hold other properties beside them (RFC 0139).
 #[derive(Clone, Copy)]
 pub enum Shape {
     /// An enumerated property as `range ; value` lines with `@missing` defaults.
@@ -88,6 +103,27 @@ pub enum Shape {
         property: &'static str,
         /// The Rust type the values become.
         type_name: &'static str,
+        /// The name of the table of runs.
+        table: &'static str,
+    },
+    /// An enumerated property as `range ; <short> ; value` lines in a file that
+    /// holds other properties too: only lines whose middle field is `short` are
+    /// read, `@missing` lines included.
+    Field {
+        /// The property's name as the file's headings spell it.
+        property: &'static str,
+        /// The short name the file's lines carry in their middle field.
+        short: &'static str,
+        /// The Rust type the values become.
+        type_name: &'static str,
+        /// The name of the table of runs.
+        table: &'static str,
+    },
+    /// A binary property as `range ; <property>` lines in a file that holds
+    /// other properties too, with the default the file states in words.
+    Binary {
+        /// The property's name as the file's lines spell it.
+        property: &'static str,
         /// The name of the table of runs.
         table: &'static str,
     },
@@ -105,6 +141,47 @@ pub const SHAPES: &[(&str, Shape)] = &[
         Shape::Ranges { property: "Bidi_Class", type_name: "BidiClass", table: "BIDI_CLASS" },
     ),
     ("text/src/bidi_brackets.rs", Shape::Brackets { table: "BIDI_BRACKETS" }),
+    (
+        "text/src/line_break.rs",
+        Shape::Ranges { property: "Line_Break", type_name: "LineBreak", table: "LINE_BREAK" },
+    ),
+    (
+        "text/src/grapheme_break.rs",
+        Shape::Ranges {
+            property: "Grapheme_Cluster_Break",
+            type_name: "GraphemeClusterBreak",
+            table: "GRAPHEME_CLUSTER_BREAK",
+        },
+    ),
+    (
+        "text/src/east_asian_width.rs",
+        Shape::Ranges {
+            property: "East_Asian_Width",
+            type_name: "EastAsianWidth",
+            table: "EAST_ASIAN_WIDTH",
+        },
+    ),
+    (
+        "text/src/general_category.rs",
+        Shape::Ranges {
+            property: "General_Category",
+            type_name: "GeneralCategory",
+            table: "GENERAL_CATEGORY",
+        },
+    ),
+    (
+        "text/src/indic_conjunct_break.rs",
+        Shape::Field {
+            property: "Indic_Conjunct_Break",
+            short: "InCB",
+            type_name: "IndicConjunctBreak",
+            table: "INDIC_CONJUNCT_BREAK",
+        },
+    ),
+    (
+        "text/src/extended_pictographic.rs",
+        Shape::Binary { property: "Extended_Pictographic", table: "EXTENDED_PICTOGRAPHIC" },
+    ),
 ];
 
 /// Every code point, as a `u32`. Unit: code points.
@@ -112,6 +189,47 @@ const CODE_SPACE: u32 = 0x11_0000;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     crate::pack::hex(&f_hash::sha256(bytes))
+}
+
+/// The version a file states about itself, in full.
+///
+/// A UCD file says it in its first line, `# <Name>-<X.Y.Z>.txt`, and that is
+/// the answer. `emoji-data.txt` says only `# Version: X.Y` in its header, which
+/// is not enough to name the file's URL, so the third component comes from the
+/// import's record — `PROVENANCE.md`'s `Version`, which `lint-licensing` reads
+/// against every file that states one in full — and only if the record is a
+/// release of what the file said. A file that states neither is refused.
+fn stated_version(at: &Path, text: &str) -> Result<String, String> {
+    if let Some(version) = self_stated_version(text) {
+        return Ok(version.to_string());
+    }
+    let short = text
+        .split('\n')
+        .take_while(|line| line.starts_with('#') || line.trim().is_empty())
+        .find_map(|line| line.strip_prefix("# Version: "))
+        .map(str::trim)
+        .ok_or(
+            "states no version: neither `# <Name>-<X.Y.Z>.txt` in its first line nor a \
+                `# Version:` line in its header",
+        )?;
+    let record = format!("{IMPORT_DIR}/PROVENANCE.md");
+    let recorded = std::fs::read_to_string(at.join(&record))
+        .ok()
+        .and_then(|text| parse_provenance(&record, &text).0.fields.get("Version").cloned())
+        .ok_or_else(|| {
+            format!("states `{short}` and {record} records no Version to complete it")
+        })?;
+    let agrees = recorded
+        .strip_prefix(short)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|z| !z.is_empty() && z.bytes().all(|b| b.is_ascii_digit()));
+    if !agrees {
+        return Err(format!(
+            "states version `{short}` and {record} records `{recorded}`, which is not a release \
+             of it"
+        ));
+    }
+    Ok(recorded)
 }
 
 /// The version a UCD file states in its own first line, `# <Name>-<X.Y.Z>.txt`.
@@ -162,15 +280,23 @@ pub fn generate(at: &Path, output: &str, upstream: &str, sha256: &str) -> Result
         ));
     }
     let text = String::from_utf8(bytes).map_err(|e| format!("{upstream} is not UTF-8: {e}"))?;
-    let version = self_stated_version(&text).ok_or_else(|| {
-        format!("{upstream} does not state its version in its first line, `# <Name>-<X.Y.Z>.txt`")
-    })?;
-    let header = Header { upstream, inside, sha256, version };
+    let version = stated_version(at, &text).map_err(|e| format!("{upstream}: {e}"))?;
+    let header = Header { upstream, inside, sha256, version: &version };
     match shape {
         Shape::Ranges { property, type_name, table } => {
             let resolved =
                 resolve_ranges(&text, property).map_err(|e| format!("{upstream}: {e}"))?;
             render_ranges(&header, property, type_name, table, &resolved)
+        }
+        Shape::Field { property, short, type_name, table } => {
+            let resolved = resolve_field(&text, property, Some(short))
+                .map_err(|e| format!("{upstream}: {e}"))?;
+            render_ranges(&header, property, type_name, table, &resolved)
+        }
+        Shape::Binary { property, table } => {
+            let resolved =
+                resolve_binary(&text, property).map_err(|e| format!("{upstream}: {e}"))?;
+            Ok(render_binary(&header, property, table, &resolved))
         }
         Shape::Brackets { table } => {
             let pairs = parse_brackets(&text).map_err(|e| format!("{upstream}: {e}"))?;
@@ -334,6 +460,22 @@ fn parse_range(field: &str) -> Result<(u32, u32), String> {
 /// Read `range ; value` lines and the file's own defaults into one value per
 /// code point. The module documentation says what may and may not be decided.
 fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
+    resolve_field(text, property, None)
+}
+
+/// [`resolve_ranges`], or with `select` the `range ; <select> ; value` lines of
+/// one property in a file that holds several, every other line skipped.
+fn resolve_field(text: &str, property: &str, select: Option<&str>) -> Result<Resolved, String> {
+    // The fields of a line that belong to this property, or `None` for a line
+    // of another one. Without `select`, every line is this property's.
+    fn pick<'a>(select: Option<&str>, fields: Vec<&'a str>) -> Option<Vec<&'a str>> {
+        match (select, fields.as_slice()) {
+            (None, _) => Some(fields),
+            (Some(short), [range, name, value]) if *name == short => Some(vec![*range, *value]),
+            (Some(_), _) => None,
+        }
+    }
+    let ours = |fields| pick(select, fields);
     let heading = format!("# {property}=");
     let mut values: Vec<String> = Vec::new();
     let mut long: BTreeMap<String, String> = BTreeMap::new();
@@ -342,11 +484,16 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
     let mut stated: Vec<(String, u64, usize)> = Vec::new();
     let mut pending: Option<String> = None;
     let mut block: Option<String> = None;
+    // The one value every line of this property carried since the last total,
+    // or `Some(None)` once two differed. `GraphemeBreakProperty.txt` states a
+    // total after each value's lines and heads none of them, and a total the
+    // file states is a check on this reading whether or not a heading names it.
+    let mut since: Option<Option<String>> = None;
 
     for (index, line) in text.split('\n').enumerate() {
         let n = index + 1;
         if let Some(rest) = line.strip_prefix("# @missing:") {
-            let fields: Vec<&str> = rest.split(';').map(str::trim).collect();
+            let Some(fields) = ours(rest.split(';').map(str::trim).collect()) else { continue };
             let [range, value] = fields[..] else {
                 return Err(format!("line {n}: an `@missing` line with other than two fields"));
             };
@@ -357,10 +504,12 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
         if let Some(name) = line.strip_prefix(&heading) {
             pending = Some(name.trim().to_string());
             block = None;
+            since = None;
             continue;
         }
         if let Some(count) = line.strip_prefix("# Total code points:") {
-            if let Some(value) = block.take() {
+            let unheaded = since.take().flatten();
+            if let Some(value) = block.take().or(unheaded) {
                 let count: u64 =
                     count.trim().parse().map_err(|_| format!("line {n}: an unreadable total"))?;
                 stated.push((value, count, n));
@@ -371,7 +520,7 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
         if data.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = data.split(';').map(str::trim).collect();
+        let Some(fields) = ours(data.split(';').map(str::trim).collect()) else { continue };
         let [range, value] = fields[..] else {
             return Err(format!("line {n}: a data line with other than two fields"));
         };
@@ -379,6 +528,11 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
         if !values.iter().any(|v| v == value) {
             values.push(value.to_string());
         }
+        since = match since {
+            None => Some(Some(value.to_string())),
+            Some(Some(v)) if v == value => Some(Some(v)),
+            Some(_) => Some(None),
+        };
         if let Some(name) = pending.take() {
             if let Some(previous) = long.insert(value.to_string(), name.clone())
                 && previous != name
@@ -408,12 +562,11 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
         values.len() - 1
     };
 
-    let Some(first) = missing.first() else {
-        return Err("no `@missing` line, so an unlisted code point has no value the file \
-                    gives it and this would have to choose one"
-            .into());
-    };
-    if (first.0, first.1) != (0, CODE_SPACE - 1) {
+    // No `@missing` line is a file that must list every code point itself; that
+    // is checked once the explicit lines are applied, below.
+    if let Some(first) = missing.first()
+        && (first.0, first.1) != (0, CODE_SPACE - 1)
+    {
         return Err(format!(
             "line {}: the first `@missing` line does not cover the code space",
             first.3
@@ -451,6 +604,12 @@ fn resolve_ranges(text: &str, property: &str) -> Result<Resolved, String> {
         }
     }
 
+    if let Some(cp) = table.iter().position(|v| *v == unset) {
+        return Err(format!(
+            "no `@missing` line covers U+{cp:04X} and no line lists it, so it has no value the \
+             file gives it and this would have to choose one"
+        ));
+    }
     let mut counts = vec![0u64; values.len()];
     for v in &table {
         counts[*v] += 1;
@@ -585,6 +744,133 @@ fn render_ranges(
     }
     let _ = writeln!(out, "];");
     Ok(out)
+}
+
+/// One binary property, resolved over the whole code space.
+struct Binary {
+    /// The first code point of each maximal run, and whether it has the
+    /// property. The first run starts at zero and the runs alternate.
+    runs: Vec<(u32, bool)>,
+    /// Code points with the property. Unit: code points.
+    count: u64,
+}
+
+/// Read the `range ; <property>` lines of one binary property out of a file
+/// that holds several. The default is the file's own sentence for it, and the
+/// file's `# Total elements:` after the property's lines must be the count.
+fn resolve_binary(text: &str, property: &str) -> Result<Binary, String> {
+    let default = format!("# All omitted code points have {property}=No");
+    let stated = text.split('\n').filter(|line| line.trim_end() == default).count();
+    if stated != 1 {
+        return Err(format!(
+            "`{default}` appears {stated} time(s), and it is the only default this reads for a \
+             binary property: without it an unlisted code point has no value the file gives it"
+        ));
+    }
+    let mut has = vec![false; CODE_SPACE as usize];
+    let mut seen_ours = false;
+    let mut total: Option<(u64, usize)> = None;
+    for (index, line) in text.split('\n').enumerate() {
+        let n = index + 1;
+        if let Some(count) = line.strip_prefix("# Total elements:") {
+            if seen_ours && total.is_none() {
+                let count: u64 =
+                    count.trim().parse().map_err(|_| format!("line {n}: an unreadable total"))?;
+                total = Some((count, n));
+            }
+            continue;
+        }
+        let data = line.split('#').next().unwrap_or("").trim();
+        if data.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = data.split(';').map(str::trim).collect();
+        let [range, name] = fields[..] else {
+            return Err(format!("line {n}: a data line with other than two fields"));
+        };
+        if name != property {
+            continue;
+        }
+        if total.is_some() {
+            return Err(format!("line {n}: `{property}` resumes after its stated total"));
+        }
+        seen_ours = true;
+        let (a, b) = parse_range(range).map_err(|e| format!("line {n}: {e}"))?;
+        for cp in a..=b {
+            if has[cp as usize] {
+                return Err(format!("line {n}: U+{cp:04X} is listed twice"));
+            }
+            has[cp as usize] = true;
+        }
+    }
+    let count = has.iter().filter(|h| **h).count() as u64;
+    let Some((stated, n)) = total else {
+        return Err(format!("no `# Total elements:` follows `{property}`'s lines"));
+    };
+    if stated != count {
+        return Err(format!(
+            "line {n}: the file says `{property}` covers {stated} element(s) and this reading \
+             of it gives {count}"
+        ));
+    }
+    let mut runs: Vec<(u32, bool)> = Vec::new();
+    for (cp, v) in has.iter().enumerate() {
+        if runs.last().is_none_or(|(_, last)| last != v) {
+            runs.push((u32::try_from(cp).unwrap_or(u32::MAX), *v));
+        }
+    }
+    Ok(Binary { runs, count })
+}
+
+fn render_binary(header: &Header<'_>, property: &str, table: &str, resolved: &Binary) -> String {
+    let mut out = header.render(&format!("Unicode's `{property}`"));
+    let _ = writeln!(
+        out,
+        "//! `{property}` for every code point, as runs, from Unicode {}.",
+        header.version
+    );
+    let _ = writeln!(out, "//!");
+    let _ = writeln!(
+        out,
+        "//! [`{table}`] holds the first code point of each maximal run of one value, in"
+    );
+    let _ = writeln!(
+        out,
+        "//! ascending order from zero, so whether a code point has the property is the"
+    );
+    let _ = writeln!(
+        out,
+        "//! value of the last entry whose start is at most it, and the runs alternate. A"
+    );
+    let _ = writeln!(
+        out,
+        "//! code point the upstream file does not list does not have the property, which"
+    );
+    let _ = writeln!(
+        out,
+        "//! is the file's own sentence, and the {} that do reproduce its stated total.",
+        resolved.count
+    );
+    let _ = writeln!(
+        out,
+        "//! The lookup is not here: this file is data under two licences, and code in it"
+    );
+    let _ = writeln!(out, "//! would be too. [`crate::property`] reads it.");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// The Unicode version this table was generated from.");
+    let _ = writeln!(out, "pub const UNICODE_VERSION: &str = \"{}\";", header.version);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// The first code point of each run, and whether the run has `{property}`."
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub const {table}: &[(u32, bool)] = &[");
+    for (start, v) in &resolved.runs {
+        let _ = writeln!(out, "    (0x{start:04X}, {v}),");
+    }
+    let _ = writeln!(out, "];");
+    out
 }
 
 /// One line of `BidiBrackets.txt`: the bracket, its pair, and whether it opens.
@@ -914,8 +1200,8 @@ pub fn data_file_names(at: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMPORT_DIR, generate, import_findings, parse_brackets, resolve_ranges, self_stated_version,
-        sha256_hex, table_findings,
+        IMPORT_DIR, generate, import_findings, parse_brackets, resolve_binary, resolve_field,
+        resolve_ranges, self_stated_version, sha256_hex, stated_version, table_findings,
     };
     use std::path::{Path, PathBuf};
 
@@ -989,6 +1275,102 @@ mod tests {
         assert!(resolve_ranges(&twice, "P").err().expect("refused").contains("listed twice"));
     }
 
+    /// RFC 0139's first reading: a file with no `@missing` line is read only
+    /// because it lists every code point itself, and one it leaves out is a
+    /// refusal rather than a default this tree would choose.
+    #[test]
+    fn a_file_with_no_default_must_list_every_code_point() {
+        let every = "# All-1.0.0.txt\n# P=Few\n0000..0040 ; F\n# Total code points: 65\n\
+                     # P=Many\n0041..10FFFF ; M\n# Total code points: 1114047\n";
+        let r = resolve_ranges(every, "P").expect("every code point listed");
+        assert_eq!(r.runs, vec![(0, 0), (0x41, 1)]);
+        assert_eq!(r.totals, 2);
+        let gap = every.replace("0041..10FFFF ; M\n", "0042..10FFFF ; M\n");
+        let e = resolve_ranges(&gap, "P").err().expect("refused");
+        assert!(e.contains("no `@missing` line covers U+0041"), "{e}");
+    }
+
+    /// A total no heading names still counts when every line since the last
+    /// total carried one value, which is how `GraphemeBreakProperty.txt`
+    /// states its totals; after lines of two values it is attributed to
+    /// neither.
+    #[test]
+    fn an_unheaded_total_is_held_to_its_one_value() {
+        let unheaded = "# U-1.0.0.txt\n# @missing: 0000..10FFFF; Other\n\
+                        0041..0042 ; A\n# Total code points: 2\n0030 ; B\n0031 ; C\n\
+                        # Total code points: 99\n";
+        let r = resolve_ranges(unheaded, "P").expect("the mixed total is not attributed");
+        assert_eq!(r.totals, 1);
+        let wrong = unheaded.replace("# Total code points: 2\n", "# Total code points: 3\n");
+        let e = resolve_ranges(&wrong, "P").err().expect("refused");
+        assert!(e.contains("covers 3 code point(s) and this reading of it gives 2"), "{e}");
+    }
+
+    /// One property of several: only the lines whose middle field names it,
+    /// its own `@missing` line included; a binary property's two-field lines
+    /// and another enumerated property's lines are skipped.
+    #[test]
+    fn one_property_of_several_reads_only_its_own_lines() {
+        let mixed = "# D-1.0.0.txt\n# @missing: 0000..10FFFF; X; Nope\n\
+                     # @missing: 0000..10FFFF; InCB; None\n0041 ; Alpha\n\
+                     # Indic_Conjunct_Break=Linker\n0042 ; InCB; Linker\n\
+                     # Total code points: 1\n0043 ; X; Yes\n";
+        let r = resolve_field(mixed, "Indic_Conjunct_Break", Some("InCB")).expect("read");
+        assert_eq!(r.values, vec!["Linker".to_string(), "None".to_string()]);
+        assert_eq!(r.runs, vec![(0, 1), (0x42, 0), (0x43, 1)]);
+        assert_eq!(r.totals, 1);
+    }
+
+    /// RFC 0139's second reading: a binary property's default is the file's
+    /// sentence for it, and its `# Total elements:` must be reproduced.
+    #[test]
+    fn a_binary_property_needs_its_sentence_and_its_total() {
+        let good = "# e.txt\n# All omitted code points have Other=No\n0030 ; Other\n\
+                    # Total elements: 1\n# All omitted code points have Pict=No\n\
+                    00A9 ; Pict\n2000..2001 ; Pict\n# Total elements: 3\n";
+        let r = resolve_binary(good, "Pict").expect("read");
+        assert_eq!(
+            r.runs,
+            vec![(0, false), (0xA9, true), (0xAA, false), (0x2000, true), (0x2002, false)]
+        );
+        assert_eq!(r.count, 3);
+        let silent = good.replace("# All omitted code points have Pict=No\n", "");
+        let e = resolve_binary(&silent, "Pict").err().expect("refused");
+        assert!(e.contains("appears 0 time(s)"), "{e}");
+        let short = good.replace("# Total elements: 3", "# Total elements: 2");
+        let e = resolve_binary(&short, "Pict").err().expect("refused");
+        assert!(e.contains("covers 2 element(s) and this reading of it gives 3"), "{e}");
+        let resumed = format!("{good}0300 ; Pict\n");
+        let e = resolve_binary(&resumed, "Pict").err().expect("refused");
+        assert!(e.contains("resumes after its stated total"), "{e}");
+    }
+
+    /// RFC 0139's third reading: `emoji-data.txt` states `Version: 17.0`, and
+    /// the third component is the record's only if the record is a release of
+    /// what the file said.
+    #[test]
+    fn a_short_version_is_completed_only_by_a_record_that_agrees() {
+        let record = |version: &str| {
+            format!(
+                "| Field | Value |\n|---|---|\n| Kind | data |\n| Version | {version} |\n\n\
+                 | File | Bytes | SHA-256 | From |\n|---|---|---|---|\n"
+            )
+        };
+        let emoji = "# emoji-data.txt\n# Version: 17.0\n#\n0023 ; Emoji\n";
+        let agrees = record("17.0.0");
+        let at =
+            fixture("import-version", &[("third_party/unicode/PROVENANCE.md", agrees.as_bytes())]);
+        assert_eq!(stated_version(&at, emoji), Ok("17.0.0".to_string()));
+        assert_eq!(stated_version(&at, "# X-16.0.0.txt\n"), Ok("16.0.0".to_string()));
+        let differs = record("17.01.0");
+        let at =
+            fixture("import-version", &[("third_party/unicode/PROVENANCE.md", differs.as_bytes())]);
+        let e = stated_version(&at, emoji).expect_err("refused");
+        assert!(e.contains("which is not a release of it"), "{e}");
+        let e = stated_version(&at, "# nothing.txt\n0023 ; Emoji\n").expect_err("refused");
+        assert!(e.contains("states no version"), "{e}");
+    }
+
     #[test]
     fn a_bracket_type_the_file_does_not_define_is_refused() {
         assert!(parse_brackets("0028; 0029; o\n0029; 0028; c\n").is_ok());
@@ -1035,7 +1417,12 @@ mod tests {
         let rows = [("text/src/bidi_brackets.rs", upstream.as_str(), sha.as_str())];
         let (findings, compared) = table_findings(&at, &rows);
         assert_eq!(compared, 1);
-        assert_eq!(findings.len(), 1, "only bidi_class's missing row: {findings:?}");
+        assert_eq!(
+            findings.len(),
+            super::SHAPES.len() - 1,
+            "only the other shapes' missing rows: {findings:?}"
+        );
+        assert!(findings.iter().all(|f| f.contains("has a shape")), "{findings:?}");
         assert!(findings[0].contains("text/src/bidi_class.rs  has a shape"), "{findings:?}");
         std::fs::write(&out, good.replace("Close", "Open")).expect("write");
         let (findings, _) = table_findings(&at, &rows);
@@ -1056,9 +1443,10 @@ mod tests {
         }
     }
 
-    /// `E3-B03f`'s tables are a row and not a rewrite: the two break properties
-    /// this import holds read through the parser the bidi class does, cover the
-    /// code space, and reproduce every total their files state.
+    /// `E3-B03f`'s tables are a row and not a rewrite: the three of its
+    /// properties whose files hold nothing else read through the parser the
+    /// bidi class does, cover the code space, and reproduce every total their
+    /// files state. The other three are the shapes RFC 0139 added, held above.
     #[test]
     fn every_break_property_this_import_holds_is_a_row() {
         for (file, property) in [

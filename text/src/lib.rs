@@ -28,16 +28,25 @@
 //! answer is *imported* then it arrives behind the licence boundary and is
 //! reached over a ring rather than by a dependency row here. RFC 0003.
 //!
-//! [`bidi_class`] and [`bidi_brackets`] are the two files in this crate — and in
-//! the permissive tree — that are not purely this tree's: they are generated
-//! from Unicode's data by `cargo xtask unicode` and carry both licences in their
-//! first line (RFC 0114). They hold values and no code; [`property`] is the code
-//! that reads them. Neither is a dependency, so the crate still has none.
+//! [`bidi_class`], [`bidi_brackets`], [`line_break`], [`grapheme_break`],
+//! [`east_asian_width`], [`general_category`], [`indic_conjunct_break`] and
+//! [`extended_pictographic`] are the eight files in this crate — and in the
+//! permissive tree — that are not purely this tree's: they are generated from
+//! Unicode's data by `cargo xtask unicode` and carry both licences in their
+//! first line (RFC 0114, RFC 0139). They hold values and no code; [`property`]
+//! is the code that reads them. None is a dependency, so the crate still has
+//! none.
 //!
-//! [`bidi`] is UAX #9 over those two, through rule L2, and it is held to the
+//! [`bidi`] is UAX #9 over the first two, through rule L2, and it is held to the
 //! specification's own conformance files by `tests/bidi_conformance.rs` — the
-//! one file in the crate that opens anything under the import, which is why it
+//! first file in the crate to open anything under the import, which is why it
 //! is a test on the host and not code in the library (RFC 0114, RFC 0115).
+//!
+//! [`grapheme`] is UAX #29's extended grapheme clusters and [`line`] is
+//! UAX #14's line breaking, both untailored, both held to the specification's
+//! own files by `tests/break_conformance.rs`, the second such test. The text
+//! path's line breaks are [`line::opportunities`]: UAX #14's, less the ones
+//! that fall inside a cluster, which the same test counts and holds at none.
 
 #![no_std]
 
@@ -46,6 +55,14 @@ pub mod bidi_brackets;
 pub mod bidi_class;
 pub mod cache;
 pub mod corpus;
+pub mod east_asian_width;
+pub mod extended_pictographic;
 pub mod face;
+pub mod general_category;
+pub mod grapheme;
+pub mod grapheme_break;
+pub mod indic_conjunct_break;
+pub mod line;
+pub mod line_break;
 pub mod metric;
 pub mod property;

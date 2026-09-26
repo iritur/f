@@ -64,8 +64,11 @@ corpus is what a stranger reruns conformance against. RFC 0138.
    `// SPDX-License-Identifier: (Apache-2.0 OR MIT) AND Unicode-3.0`, is a row of
    `DERIVED_DATA`, and carries a header naming its upstream file, that file's
    SHA-256, the Unicode version and the command that regenerates it. There are
-   two such files, `text/src/bidi_class.rs` and `text/src/bidi_brackets.rs`, and
-   they hold values and no code.
+   eight such files, every one of them in `text/src/` and each a table of
+   values with no code: `bidi_class.rs` and `bidi_brackets.rs` for UAX #9, and
+   `line_break.rs`, `grapheme_break.rs`, `east_asian_width.rs`,
+   `general_category.rs`, `indic_conjunct_break.rs` and
+   `extended_pictographic.rs` for UAX #14 and UAX #29.
 3. Every imported tree carries its own `LICENSE` and a `PROVENANCE.md` recording
    upstream URL, commit hash — for data, the version — and the date imported. A
    data import's record also names every file with its byte count and SHA-256,
