@@ -2089,6 +2089,7 @@ thing it will measure would be blocking a ruler on a wall.
   *exit:* **met.** the conformance cases pass, and no break falls inside a cluster — asserted over the corpus rather than over an example.
   *needs:* E3-B03e
 - [ ] **E3-B03g** `M` The coverage atlas for small static text.
+  **The outlines come from an import planned on 2026-09-26 and not yet made: Skrifa, for glyph outlines, hinting, colour glyphs and font-wide metrics.** It arrives with a `harfrust` bump so the two share one `read-fonts`, and it needs an RFC on where outline parsing stops and coverage begins. `docs/TECHNICAL-DEBT.md` has the reasoning, under this line's entry.
   *exit:* residency is bounded by a named maximum, and a scene whose text did not change regenerates no atlas entry, counted per frame rather than asserted.
   *needs:* E3-B03f, E3-B02e
 - [ ] **E3-B03h** `M` GPU path rendering for large, animated and transformed text, and the rule that chooses between it and the atlas.

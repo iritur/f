@@ -371,6 +371,39 @@ there is none, that is said rather than padded.
   frame* are counts over a CPU-side cache; *the rule is data a test reads rather
   than a constant in a branch* is a table. Both end in pixels that come from
   `E3-B02e`.
+
+  **The outlines those pixels are drawn from are a planned import, not yet
+  made: [Skrifa](https://docs.rs/skrifa)**, the half of Google's fontations that
+  `harfrust` does not use. Recorded on 2026-09-26 so the reason survives the
+  wait.
+  - **What it is for:**
+    - glyph outlines out of `glyf`, `CFF` and `CFF2`, at a variable font's
+      instance;
+    - hinting;
+    - colour glyphs (`COLR`);
+    - font-wide metrics.
+
+    This is what a rasteriser needs once the shaper has said which glyph goes
+    where. It is not what the shaper needs: `harfrust` reads `cmap`, `GSUB`,
+    `GPOS` and advances itself, through `read-fonts`, so `E3-B03b0` imports
+    `harfrust` alone.
+  - **Why it is not imported with `harfrust`:**
+    - Nothing here would call it until `E3-B03g`, `E3-B03h` or `E3-B06g` runs,
+      and an import no code reads can be tested by nothing.
+    - On the day of the decision the two did not share a parser. `harfrust`
+      0.13.3 pins `read-fonts` 0.43, and Skrifa's current release is on 0.44.
+      Import Skrifa together with a `harfrust` bump, so the component carries
+      one `read-fonts` and not two.
+  - **What it will need:**
+    - An RFC settling a split RFC 0082 leaves ambiguous. Its rule puts parsing
+      somebody else's file format on the imported side; its table puts *the
+      coverage atlas, GPU path rendering* on the written side. The likely line is
+      that outlines come from Skrifa behind a ring, as path commands in fixed
+      point, and turning a path into coverage is written in `text/`, where a
+      claim can stand on it.
+    - The same `PROVENANCE.md`, `no_std` build (its `libm` feature) and
+      ring-only coupling RFC 0082 requires of `harfrust`. Skrifa is licensed
+      `MIT OR Apache-2.0`.
 - **`E3-B03j`** — how a rendering is compared to a reference. *An integer over
   pixels with a stated tolerance, and a deliberate one-pixel regression goes red*
   needs two images and no GPU. It waits on `E3-B02e` because the rendering is
