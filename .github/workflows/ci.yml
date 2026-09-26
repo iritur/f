@@ -230,7 +230,6 @@ jobs:
       # `nightly.yml`'s `sweep` for five red nights, and `weekly.yml`'s `runners`
       # and `dates` from the day they were written.
       - run: cargo xtask lint-pulls
-      - run: cargo xtask lint-boundary
       - run: cargo xtask lint-gate
       # Formatting and clippy, by calling the definition rather than restating
       # it. This was `cargo fmt --all -- --check` and
@@ -241,6 +240,11 @@ jobs:
       # on a duplicate `panic_impl` while the local loop stayed green. `lint_all`
       # had the two-world split all along; this copy of it did not.
       - run: cargo xtask lint-style
+      # After `lint-style`, never before: it reads the dep-info that step's
+      # clippy of every target leaves behind, and on a fresh container before it
+      # there is none for a test target, so a test embedding an imported file
+      # merged green. `lint-gate` holds the order. RFC 0092.
+      - run: cargo xtask lint-boundary
       # The hooks in .claude/ are policy too, and they are the only policy that
       # applies without being read. A hook that has stopped firing is
       # indistinguishable from a hook with nothing to complain about, so it is

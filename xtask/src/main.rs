@@ -406,25 +406,35 @@ const DERIVED_DATA: &[(&str, &str, &str)] = &[
 /// `text/src/corpus.rs` and `text/src/face.rs` — and a comment opens nothing. A
 /// string literal is read the way the compiler reads it, escapes decoded, so a
 /// literal spelling the underscore as `\x5f` is the import. The needles are the
-/// directory's name and the name of every data file an import holds, so a
-/// `concat!` that splits the directory's name and spells a file's is caught too.
+/// directory's name and the name of every data file an import holds, matched
+/// against the literals as written and against the literals joined, so a
+/// `concat!` that splits either name is caught.
 ///
 /// # What it cannot see
 ///
-/// A path assembled at run time from pieces that spell neither the directory nor
-/// a file's name, or read from the environment or an argument. And any file
+/// A path assembled at run time — `format!("{}_{}", "third", "party")`, a
+/// `char` array, a `Path::join` of pieces with other code between them — or read
+/// from the environment or an argument. And any file
 /// under a `TOOLING` prefix, which is exempt from the source checks because it
 /// contains the needles — so a row under one must be named in that row's
 /// reason, which [`tooling_reason_findings`] holds, and a second reader there is
 /// not seen at all.
 ///
-/// `E3-B03e`'s conformance harness under `text/tests/` is the next row, and it
-/// lands with the harness: a row whose file does not read the import is red.
-const IMPORT_READERS: &[(&str, &str)] = &[(
-    "xtask/src/imported.rs",
-    "the generator of every DERIVED_DATA table, and the check that reads each \
-     PROVENANCE.md against the bytes it records; TOOLING's row says why it may",
-)];
+/// `E3-B03e`'s conformance harness is the second row, and it landed with the
+/// harness, because a row whose file does not read the import is red.
+const IMPORT_READERS: &[(&str, &str)] = &[
+    (
+        "xtask/src/imported.rs",
+        "the generator of every DERIVED_DATA table, and the check that reads each \
+         PROVENANCE.md against the bytes it records; TOOLING's row says why it may",
+    ),
+    (
+        "text/tests/bidi_conformance.rs",
+        "UAX #9's conformance harness: it opens BidiTest.txt and BidiCharacterTest.txt by \
+         path on the host, so the corpus is read by a test and never compiled, embedded \
+         or linked (RFC 0114's second route, RFC 0115's first home)",
+    ),
+];
 
 /// True if `rel` names the checker rather than the checked.
 fn is_tooling(rel: &str) -> bool {
@@ -16870,6 +16880,9 @@ fn lint_gate() -> Result<(), String> {
 
     let absent: Vec<&String> =
         want.iter().filter(|verb| !text.contains(&format!("cargo xtask {verb}"))).collect();
+    if let Some(finding) = boundary_order_finding(&text) {
+        return Err(finding);
+    }
 
     if absent.is_empty() {
         println!(
@@ -16890,6 +16903,34 @@ fn lint_gate() -> Result<(), String> {
         absent.len(),
         absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
     ))
+}
+
+/// `lint-boundary` reads the dep-info a compile left behind, so in a job that
+/// starts from a fresh container it has to run after the step that compiles every
+/// target, which is `lint-style`. `lint_all` has always had that order and says
+/// why; the pull-request gate had it the other way round, so there the check read
+/// only the dep-info of `xtask`'s own build, and an `include_str!` of a corpus
+/// file in a test target merged green. Found by an audit on 2026-09-25.
+///
+/// *What would reverse this:* `lint-boundary` compiling what it reads itself,
+/// rather than trusting the step before it to have done so.
+fn boundary_order_finding(ci: &str) -> Option<String> {
+    let at = |verb: &str| {
+        let step = format!("- run: cargo xtask {verb}");
+        ci.lines().position(|l| l.trim() == step)
+    };
+    match (at("lint-style"), at("lint-boundary")) {
+        (Some(style), Some(boundary)) if boundary < style => Some(format!(
+            ".github/workflows/ci.yml:{}  runs `lint-boundary` before `lint-style` (line {}), \
+             so on a fresh container it reads dep-info no test target has written yet, and an \
+             `include_str!` of an imported file in a test merges green. Move it after \
+             `lint-style`, the order `lint_all` runs them in. RFC 0092.",
+            boundary + 1,
+            style + 1
+        )),
+        // Absent is the other half of this check's finding, and ordered is fine.
+        _ => None,
+    }
 }
 
 /// Every scheduled workflow has one job that watches every other job in it, and
@@ -21845,7 +21886,14 @@ fn derived_header_findings(rel: &str, text: &str, upstream: &str, sha: &str) -> 
 /// Whether a source reads the import: any needle in [`literal_view`].
 fn reads_import(text: &str, needles: &[String]) -> bool {
     let view = literal_view(text);
-    view.contains(IMPORTED) || needles.iter().any(|n| view.contains(n.as_str()))
+    // The literals once more, joined: `concat!("../third", "_party/unicode")`
+    // spells the directory across two literals and no file at all, and a
+    // `read_dir` over it read every file of the import past every check here —
+    // an audit on 2026-09-25 read fifteen megabytes that way.
+    let joined: String = view.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+    [view.as_str(), joined.as_str()]
+        .iter()
+        .any(|v| v.contains(IMPORTED) || needles.iter().any(|n| v.contains(n.as_str())))
 }
 
 /// RFC 0114's second check over every source: an unnamed reader, a row whose
@@ -22141,8 +22189,8 @@ fn lint_licensing() -> Result<(), String> {
 mod licence_values {
     use super::{
         DERIVED_DATA, DERIVED_SPDX, IMPORT_READERS, PERMISSIVE_SPDX, TOOLING,
-        import_reader_findings, literal_view, relative, rust_sources, spdx_findings,
-        tooling_reason_findings,
+        boundary_order_finding, import_reader_findings, literal_view, relative, root, rust_sources,
+        spdx_findings, tooling_reason_findings,
     };
 
     const ROWS: &[(&str, &str, &str)] = &[("text/src/t.rs", "third_party/u/X.txt", "abc123")];
@@ -22256,6 +22304,10 @@ mod licence_values {
                 "const P: &str = concat!(\"third\", \"_\", \"party/u/BidiTest.txt\");\n",
             ),
             (
+                "the directory split across a concat!, and no file named",
+                "const P: &str = concat!(env!(\"M\"), \"/../third\", \"_party/unicode\");\n",
+            ),
+            (
                 "after a string holding a comment opener",
                 "const A: &str = \"/*\"; const P: &str = \"third_party\";\n",
             ),
@@ -22272,6 +22324,16 @@ mod licence_values {
             assert_eq!(scanned, 1);
             assert_eq!(findings.len(), 1, "{why}: {text:?} was not read as a reader");
         }
+    }
+
+    #[test]
+    fn the_gate_runs_the_boundary_after_the_compile_it_reads() {
+        let wrong = "      - run: cargo xtask lint-boundary\n      - run: cargo xtask lint-style\n";
+        let right = "      - run: cargo xtask lint-style\n      - run: cargo xtask lint-boundary\n";
+        assert!(boundary_order_finding(wrong).is_some(), "the order the audit found passed");
+        assert_eq!(boundary_order_finding(right), None);
+        let gate = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+        assert_eq!(boundary_order_finding(&gate), None, "the gate this tree ships with");
     }
 
     #[test]
