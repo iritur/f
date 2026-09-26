@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-shaper"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "The shim between the shape protocol and the imported shaper: the one crate in this tree that links an import."
+
+# Its own workspace, and outside the tree's, for RFC 0141's reason: this is the
+# one crate here that links imported source, and a crate that did so from inside
+# the workspace would put the import into the workspace's lockfile, its
+# `cargo metadata` and every `cargo test --workspace`, none of which can build it
+# without the vendored source below. The root `Cargo.toml`'s `exclude` names this
+# directory and `third_party` both, and `IMPORT_LINKERS` in `xtask/src/main.rs`
+# requires both rows.
+[workspace]
+
+[lib]
+# A library and not a binary, for `user/init/Cargo.toml`'s reason: an entry point
+# needs `#[unsafe(no_mangle)]`, and this crate forbids `unsafe`.
+doctest = false
+
+[dependencies]
+f-abi = { path = "../../abi" }
+f-hash = { path = "../../hash" }
+f-ring = { path = "../../ring" }
+f-text = { path = "../../text" }
+# The import, taken by its name and its exact version, and resolved from
+# `third_party/harfrust/vendor` and from nowhere else. RFC 0141.
+#
+# **Not a path row**, although a path would be the more visible link, and the
+# reason is what a path costs: cargo verifies the `.cargo-checksum.json` of a
+# crate it takes from a vendored directory and verifies nothing of a crate it
+# takes by path, and it prints a path crate's own lints and manifest warnings as
+# if they were this tree's, into a `verify` whose healthy output has none. So the
+# link is by name, and the visibility a path row would have given is given
+# instead by `IMPORT_LINKERS`, which names this file, this crate and this
+# version; refuses a range where `=` is written; and refuses every other
+# permissive manifest that names any crate the import vendors, by key or by
+# `package =`. `lint-licensing`'s path check is untouched and still refuses a
+# path into `third_party/` from anywhere.
+#
+# **Where it resolves from** is a source replacement `cargo xtask` passes on the
+# command line, `--offline --locked`, pointed at the vendored directory
+# (`shaper_cargo` in `xtask/src/main.rs`). On the command line rather than in a
+# `.cargo/config.toml` here, because `lint-boundary` prohibits a configuration
+# row that redirects a build and a source replacement is exactly that; the one
+# function that passes it is under `TOOLING`. A bare `cargo build` in this
+# directory without it asks a registry for crates the tree has already vendored,
+# and with `--offline` is refused — not the route, and not a silent one.
+#
+# `default-features = false` because HarfRust's default is `std` and this
+# component has no operating system under it; `libm` supplies the float
+# functions `std` would have, inside the component and nowhere else.
+harfrust = { version = "=0.13.3", default-features = false, features = ["libm"] }
+
+# The workspace's lint table, restated because this crate is outside the
+# workspace and inherits nothing. `unsafe_code = "forbid"` is the line that
+# matters: the shim is permissive code and RFC 0001 holds it like every other
+# crate above the frame. The `unsafe` HarfRust's dependencies carry (`bytemuck`)
+# is theirs, compiled under their own attributes behind the licence boundary.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+mem_forget = "deny"
+todo = "warn"
+
+# The workspace's profiles, restated for the same reason: a profile is read from
+# the workspace root, and this crate is its own. `init` is the component
+# profile `user/init/link.ld` links, with link-time optimisation off for the
+# reason the root `Cargo.toml` gives.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.init]
+inherits = "release"
+lto = false
+opt-level = "s"
+debug = false
+
+# The image half, on by default, for `user/store`'s reason: a `#[panic_handler]`
+# and a `#[global_allocator]` are one per linked artefact.
+[features]
+default = ["image"]
+image = []

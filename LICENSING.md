@@ -9,8 +9,8 @@ section 14.
 | Tree | Licence | Why |
 |---|---|---|
 | `abi/`, `env/`, `ring/`, `kernel/`, `user/`, `xtask/` | Apache-2.0 OR MIT | The research must be reusable. Everything written for this project is permissively licensed so results can be lifted by anyone. |
-| `third_party/<name>/` holding source | Whatever that source requires | Imported driver source and its shim. Delimited, never mixed into the permissive tree. |
-| `third_party/<name>/` holding data | The data's own terms: `third_party/unicode/` is the Unicode License V3 | Files **no compiler in this workspace reads** — no `.rs`, `.c`, `.h`, build script or anything an interpreter runs, held by an allow-list of extensions rather than a list of languages. Reached by two routes and no third: a table generated into the permissive tree by a command, and a corpus opened by path from a named host test. An import that is both source and data is two imports. RFC 0114. |
+| `third_party/<name>/` holding source | Whatever that source requires: `third_party/harfrust/` is MIT, its crates MIT, Apache-2.0, Zlib or Unicode-3.0 | Imported source, verbatim. Delimited, never mixed into the permissive tree. Its **shim** is written here and lives beside it, not inside it — `user/shaper`, outside the workspace, the one crate `IMPORT_LINKERS` admits to link an import, and only into the import's own component image. RFC 0082, RFC 0141. |
+| `third_party/<name>/` holding data | The data's own terms: `third_party/unicode/` is the Unicode License V3, `third_party/inter/` the SIL Open Font License 1.1 | Files **no compiler in this workspace reads** — no `.rs`, `.c`, `.h`, build script or anything an interpreter runs, held by an allow-list of extensions rather than a list of languages, and one font rule: a `.ttf` whose first four bytes are the TrueType version, because nothing here runs its hinting programs (RFC 0141). Reached by two routes and no third: a table generated into the permissive tree by a command, and a file opened by path from a named host test. An import that is both source and data is two imports. RFC 0114. |
 
 ## Why this is clean here and messy elsewhere
 
@@ -41,7 +41,16 @@ binary means carrying the copyright and permission notice in
 it, as that licence requires.**
 
 A release package already does: `source.tar` carries `third_party/unicode/`
-whole, notice included, beside the image. The conformance corpus in that
+whole, notice included, beside the image.
+
+**A binary built from `user/shaper` — the shaper's component image — links
+HarfRust and the crates it vendors**, under MIT, Apache-2.0, Zlib and, for
+`unicode-ident`, Unicode-3.0 as well; redistributing it means carrying the
+notices in `third_party/harfrust/LICENSE` and in each crate's directory under
+`third_party/harfrust/vendor/`. No such binary is distributed today: the image is
+built and measured and no frame spawns it (`UNSPAWNABLE`, RFC 0141). No binary
+carries `third_party/inter/`; a face is data a component is handed at run time,
+and the OFL's notice travels with the file in `source.tar`. The conformance corpus in that
 directory never enters a compiled artefact — it is not generated, not embedded
 and not compiled, which `cargo xtask lint-boundary`'s `include_str!` net holds —
 and it does travel in `source.tar`, because that is the tree at a tag and the
@@ -57,7 +66,12 @@ corpus is what a stranger reruns conformance against. RFC 0138.
    for each generated file, `IMPORT_READERS` for each file that opens the import
    at run time — and a permissive source that names the import in code or a
    string literal without a row is a finding, as is a row whose file no longer
-   reads it.
+   reads it. Imported **source** has one link besides the ring, and it is on
+   the far side of the ring: the shim that turns the import into a component,
+   `user/shaper`, takes HarfRust by name at one exact version, resolved from the
+   import's `vendor/` — the one row of `IMPORT_LINKERS`. No other permissive
+   manifest may name any crate an import vendors, or the shim, and no manifest
+   may carry a path into `third_party/` at all. RFC 0141.
 2. Every file in the permissive tree opens with exactly
    `// SPDX-License-Identifier: Apache-2.0 OR MIT` and carries no second licence
    tag. The exception is a file generated from imported data, which opens with
@@ -73,7 +87,13 @@ corpus is what a stranger reruns conformance against. RFC 0138.
    upstream URL, commit hash — for data, the version — and the date imported. A
    data import's record also names every file with its byte count and SHA-256,
    and `cargo xtask lint-licensing` reads the record against the bytes: a file
-   not byte-identical to upstream is not the specification's data.
+   not byte-identical to upstream is not the specification's data. A source
+   import vendored by cargo names every crate with its version and checksum, and
+   the check reads it crate by crate and file by file — against the import's own
+   `Cargo.lock` and each crate's `.cargo-checksum.json` — and requires the
+   `Commit` to carry a forty-digit hash. Code an import runs on the build machine
+   — a procedural macro, a build script — is named in `IMPORT_HOST_CODE`, and a
+   crate that runs one and is not named is a finding. RFC 0141.
 4. Two commands enforce rules 1 and 2 in CI, and they read different things.
    `cargo xtask lint-licensing` reads the **source**: SPDX headers, a permissive
    file naming the imported tree, and a `#[path]` attribute spelling a route into
