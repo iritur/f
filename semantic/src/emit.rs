@@ -279,6 +279,17 @@ impl Emitted {
 /// a control whose body and whose content need different transforms, at which
 /// point a role projects to a subtree and this function answers one rather than
 /// a kind.
+///
+/// # The text rows are rows
+///
+/// [`Role::Label`] and [`Role::Text`] are [`Kind::Draw`], which is what nine
+/// other roles are, and that is the whole of what this projection decides about
+/// them: `E3-B03k` forbids a text-specific branch here, and a row that is the
+/// same value as a non-text role's is a decision every role goes through rather
+/// than a path only text takes. Their words are drawn by [`crate::draw`], which
+/// chooses by what a node *holds* — a button's *Play* is set through the same
+/// lines as a paragraph — and reads this function only for the family.
+/// `cargo xtask lint-projections` holds both halves; RFC 0140.
 #[must_use]
 pub const fn kind_of(role: Role) -> Kind {
     match role {

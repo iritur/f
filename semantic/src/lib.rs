@@ -106,9 +106,17 @@
 //! there is no layout entry, so the far side's arrangement is the far side's,
 //! and RFC 0121 is where that is argued rather than assumed. `E3-B06h`.
 
+//! # The fifth, and it is the text half of the display
+//!
+//! [`draw`] — what the display projection sets for a node: its text, in lines,
+//! through `f_text::paragraph`, chosen by what the node holds rather than by
+//! what it is called. The vocabulary is `interface`'s and the text path is
+//! `text`'s, and neither may take the other. `E3-B03k`.
+
 #![no_std]
 
 pub mod agent;
+pub mod draw;
 pub mod emit;
 pub mod registry;
 pub mod remote;

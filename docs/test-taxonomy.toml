@@ -684,6 +684,15 @@ cadence = ["every-verify", "every-pr"]
 status  = "catches"
 
 [[row]]
+id      = "text-specific-branch"
+group   = "G"
+class   = "A projection branching on the text or label role instead of reading a row of its per-role table (E3-B03k, RFC 0140)"
+layers  = ["X"]
+check   = "cargo xtask lint-projections, textual: it reads the projections' tables and every shipped file for a text role compared, matched, bound or renamed; it does not see a text role bound by value and compared later, a role's index or name compared outside the projections, or a noun compared (RFC 0140, what the lint cannot see); semantic/src/draw.rs holds the rows it counts as shared"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+
+[[row]]
 id      = "defect-on-by-default"
 group   = "G"
 class   = "A deliberate defect left on by default"

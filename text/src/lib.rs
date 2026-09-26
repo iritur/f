@@ -47,6 +47,12 @@
 //! own files by `tests/break_conformance.rs`, the second such test. The text
 //! path's line breaks are [`line::opportunities`]: UAX #14's, less the ones
 //! that fall inside a cluster, which the same test counts and holds at none.
+//!
+//! [`paragraph`] is the three composed: a text set in lines at the
+//! opportunities [`line`] offers, measured by a [`metric::Pen`], and each line
+//! shown in the order [`bidi`] gives it. The shaper's answer is a parameter,
+//! because RFC 0082's import has not landed and a width invented here would be
+//! this crate pretending it had (`E3-B03k`).
 
 #![no_std]
 
@@ -65,4 +71,5 @@ pub mod indic_conjunct_break;
 pub mod line;
 pub mod line_break;
 pub mod metric;
+pub mod paragraph;
 pub mod property;

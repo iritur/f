@@ -176,6 +176,7 @@ dependencies = [
  "f-abi",
  "f-interface",
  "f-scene",
+ "f-text",
 ]
 
 [[package]]

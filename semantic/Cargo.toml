@@ -43,5 +43,18 @@ f-interface.workspace = true
 # argument gone.
 f-scene.workspace = true
 
+# The text path, for `draw.rs` — `E3-B03k`. A node's text is set in lines by
+# `f_text::paragraph`, which composes the bidi, line-breaking and metric stages
+# `E3-B03d` to `E3-B03f` wrote, and the display projection is the first thing in
+# the tree with a text to set. It lands here for the reason every other join in
+# this crate does: `interface/Cargo.toml` declines every dependency so the
+# vocabulary stays a leaf, and `text/Cargo.toml` declines them for RFC 0004's
+# reason, so neither may take the other and the meeting has to be somewhere
+# that is neither. `f-text` has no dependencies, so the row adds one crate and
+# not a subtree; the frame already links it for `face`. *Reversal:* `f-text`
+# taking `f-interface` or the other way round, which is either leaf's own
+# comment being what changed.
+f-text.workspace = true
+
 [lints]
 workspace = true

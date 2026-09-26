@@ -311,7 +311,7 @@ the two kinds together would never find out.
 
 | The machine | Lines that wait on it directly | Lines that wait on one of those | What closes it |
 |---|---|---|---|
-| A GPU — the machine `E5-D01` has not named | `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` | `E3-B02h`, `E3-B02k`, `E3-B02l`, `E3-B03g`, `E3-B03h`, `E3-B03j`, `E3-B06g`, and behind the last of those `E3-B06`, `E3-P04` and `E3-P05` | A part reporting compute shaders, and **`E5-P06`** — added on 2026-09-24 for this reading: *obtain the machine `E5-D01` specifies, and boot F on it*, on `E0-D10` and `E0-P18`'s precedent, with all five direct dependents naming both lines so the wait is on a boot rather than on a bill of materials. Five lines directly, **seven** behind them: the largest single purchase in the epoch. `E3-B02j` was the eighth and came off this list on 2026-09-24 by being closed rather than by being narrowed — see the bullet below. |
+| A GPU — the machine `E5-D01` has not named | `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` | `E3-B02h`, `E3-B02k`, `E3-B02l`, `E3-B03g`, `E3-B03h`, `E3-B03j`, `E3-B06g`, and behind the last of those `E3-B06`, `E3-B03k`, `E3-P04` and `E3-P05` | A part reporting compute shaders, and **`E5-P06`** — added on 2026-09-24 for this reading: *obtain the machine `E5-D01` specifies, and boot F on it*, on `E0-D10` and `E0-P18`'s precedent, with all five direct dependents naming both lines so the wait is on a boot rather than on a bill of materials. Five lines directly, **seven** behind them: the largest single purchase in the epoch. `E3-B02j` was the eighth and came off this list on 2026-09-24 by being closed rather than by being narrowed — see the bullet below. |
 | `runner-class-A`, with F booted on it | `E3-B05d`, `E3-B07`, `E3-B07f`, `E3-P03` | `E3-P06` behind `E3-B07`; `E3-P02` needs it as well as the rig | The row for `E0-D10` above, and `E0-P18`. `bench/src/lib.rs` refuses a recording outside a recording class and that refusal is the harness working. |
 | `photodiode-rig` | `E3-P01b`, `E3-P01e` | `E3-P01`, `E3-P01f`, `E3-P02`, `E3-B04`, `E3-R01` | The section above. Three of `E3-P01`'s six subtasks closed on the near side of the purchase and three did not. |
 | An energy meter | `E3-P07` | none in E3 | A specification first — nothing in the file buys one, and there is no line to close. |
@@ -371,6 +371,39 @@ there is none, that is said rather than padded.
   frame* are counts over a CPU-side cache; *the rule is data a test reads rather
   than a constant in a branch* is a table. Both end in pixels that come from
   `E3-B02e`.
+
+  **The outlines those pixels are drawn from are a planned import, not yet
+  made: [Skrifa](https://docs.rs/skrifa)**, the half of Google's fontations that
+  `harfrust` does not use. Recorded on 2026-09-26 so the reason survives the
+  wait.
+  - **What it is for:**
+    - glyph outlines out of `glyf`, `CFF` and `CFF2`, at a variable font's
+      instance;
+    - hinting;
+    - colour glyphs (`COLR`);
+    - font-wide metrics.
+
+    This is what a rasteriser needs once the shaper has said which glyph goes
+    where. It is not what the shaper needs: `harfrust` reads `cmap`, `GSUB`,
+    `GPOS` and advances itself, through `read-fonts`, so `E3-B03b0` imports
+    `harfrust` alone.
+  - **Why it is not imported with `harfrust`:**
+    - Nothing here would call it until `E3-B03g`, `E3-B03h` or `E3-B06g` runs,
+      and an import no code reads can be tested by nothing.
+    - On the day of the decision the two did not share a parser. `harfrust`
+      0.13.3 pins `read-fonts` 0.43, and Skrifa's current release is on 0.44.
+      Import Skrifa together with a `harfrust` bump, so the component carries
+      one `read-fonts` and not two.
+  - **What it will need:**
+    - An RFC settling a split RFC 0082 leaves ambiguous. Its rule puts parsing
+      somebody else's file format on the imported side; its table puts *the
+      coverage atlas, GPU path rendering* on the written side. The likely line is
+      that outlines come from Skrifa behind a ring, as path commands in fixed
+      point, and turning a path into coverage is written in `text/`, where a
+      claim can stand on it.
+    - The same `PROVENANCE.md`, `no_std` build (its `libm` feature) and
+      ring-only coupling RFC 0082 requires of `harfrust`. Skrifa is licensed
+      `MIT OR Apache-2.0`.
 - **`E3-B03j`** — how a rendering is compared to a reference. *An integer over
   pixels with a stated tolerance, and a deliberate one-pixel regression goes red*
   needs two images and no GPU. It waits on `E3-B02e` because the rendering is

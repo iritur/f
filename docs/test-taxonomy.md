@@ -307,6 +307,7 @@ tree is green on it. The only thing wrong is that two runs no longer agree.
 | A committed snapshot asserting what the registry does not hold | L7, X | `cargo xtask lint-snapshot`, run before anything regenerates it | every verify, every PR | **catches** |
 | A quantity crossing the ABI with no unit (R03) | X | `cargo xtask lint-units` | every verify, every PR | **catches** |
 | A callback registered across an interface (R05) | X | `cargo xtask lint-callbacks` | every verify, every PR | **catches** |
+| A projection branching on the text or label role instead of reading a row of its per-role table (`E3-B03k`, RFC 0140) | X | `cargo xtask lint-projections`, textual: it reads the projections' tables and every shipped file for a text role compared, matched, bound or renamed; it does not see a text role bound by value and compared later, a role's index or name compared outside the projections, or a noun compared (RFC 0140, *what the lint cannot see*); `semantic/src/draw.rs` holds the rows it counts as shared | every verify, every PR | **partially** |
 | A deliberate defect left on by default | X | `cargo xtask lint-mutations` | every verify, every PR | **catches** |
 | A component manifest that does not fit `docs/manifest.md` | X | `cargo xtask lint-manifests` | every verify | **catches** |
 | A reversal with no RFC | X | `REVIEW.md` pass 4 | every PR | **partially** |

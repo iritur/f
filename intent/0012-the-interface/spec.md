@@ -308,6 +308,10 @@ contradiction between two written exits is a reversal that needs an RFC. That is
 - [ ] **E3-B03b** `M` A face is addressed by content hash and declared before it is used.
   *exit:* a boot loads a face out of the blob store by hash and refuses one the manifest did not declare — the first consumer of E2's addressing that is not E2.
   *needs:* E3-B03a, E2-B01
+- [ ] **E3-B03b0** `M` The shaper arrives: HarfRust imported behind the licence boundary and reached over a ring.
+  **Added on 2026-09-26; RFC 0082 wrote this line out on 2026-09-15 and the decomposition did not contain it.** The eleven `E3-B03` subtasks assume a shaper and none of them imports one.
+  *exit:* `third_party/harfrust/` carries `LICENSE` and `PROVENANCE.md` with an upstream URL, a commit hash and a date; `cargo xtask lint` is green with the entry present; and one run of text through the `shape` protocol produces fixed-point advances on both architectures.
+  *needs:* E3-B03a, E3-B03b
 - [ ] **E3-B03c** `M` The shaping cache, keyed by string, face, size and features.
   *exit:* no `HashMap` and no `HashSet`; from one seed the hit and miss counts are identical across runs and across architectures, which is the property a cache keyed by a hashed string loses silently.
   *needs:* E3-B03b
@@ -338,7 +342,7 @@ contradiction between two written exits is a reversal that needs an RFC. That is
   *needs:* E3-B03i, E3-B02e
 - [ ] **E3-B03k** `M` Text joins the vocabulary: `Role::Text` and `Role::Label` reach the rasteriser and the screen reader from one declaration.
   *exit:* one tree produces a rendered paragraph and a spoken phrase with no second declaration and no text-specific branch in either projection.
-  *needs:* E3-B03f, E3-B06i
+  *needs:* E3-B03f, E3-B06i, E3-B06g, E3-B03b0
 ```
 
 ## E3-B06 — the semantic layer and its projections
