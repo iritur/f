@@ -32,3 +32,13 @@ workspace = true
 name = "bidi_conformance"
 path = "tests/bidi_conformance.rs"
 harness = false
+
+# `E3-B03f`'s exit: UAX #29's and UAX #14's conformance files, and the text
+# path's breaks held to the clusters over both. `bidi_conformance`'s shape and
+# its reason for `harness = false`: the counts, the named levels and the number
+# of opportunities the untailored algorithm puts inside a cluster are the
+# evidence, so they print on every run. `IMPORT_READERS` names the file.
+[[test]]
+name = "break_conformance"
+path = "tests/break_conformance.rs"
+harness = false

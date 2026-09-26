@@ -363,7 +363,8 @@ const SPDX_TAG: &str = "SPDX-License-Identifier:";
 /// byte, and a file that does not is either a row here or a finding. A table
 /// because a diff to a table is reviewable, which is `DETERMINISM_ALLOW`'s
 /// argument, and because *how many files in this tree are not liftable* is then
-/// a number somebody can read: two.
+/// a number somebody can read: eight, every one a table of values — two for
+/// `E3-B03e`'s bidirectional pass and six for `E3-B03f`'s breakers.
 ///
 /// Each row's file must open with [`DERIVED_SPDX`] and carry, in the `//` block
 /// directly below that line, `Upstream-File`, `Upstream-SHA-256` and
@@ -387,6 +388,36 @@ const DERIVED_DATA: &[(&str, &str, &str)] = &[
         "third_party/unicode/BidiBrackets.txt",
         "dadbaf38a0d0246e5b805bf8725cb81b7c621f93d030595635f5ba2c2f179428",
     ),
+    (
+        "text/src/line_break.rs",
+        "third_party/unicode/LineBreak.txt",
+        "e6a18fa91f8f6a6f8e534b1d3f128c21ada45bfe152eb6b1bcc5e15fd8ac92e6",
+    ),
+    (
+        "text/src/grapheme_break.rs",
+        "third_party/unicode/auxiliary/GraphemeBreakProperty.txt",
+        "d6b51d1d2ae5c33b451b7ed994b48f1f4dc62b2272a5831e7fd418514a6bae89",
+    ),
+    (
+        "text/src/east_asian_width.rs",
+        "third_party/unicode/EastAsianWidth.txt",
+        "ea7ce50f3444a050333448dffef1cadd9325af55cbb764b4a2280faf52170a33",
+    ),
+    (
+        "text/src/general_category.rs",
+        "third_party/unicode/extracted/DerivedGeneralCategory.txt",
+        "d62e5bab70ca74f099343f71224fa051cb1fdd61a1ab45c0488c44cfc0b6102e",
+    ),
+    (
+        "text/src/indic_conjunct_break.rs",
+        "third_party/unicode/DerivedCoreProperties.txt",
+        "24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08",
+    ),
+    (
+        "text/src/extended_pictographic.rs",
+        "third_party/unicode/emoji/emoji-data.txt",
+        "2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b",
+    ),
 ];
 
 /// Files in this workspace that open a file under `third_party/` at run time,
@@ -408,13 +439,43 @@ const DERIVED_DATA: &[(&str, &str, &str)] = &[
 /// literal spelling the underscore as `\x5f` is the import. The needles are the
 /// directory's name and the name of every data file an import holds, matched
 /// against the literals as written and against the literals joined, so a
-/// `concat!` that splits either name is caught.
+/// `concat!` that splits either name across its literals is caught — string,
+/// raw string or character literal, each decoded. The character literal is the
+/// correction: until 2026-09-26 [`literal_view`] dropped it, so
+/// `concat!("third", '_', "party/…")` read the corpus from an unnamed file with
+/// this check green, and this paragraph said that split was caught. A byte or
+/// byte-string literal cannot be a piece: `concat!` refuses both.
+///
+/// A source is also every file it makes the compiler read — `include!`,
+/// `include_str!`, `include_bytes!`, `#[path]` — charged to the source that
+/// pulls it in, resolved from that source's directory as the compiler resolves
+/// it ([`pulled_in_findings`]). Until 2026-09-26 the walk read only `.rs` files,
+/// and a re-audit read `LineBreakTest.txt` three ways with this check and
+/// `lint-boundary` both green: the path in `where.txt` under `include_str!`, a
+/// `concat!` in `where.in` under `include!`, and the whole reader in
+/// `reader.txt` under `#[path]`. Each is a fixture below.
+///
+/// *Why from the source and not from the dep-info `lint-boundary` reads*, which
+/// names every non-`.rs` prerequisite too: a row here names a source, and
+/// dep-info names what a *crate* read without saying which of its sources
+/// asked, so a hit there could be charged to a crate and never blessed by a
+/// row. And this check reads the tree, not a build — it runs before anything is
+/// compiled and has no stale prerequisite to reason about, where dep-info exists
+/// only for the configurations this runner compiled. The price is that this
+/// reader must resolve the argument's spelling itself, so a spelling it does
+/// not resolve is a finding and not a skip.
 ///
 /// # What it cannot see
 ///
 /// A path assembled at run time — `format!("{}_{}", "third", "party")`, a
-/// `char` array, a `Path::join` of pieces with other code between them — or read
-/// from the environment or an argument. And any file
+/// `char` array, a `Path::join` of pieces with other code between them, `const`
+/// halves joined by `format!` — or read from the environment, an argument, or a
+/// data file whose contents are decoded or joined at run time. A piece another
+/// macro expands to inside a `concat!` — a `concat!` nested in a `concat!`, a
+/// `macro_rules!` piece, `stringify!(_)` — since only literals are read, and the
+/// nested pieces are not joined to their neighbours. (Inside a pull-in's
+/// argument the same spellings are not blind but red: an argument this reader
+/// does not resolve is a finding.) And any file
 /// under a `TOOLING` prefix, which is exempt from the source checks because it
 /// contains the needles — so a row under one must be named in that row's
 /// reason, which [`tooling_reason_findings`] holds, and a second reader there is
@@ -433,6 +494,13 @@ const IMPORT_READERS: &[(&str, &str)] = &[
         "UAX #9's conformance harness: it opens BidiTest.txt and BidiCharacterTest.txt by \
          path on the host, so the corpus is read by a test and never compiled, embedded \
          or linked (RFC 0114's second route, RFC 0115's first home)",
+    ),
+    (
+        "text/tests/break_conformance.rs",
+        "UAX #29's and UAX #14's conformance harness: it opens GraphemeBreakTest.txt and \
+         LineBreakTest.txt by path on the host, and holds the text path's breaks to the \
+         clusters over both, so the corpus is read by a test and never compiled, embedded or \
+         linked (RFC 0114's second route, RFC 0115's first home)",
     ),
 ];
 
@@ -21648,14 +21716,48 @@ fn boundary_findings(
 /// other question — a string that contained `/*`, a raw byte string whose `r` was
 /// taken for an identifier. Both are fixtures below.
 ///
-/// Block comments nest, as the compiler's do. A character literal is removed,
-/// so `'"'` does not open a string, and a lifetime is kept as code.
+/// Block comments nest, as the compiler's do. A character literal is kept as the
+/// character it spells, decoded and between two spaces — so `'"'` does not open
+/// a string, and `concat!("third", '_', "party")` joins to the import's name, as
+/// the compiler joins it. Until 2026-09-26 a character literal was dropped, and
+/// an audit read `LineBreakTest.txt` through that `concat!` from a file no row
+/// names with both import lints green; the fixture is below. A lifetime is kept
+/// as code.
 ///
 /// *What would reverse this:* a reader built on the compiler's own tokens, which
 /// RFC 0135 names as the end of this class of finding.
 fn literal_view(text: &str) -> String {
-    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
+    for piece in literal_pieces(text) {
+        match piece {
+            Piece::Code(c) => out.push(c),
+            Piece::Lit(s) => {
+                out.push(' ');
+                out.push_str(&s);
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+/// One piece of a source as [`literal_view`] reads it: a character of code, or
+/// what one literal denotes.
+///
+/// The view flattens the two into one string, which is what a needle wants; a
+/// reader of `include_str!(…)` needs to know which characters were code and
+/// which were a literal, because only code can name a macro and only a literal
+/// can name a file. One walker for both, so the two cannot disagree about where
+/// a literal starts — the disagreement RFC 0135 and RFC 0137 record.
+enum Piece {
+    Code(char),
+    Lit(String),
+}
+
+/// The walker behind [`literal_view`] and [`pull_ins`].
+fn literal_pieces(text: &str) -> Vec<Piece> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len());
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
@@ -21681,7 +21783,7 @@ fn literal_view(text: &str) -> String {
                     i += 1;
                 }
             }
-            out.push(' ');
+            out.push(Piece::Code(' '));
             continue;
         }
         if b == b'r'
@@ -21691,17 +21793,13 @@ fn literal_view(text: &str) -> String {
             let opened = i + 1 + hashes + 1;
             let end = run_to_close(bytes, opened, Quote::Raw(hashes)).unwrap_or(bytes.len());
             let body_end = end.saturating_sub(1 + hashes).max(opened);
-            out.push(' ');
-            out.push_str(&text[opened.min(bytes.len())..body_end.min(bytes.len())]);
-            out.push(' ');
+            out.push(Piece::Lit(text[opened.min(bytes.len())..body_end.min(bytes.len())].into()));
             i = end;
             continue;
         }
         if b == b'"' {
             let (decoded, end) = decode_escaped(text, i + 1);
-            out.push(' ');
-            out.push_str(&decoded);
-            out.push(' ');
+            out.push(Piece::Lit(decoded));
             i = end;
             continue;
         }
@@ -21716,21 +21814,24 @@ fn literal_view(text: &str) -> String {
                     // `'\''` closes one quote later than a plain find says.
                     let close = if rest.starts_with("\\'") { Some(2) } else { close };
                     if let Some(at) = close {
+                        // Decoded as a string literal's escape is, so `'\x5f'`
+                        // is `_`: the escape, then a quote for it to stop at.
+                        let (decoded, _) = decode_escaped(&format!("{}\"", &rest[..at]), 0);
+                        out.push(Piece::Lit(decoded));
                         i += 1 + at + 1;
-                        out.push(' ');
                         continue;
                     }
                 }
                 Some(c) if chars.next() == Some('\'') => {
+                    out.push(Piece::Lit(c.to_string()));
                     i += 1 + c.len_utf8() + 1;
-                    out.push(' ');
                     continue;
                 }
                 _ => {}
             }
         }
         let c = text[i..].chars().next().unwrap_or(' ');
-        out.push(c);
+        out.push(Piece::Code(c));
         i += c.len_utf8();
     }
     out
@@ -21896,13 +21997,344 @@ fn reads_import(text: &str, needles: &[String]) -> bool {
         .any(|v| v.contains(IMPORTED) || needles.iter().any(|n| v.contains(n.as_str())))
 }
 
+/// A file a source makes the compiler read besides itself: `include!`,
+/// `include_str!`, `include_bytes!` or a `#[path]` attribute, whether the file
+/// is Rust the compiler goes on to read, and the argument as it is spelled —
+/// `None` when it is spelled in a way [`pull_ins`] does not resolve.
+struct PullIn {
+    how: &'static str,
+    rust: bool,
+    spelled: Option<Vec<Spelled>>,
+}
+
+/// One piece of a pull-in's argument: a literal, or `env!("CARGO_MANIFEST_DIR")`.
+enum Spelled {
+    Lit(String),
+    ManifestDir,
+}
+
+/// Every pull-in a source spells, in code — a macro name in a comment or in a
+/// string is not one, which [`literal_pieces`] settles.
+///
+/// An argument resolves when it is one literal, or a `concat!` of literals led
+/// by at most one `env!("CARGO_MANIFEST_DIR")` — the spellings this tree uses
+/// and the one the re-audit's `where.in` used. Anything else is kept with no
+/// spelling, and [`pulled_in_findings`] makes that a finding rather than a
+/// silence: a nested `concat!`, a `macro_rules!` piece or a variable other than
+/// the manifest directory is a route this reader cannot follow, so the source
+/// taking it is red until it spells the path plainly.
+///
+/// A `path = …` is a pull-in only inside an attribute, so `#[path]` and
+/// `#[cfg_attr(…, path = …)]` are read and `format!("{path}", path = …)` is not.
+fn pull_ins(text: &str) -> Vec<PullIn> {
+    let pieces = literal_pieces(text);
+    let code = |at: usize| match pieces.get(at) {
+        Some(Piece::Code(c)) => Some(*c),
+        _ => None,
+    };
+    let ident = |at: usize| code(at).is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let skip_space = |mut at: usize| {
+        while code(at).is_some_and(char::is_whitespace) {
+            at += 1;
+        }
+        at
+    };
+    // The index of the bracket that closes the one at `open`, counted over code.
+    let close_of = |open: usize| {
+        let mut depth = 0usize;
+        let mut at = open;
+        while at < pieces.len() {
+            match code(at) {
+                Some('(' | '[' | '{') => depth += 1,
+                Some(')' | ']' | '}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        pieces.len()
+    };
+    let word_at = |at: usize| {
+        let mut word = String::new();
+        let mut end = at;
+        while ident(end) {
+            word.extend(code(end));
+            end += 1;
+        }
+        (word, end)
+    };
+    let mut out = Vec::new();
+    let mut attributes = Vec::new();
+    let mut i = 0usize;
+    while i < pieces.len() {
+        if code(i) == Some('#') {
+            let mut at = skip_space(i + 1);
+            if code(at) == Some('!') {
+                at = skip_space(at + 1);
+            }
+            if code(at) == Some('[') {
+                attributes.push((at, close_of(at)));
+            }
+        }
+        if !ident(i) || (i > 0 && ident(i - 1)) {
+            i += 1;
+            continue;
+        }
+        let (word, end) = word_at(i);
+        let how = match word.as_str() {
+            "include" => "include!",
+            "include_str" => "include_str!",
+            "include_bytes" => "include_bytes!",
+            "path" if attributes.iter().any(|(open, close)| *open < i && i < *close) => {
+                let at = skip_space(end);
+                if code(at) == Some('=') {
+                    // The value runs to the `,`, `)` or `]` that ends it.
+                    let from = at + 1;
+                    let mut to = from;
+                    while to < pieces.len() && !matches!(code(to), Some(',' | ')' | ']')) {
+                        to += 1;
+                    }
+                    out.push(PullIn {
+                        how: "#[path]",
+                        rust: true,
+                        spelled: spelled_argument(&pieces[from..to]),
+                    });
+                }
+                i = end;
+                continue;
+            }
+            _ => {
+                i = end;
+                continue;
+            }
+        };
+        let bang = skip_space(end);
+        let open = skip_space(bang + 1);
+        if code(bang) == Some('!') && matches!(code(open), Some('(' | '[' | '{')) {
+            let close = close_of(open);
+            out.push(PullIn {
+                how,
+                rust: how == "include!",
+                spelled: spelled_argument(&pieces[open + 1..close.min(pieces.len())]),
+            });
+        }
+        i = end;
+    }
+    out
+}
+
+/// A pull-in's argument, if it is a spelling [`pull_ins`] resolves.
+fn spelled_argument(pieces: &[Piece]) -> Option<Vec<Spelled>> {
+    // The argument's shape, with every literal one placeholder and no space:
+    // `\u{1}` alone, or `concat!(\u{1},\u{1})`. A control character cannot be
+    // code the compiler accepts, so it cannot be mistaken for one.
+    let mut shape = String::new();
+    let mut lits = Vec::new();
+    for piece in pieces {
+        match piece {
+            Piece::Code(c) if c.is_whitespace() => {}
+            Piece::Code(c) => shape.push(*c),
+            Piece::Lit(s) => {
+                shape.push('\u{1}');
+                lits.push(s.clone());
+            }
+        }
+    }
+    let mut lits = lits.into_iter();
+    if shape == "\u{1}" {
+        return Some(vec![Spelled::Lit(lits.next()?)]);
+    }
+    let inner = shape.strip_prefix("concat!(")?.strip_suffix(')')?;
+    let inner = inner.strip_suffix(',').unwrap_or(inner);
+    let mut spelled = Vec::new();
+    for (index, item) in inner.split(',').enumerate() {
+        match item {
+            "\u{1}" => spelled.push(Spelled::Lit(lits.next()?)),
+            "env!(\u{1})" if index == 0 && lits.next()? == "CARGO_MANIFEST_DIR" => {
+                spelled.push(Spelled::ManifestDir)
+            }
+            _ => return None,
+        }
+    }
+    Some(spelled)
+}
+
+/// Where a pull-in in `from` lands, as a path from the root: relative to
+/// `from`'s directory as the compiler resolves `include!` and a `#[path]` outside
+/// an inline module, or to the package directory `env!("CARGO_MANIFEST_DIR")`
+/// names — the nearest directory above `from` holding a `Cargo.toml`.
+fn resolve_pull_in(
+    from: &str,
+    spelled: &[Spelled],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let dir = from.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut text = String::new();
+    let mut base = dir.to_string();
+    for piece in spelled {
+        match piece {
+            Spelled::Lit(s) => text.push_str(s),
+            Spelled::ManifestDir => {
+                base = loop {
+                    let manifest = if base.is_empty() {
+                        "Cargo.toml".to_string()
+                    } else {
+                        format!("{base}/Cargo.toml")
+                    };
+                    if read(&manifest).is_some() {
+                        break base;
+                    }
+                    match base.rsplit_once('/') {
+                        Some((up, _)) => base = up.to_string(),
+                        None if !base.is_empty() => base = String::new(),
+                        None => return Err("no Cargo.toml above it".to_string()),
+                    }
+                };
+                text.push('/');
+            }
+        }
+    }
+    let manifest = matches!(spelled.first(), Some(Spelled::ManifestDir));
+    if !manifest && (text.starts_with(['/', '\\']) || text.get(1..2) == Some(":")) {
+        return Err(format!("`{text}` is absolute, so it is outside this tree"));
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in base.split('/').chain(text.split(['/', '\\'])) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(format!("`{text}` climbs above this tree"));
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+/// Whether a file pulled in as data — `include_str!`, `include_bytes!` — names
+/// the import as a path.
+///
+/// Not [`reads_import`]: data has no comments, so every word of it is what the
+/// source receives, and two files this tree pulls in say `third_party/` in
+/// prose — `claims/0033-raster-cost-per-rung.toml` and
+/// `claims/0033-scene/scene.toml`, each saying the import holds no shaper. So a
+/// data file names the import when it holds a data file's name, when
+/// `third_party/` is followed by a character a path continues with, or when the
+/// whole file is one word that contains it — a sidecar holding only a path.
+fn data_names_import(content: &str, needles: &[String]) -> bool {
+    let trimmed = content.trim();
+    needles.iter().any(|n| content.contains(n.as_str()))
+        || (trimmed.contains(IMPORTED) && !trimmed.contains(char::is_whitespace))
+        || content.match_indices(IMPORTED).any(|(at, _)| {
+            content[at + IMPORTED.len()..]
+                .strip_prefix('/')
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+}
+
+/// Every file `rel` pulls in, followed to the end, and a line for each one that
+/// names the import (`true`) or that this reader cannot follow (`false`).
+///
+/// A file pulled in as Rust is read as [`reads_import`] reads a source and then
+/// followed in turn, because an `include!`d file can `include!`; one pulled in as
+/// data is read by [`data_names_import`] and not followed. A pull-in that does
+/// not resolve, or that resolves to nothing readable, is a line and not a skip:
+/// a file this check cannot read is one it cannot clear, and the compiler
+/// refuses a missing file anyway unless the pull-in is compiled out or sits in
+/// an inline module, which is the one case this reader resolves one directory
+/// too high — red, not blind.
+fn pulled_in_findings(
+    rel: &str,
+    text: &str,
+    needles: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(bool, String)> {
+    let mut findings = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut work = vec![(rel.to_string(), text.to_string())];
+    while let Some((from, text)) = work.pop() {
+        for PullIn { how, rust, spelled } in pull_ins(&text) {
+            let Some(spelled) = spelled else {
+                findings.push((
+                    false,
+                    format!(
+                        "pulls in a file through `{how}` in {from}, spelled in a way this check \
+                         does not resolve — spell the path as one literal"
+                    ),
+                ));
+                continue;
+            };
+            let path = match resolve_pull_in(&from, &spelled, read) {
+                Ok(path) => path,
+                Err(why) => {
+                    findings
+                        .push((false, format!("pulls in a file through `{how}` in {from}: {why}")));
+                    continue;
+                }
+            };
+            if path == IMPORTED || path.starts_with(&format!("{IMPORTED}/")) {
+                findings.push((true, format!("pulls in {path} through `{how}` in {from}")));
+                continue;
+            }
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Some(content) = read(&path) else {
+                findings.push((
+                    false,
+                    format!(
+                        "pulls in {path} through `{how}` in {from}, which is not a file this \
+                         check can read, so it cannot clear it"
+                    ),
+                ));
+                continue;
+            };
+            let names = if rust {
+                reads_import(&content, needles)
+            } else {
+                data_names_import(&content, needles)
+            };
+            if names {
+                findings.push((
+                    true,
+                    format!("pulls in {path} through `{how}` in {from}, which names the import"),
+                ));
+            }
+            if rust {
+                work.push((path, content));
+            }
+        }
+    }
+    findings
+}
+
+/// A reader for [`import_reader_findings`] over the files under `at`: a path
+/// from the root, and its text if it is a file.
+fn read_under(at: &Path) -> impl Fn(&str) -> Option<String> + '_ {
+    move |rel: &str| {
+        std::fs::read(at.join(rel)).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+}
+
 /// RFC 0114's second check over every source: an unnamed reader, a row whose
 /// file is not there, and a row whose file does not read. The count is how many
 /// sources were scanned for an unnamed reader.
+///
+/// A source is what the compiler reads for it: its own text and every file it
+/// pulls in ([`pulled_in_findings`]), charged to it. `read` opens a path from
+/// the root, so a fixture can hand over a tree in memory.
 fn import_reader_findings(
     files: &[(String, String)],
     readers: &[(&str, &str)],
     needles: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
 ) -> (Vec<String>, usize) {
     let mut findings = Vec::new();
     let mut scanned = 0usize;
@@ -21917,16 +22349,25 @@ fn import_reader_findings(
                  IMPORT_READERS"
             ));
         }
+        for (reads, why) in pulled_in_findings(rel, text, needles, read) {
+            let tail = if reads { ", and is not a row of IMPORT_READERS" } else { "" };
+            findings.push(format!("  {rel}  {why}{tail}"));
+        }
     }
     for (file, _) in readers {
         match files.iter().find(|(rel, _)| rel == file) {
             None => {
                 findings.push(format!("  {file}  is a row of IMPORT_READERS and is not a source"))
             }
-            Some((_, text)) if !reads_import(text, needles) => findings.push(format!(
-                "  {file}  is a row of IMPORT_READERS and does not read the import, so the row \
-                 says nothing — RFC 0103: count the call site"
-            )),
+            Some((_, text))
+                if !reads_import(text, needles)
+                    && !pulled_in_findings(file, text, needles, read).iter().any(|(r, _)| *r) =>
+            {
+                findings.push(format!(
+                    "  {file}  is a row of IMPORT_READERS and does not read the import, so the \
+                     row says nothing — RFC 0103: count the call site"
+                ))
+            }
             Some(_) => {}
         }
     }
@@ -21996,7 +22437,8 @@ fn licence_checks(
     // them. `imported` is the one file here that opens the import's bytes; the
     // other two read only this tree's sources and its own tables.
     let needles = imported::data_file_names(at);
-    let (reader_findings, scanned) = import_reader_findings(texts, readers, &needles);
+    let (reader_findings, scanned) =
+        import_reader_findings(texts, readers, &needles, &read_under(at));
     let (imports, seen) = imported::import_findings(at)?;
     let tooling = tooling_reason_findings(readers, tooling);
     let (tables, compared) = imported::table_findings(at, derived);
@@ -22189,8 +22631,8 @@ fn lint_licensing() -> Result<(), String> {
 mod licence_values {
     use super::{
         DERIVED_DATA, DERIVED_SPDX, IMPORT_READERS, PERMISSIVE_SPDX, TOOLING,
-        boundary_order_finding, import_reader_findings, literal_view, relative, root, rust_sources,
-        spdx_findings, tooling_reason_findings,
+        boundary_order_finding, import_reader_findings, literal_view, read_under, relative, root,
+        rust_sources, spdx_findings, tooling_reason_findings,
     };
 
     const ROWS: &[(&str, &str, &str)] = &[("text/src/t.rs", "third_party/u/X.txt", "abc123")];
@@ -22290,6 +22732,242 @@ mod licence_values {
         vec!["BidiTest.txt".to_string()]
     }
 
+    /// A tree with no files besides the sources handed over.
+    fn nothing(_: &str) -> Option<String> {
+        None
+    }
+
+    /// A tree in memory, for the pull-in fixtures: a path from the root and its
+    /// text.
+    fn tree<'a>(files: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |rel: &str| files.iter().find(|(path, _)| *path == rel).map(|(_, t)| t.to_string())
+    }
+
+    // The re-audit's three readers of 2026-09-26, as it wrote them. Each read
+    // `LineBreakTest.txt` from `text/tests/` with this check and `lint-boundary`
+    // green, because the path was in a file whose name does not end in `.rs`.
+    const EVADE2: &str = "// SPDX-License-Identifier: Apache-2.0 OR MIT\n\
+        //! Re-audit scratch: the path is in a sidecar file, embedded with include_str!.\n\
+        #[test]\nfn reads_the_corpus() {\n    let p = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(include_str!(\"where.txt\").trim());\n    \
+        let bytes = std::fs::read(&p).expect(\"read\");\n    \
+        println!(\"EVADE2 read {} bytes of {}\", bytes.len(), p.display());\n}\n";
+    const EVADE3: &str = "// SPDX-License-Identifier: Apache-2.0 OR MIT\n\
+        //! Re-audit scratch: the path is an expression in a non-.rs file, include!d.\n\
+        const P: &str = include!(\"where.in\");\n#[test]\nfn reads_the_corpus() {\n    \
+        let bytes = std::fs::read(P).expect(\"read\");\n    \
+        println!(\"EVADE3 read {} bytes of {P}\", bytes.len());\n}\n";
+    const EVADE4: &str = "// SPDX-License-Identifier: Apache-2.0 OR MIT\n\
+        //! Re-audit scratch: the reader is a module whose file is not named .rs.\n\
+        #[path = \"reader.txt\"]\nmod reader;\n#[test]\nfn reads_the_corpus() {\n    \
+        let n = reader::read();\n    \
+        println!(\"EVADE4 read {n} bytes through a #[path] module\");\n}\n";
+    const WHERE_TXT: &str = "../third_party/unicode/auxiliary/LineBreakTest.txt\n";
+    const WHERE_IN: &str = "concat!(env!(\"CARGO_MANIFEST_DIR\"), \
+        \"/../third_party/unicode/auxiliary/LineBreakTest.txt\")\n";
+    const READER_TXT: &str = "// SPDX-License-Identifier: Apache-2.0 OR MIT\n\
+        pub fn read() -> usize {\n    let p = concat!(env!(\"CARGO_MANIFEST_DIR\"), \
+        \"/../third_party/unicode/auxiliary/LineBreakTest.txt\");\n    \
+        std::fs::read(p).expect(\"read\").len()\n}\n";
+
+    /// The three sidecars, and a manifest for `env!("CARGO_MANIFEST_DIR")`.
+    const SIDECARS: &[(&str, &str)] = &[
+        ("text/Cargo.toml", "[package]\nname = \"f-text\"\n"),
+        ("text/tests/where.txt", WHERE_TXT),
+        ("text/tests/where.in", WHERE_IN),
+        ("text/tests/reader.txt", READER_TXT),
+    ];
+
+    /// The same sidecars, naming nothing under the import.
+    const QUIET_SIDECARS: &[(&str, &str)] = &[
+        ("text/Cargo.toml", "[package]\nname = \"f-text\"\n"),
+        ("text/tests/where.txt", "../claims/0033-scene/scene.toml\n"),
+        ("text/tests/where.in", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\")\n"),
+        ("text/tests/reader.txt", "pub fn read() -> usize {\n    0\n}\n"),
+    ];
+
+    #[test]
+    fn a_reader_in_a_file_that_is_not_rust_is_charged_to_the_source_that_pulls_it_in() {
+        for (rel, text, sidecar) in [
+            ("text/tests/evade2.rs", EVADE2, "text/tests/where.txt through `include_str!`"),
+            ("text/tests/evade3.rs", EVADE3, "text/tests/where.in through `include!`"),
+            ("text/tests/evade4.rs", EVADE4, "text/tests/reader.txt through `#[path]`"),
+        ] {
+            let (findings, scanned) =
+                import_reader_findings(&one(rel, text), &[], &needles(), &tree(SIDECARS));
+            assert_eq!(scanned, 1);
+            assert_eq!(findings.len(), 1, "{rel}: {findings:?}");
+            assert!(
+                findings[0].contains(sidecar)
+                    && findings[0].contains("not a row of IMPORT_READERS"),
+                "{rel}: {findings:?}"
+            );
+            // The control: the same source, its sidecar naming nothing.
+            let (findings, _) =
+                import_reader_findings(&one(rel, text), &[], &needles(), &tree(QUIET_SIDECARS));
+            assert_eq!(findings, Vec::<String>::new(), "{rel}");
+        }
+    }
+
+    /// The reader resolves only the spellings it names, and every other one is
+    /// red rather than skipped: an `include!` of an `include_str!`, a `cfg_attr`
+    /// path, a pull-in straight into the import, one it cannot resolve and one
+    /// that lands on nothing.
+    #[test]
+    fn a_pull_in_is_followed_or_it_is_a_finding() {
+        let files: &[(&str, &str)] = &[
+            ("text/Cargo.toml", "[package]\n"),
+            ("text/tests/where.txt", WHERE_TXT),
+            ("text/tests/reader.txt", READER_TXT),
+            ("text/tests/a.in", "include_str!(\"where.txt\")\n"),
+            ("text/tests/b.in", "include!(\"a.in\")\n"),
+            // A data sidecar for each of `data_names_import`'s three readings.
+            ("text/tests/name.txt", "the corpus is BidiTest.txt\n"),
+            ("text/tests/dir.txt", "../third_party\n"),
+            ("text/tests/tree.txt", "the tree is third_party/unicode, joined at run time\n"),
+        ];
+        for (why, text, says) in [
+            (
+                "a data file naming a data file",
+                "const P: &str = include_str!(\"name.txt\");\n",
+                "name.txt through `include_str!` in text/tests/t.rs, which names",
+            ),
+            (
+                "a data file that is only the directory",
+                "const P: &str = include_str!(\"dir.txt\");\n",
+                "dir.txt through `include_str!` in text/tests/t.rs, which names",
+            ),
+            (
+                "a data file with a path into the directory in a sentence",
+                "const P: &[u8] = include_bytes!(\"tree.txt\");\n",
+                "tree.txt through `include_bytes!` in text/tests/t.rs, which names",
+            ),
+            ("an include! of an include!", "const P: &str = include!(\"b.in\");\n", "which names"),
+            (
+                "a cfg_attr path",
+                "#[cfg_attr(all(), path = \"reader.txt\")]\nmod reader;\n",
+                "which names",
+            ),
+            (
+                "a bracketed include_str!, by its full path",
+                "const P: &str = ::core::include_str![\"where.txt\"];\n",
+                "which names",
+            ),
+            (
+                "the manifest directory with a trailing comma",
+                "const P: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/tests/\", \
+                 \"where.txt\",));\n",
+                "which names",
+            ),
+            (
+                "a nested concat!",
+                "const P: &str = include_str!(concat!(\"wh\", concat!(\"ere\", \".txt\")));\n",
+                "does not resolve",
+            ),
+            (
+                "a macro_rules! piece",
+                "const P: &str = include_str!(where_is!());\n",
+                "does not resolve",
+            ),
+            (
+                "another variable",
+                "const P: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/w\"));\n",
+                "does not resolve",
+            ),
+            ("a missing file", "const P: &str = include_str!(\"nowhere.txt\");\n", "not a file"),
+            ("an absolute path", "const P: &str = include_str!(\"/etc/where.txt\");\n", "absolute"),
+            (
+                "above the tree",
+                "const P: &str = include_str!(\"../../../w.txt\");\n",
+                "climbs above",
+            ),
+            (
+                "the import itself, spelled around the literal check",
+                "const P: &[u8] = include_bytes!(concat!(\"../../third\", \"_party/unicode/x\"));\n",
+                "pulls in third_party/unicode/x",
+            ),
+        ] {
+            let (findings, _) = import_reader_findings(
+                &one("text/tests/t.rs", text),
+                &[],
+                &needles(),
+                &tree(files),
+            );
+            assert!(findings.iter().any(|f| f.contains(says)), "{why}: {findings:?}");
+        }
+    }
+
+    /// What is not a pull-in, or pulls in nothing under the import: a macro
+    /// name in a comment or a string, `format!`'s named argument, and a data
+    /// file that says `third_party/` in prose — which two claims files this tree
+    /// `include_str!`s do.
+    #[test]
+    fn prose_and_decoys_are_not_pulled_in() {
+        let files: &[(&str, &str)] = &[
+            (
+                "text/tests/claim.toml",
+                "notes = \"`third_party/` holds no shaper, and third_party/ is empty\"\n",
+            ),
+            ("text/tests/self.rs", "fn f() {}\n"),
+        ];
+        for text in [
+            "// include_str!(\"nowhere.txt\")\nfn f() {}\n",
+            "const S: &str = \"include_str!(\\\"nowhere.txt\\\")\";\n",
+            "fn f() -> String { format!(\"{path}\", path = \"nowhere.txt\") }\n",
+            "const C: &str = include_str!(\"claim.toml\");\n",
+            "const S: &str = include_str!(\"self.rs\");\nfn my_include_str() {}\n",
+        ] {
+            let (findings, _) = import_reader_findings(
+                &one("text/tests/t.rs", text),
+                &[],
+                &needles(),
+                &tree(files),
+            );
+            assert_eq!(findings, Vec::<String>::new(), "{text:?}");
+        }
+    }
+
+    /// A row that reads only through what it pulls in still reads; a row whose
+    /// pull-in names nothing is still a row that says nothing.
+    #[test]
+    fn a_row_may_read_through_a_pull_in() {
+        let rows = [("text/tests/evade2.rs", "the harness")];
+        let files = one("text/tests/evade2.rs", EVADE2);
+        let (findings, _) = import_reader_findings(&files, &rows, &needles(), &tree(SIDECARS));
+        assert_eq!(findings, Vec::<String>::new());
+        let (findings, _) =
+            import_reader_findings(&files, &rows, &needles(), &tree(QUIET_SIDECARS));
+        assert!(findings.iter().any(|f| f.contains("does not read the import")), "{findings:?}");
+    }
+
+    /// The same three readers on disk, through the composition the lint calls
+    /// — so the reader that opens files under a root is the one tested, and not
+    /// only the one in memory.
+    #[test]
+    fn the_lint_reads_what_a_source_pulls_in_from_disk() {
+        let at = super::target_dir().join(super::FIXTURE_DIR).join("licence-pull-ins");
+        let _ = std::fs::remove_dir_all(&at);
+        let mut files: Vec<(&str, &str)> = SIDECARS.to_vec();
+        files.push(("third_party/unicode/auxiliary/LineBreakTest.txt", "0041 ÷\n"));
+        let sources = [
+            ("text/tests/evade2.rs", EVADE2),
+            ("text/tests/evade3.rs", EVADE3),
+            ("text/tests/evade4.rs", EVADE4),
+        ];
+        files.extend(sources);
+        for (rel, text) in &files {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("fixture dir");
+            std::fs::write(&path, text).expect("fixture");
+        }
+        let texts: Vec<(String, String)> =
+            sources.iter().map(|(rel, text)| (rel.to_string(), text.to_string())).collect();
+        let checks = super::licence_checks(&at, &texts, &[], &[], &[]).expect("ran");
+        assert_eq!(checks.readers.len(), 3, "{:?}", checks.readers);
+        for (rel, _) in sources {
+            assert!(checks.readers.iter().any(|f| f.contains(rel)), "{rel}: {:?}", checks.readers);
+        }
+    }
+
     #[test]
     fn a_literal_path_into_the_import_is_a_reader() {
         for (why, text) in [
@@ -22308,6 +22986,27 @@ mod licence_values {
                 "const P: &str = concat!(env!(\"M\"), \"/../third\", \"_party/unicode\");\n",
             ),
             (
+                "a character literal inside a concat!, the audit's reader",
+                "const P: &str = concat!(\"third\", '_', \"party/u/LineBreakTest\", '.', \"txt\");\n",
+            ),
+            (
+                "an escaped character literal inside a concat!",
+                "const P: &str = concat!(\"third\", '\\x5f', \"party\");\n",
+            ),
+            (
+                "a unicode-escaped character literal inside a concat!",
+                "const P: &str = concat!(\"third\", '\\u{5f}', \"party\");\n",
+            ),
+            (
+                "raw strings and a character literal inside a concat!",
+                "const P: &str = concat!(r\"third\", '_', r#\"party\"#);\n",
+            ),
+            ("a byte string with an escape", "const P: &[u8] = b\"third\\x5fparty/u\";\n"),
+            (
+                "a file name split at its dot by a character literal",
+                "const P: &str = concat!(\"u/BidiTest\", '.', \"txt\");\n",
+            ),
+            (
                 "after a string holding a comment opener",
                 "const A: &str = \"/*\"; const P: &str = \"third_party\";\n",
             ),
@@ -22320,7 +23019,7 @@ mod licence_values {
             ("after a closed block comment", "/* x */ const P: &str = \"third_party\";\n"),
         ] {
             let (findings, scanned) =
-                import_reader_findings(&one("text/src/a.rs", text), &[], &needles());
+                import_reader_findings(&one("text/src/a.rs", text), &[], &needles(), &nothing);
             assert_eq!(scanned, 1);
             assert_eq!(findings.len(), 1, "{why}: {text:?} was not read as a reader");
         }
@@ -22344,9 +23043,13 @@ mod licence_values {
             "/* \"third_party\" */ fn f() {}\n",
             "/* outer /* \"third_party\" */ still a comment */ fn f() {}\n",
             "/// `third_party/unicode/`\nfn f() {}\n",
+            // A character literal is kept, and beside a string it joins only
+            // what the compiler would join: here, nothing that names the import.
+            "const A: &str = \"third\"; const B: char = '/'; const C: &str = \"party\";\n",
+            "fn f(p: &str) -> bool { p.ends_with('_') && p.starts_with(\"third\") }\n",
         ] {
             let (findings, _) =
-                import_reader_findings(&one("text/src/a.rs", text), &[], &needles());
+                import_reader_findings(&one("text/src/a.rs", text), &[], &needles(), &nothing);
             assert_eq!(findings, Vec::<String>::new(), "{text:?}");
         }
     }
@@ -22356,19 +23059,19 @@ mod licence_values {
         let reading = "const P: &str = \"third_party/u/BidiTest.txt\";\n";
         let files = one("text/tests/conformance.rs", reading);
         let rows = [("text/tests/conformance.rs", "the harness")];
-        let (findings, scanned) = import_reader_findings(&files, &rows, &needles());
+        let (findings, scanned) = import_reader_findings(&files, &rows, &needles(), &nothing);
         assert_eq!((findings.len(), scanned), (0, 0), "{findings:?}");
 
         let quiet = one("text/tests/conformance.rs", "fn f() {}\n");
-        let (findings, _) = import_reader_findings(&quiet, &rows, &needles());
+        let (findings, _) = import_reader_findings(&quiet, &rows, &needles(), &nothing);
         assert!(findings.iter().any(|f| f.contains("does not read the import")), "{findings:?}");
 
-        let (findings, _) = import_reader_findings(&[], &rows, &needles());
+        let (findings, _) = import_reader_findings(&[], &rows, &needles(), &nothing);
         assert!(findings.iter().any(|f| f.contains("is not a source")), "{findings:?}");
 
         // A tooling file is not scanned: TOOLING's needles are its business.
         let (findings, scanned) =
-            import_reader_findings(&one("xtask/src/x.rs", reading), &[], &needles());
+            import_reader_findings(&one("xtask/src/x.rs", reading), &[], &needles(), &nothing);
         assert_eq!((findings.len(), scanned), (0, 0));
     }
 
@@ -22403,7 +23106,8 @@ mod licence_values {
             assert!(files.iter().any(|(rel, _)| rel == file), "{file} is not in the walk");
         }
         let names = super::imported::data_file_names(&super::root());
-        let (findings, scanned) = import_reader_findings(&files, IMPORT_READERS, &names);
+        let (findings, scanned) =
+            import_reader_findings(&files, IMPORT_READERS, &names, &read_under(&root()));
         assert_eq!(findings, Vec::<String>::new());
         assert!(scanned > 200, "the walk scanned {scanned} source(s)");
         assert_eq!(tooling_reason_findings(IMPORT_READERS, TOOLING), Vec::<String>::new());
