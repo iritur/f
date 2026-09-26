@@ -58,6 +58,13 @@ mod compare;
 /// value of the row. RFC 0114, RFC 0138.
 mod imported;
 
+/// The one crate that links an import, `user/shaper`, held to the workspace's
+/// checks from outside the workspace: its host tests, its AArch64 compile, its
+/// style, and its component image, built and measured. Split out because every
+/// one of those verbs has to reach a crate `cargo --workspace` does not, and the
+/// source replacement that resolves the import is spelled once, there. RFC 0141.
+mod shaper;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -130,6 +137,21 @@ const FORBIDDEN_TYPES: &[(&str, &str)] = &[
         "f64",
         "not reproducible across the two architectures the tree tests; use an integer or a fixed point with its scale in the name",
     ),
+    // The two binary floating-point types the language has grown since, behind
+    // a feature gate today. A gate is one line in `lib.rs`, and the argument
+    // above is about the format and not about its width: a half-precision
+    // value rounds per target like the others, and a quad one is a soft-float
+    // library on both architectures — whichever library that is. RFC 0141,
+    // because `abi/src/shape.rs` is the file RFC 0082's third property names
+    // and it read these as integers.
+    (
+        "f16",
+        "a binary floating-point type, behind a feature gate: not reproducible across the two architectures the tree tests; use an integer or a fixed point with its scale in the name",
+    ),
+    (
+        "f128",
+        "a binary floating-point type, behind a feature gate: not reproducible across the two architectures the tree tests; use an integer or a fixed point with its scale in the name",
+    ),
 ];
 
 /// Does `code` mention `word` as a whole identifier?
@@ -193,8 +215,33 @@ const DETERMINISM_ALLOW: &[(&str, &str)] = &[
 ///
 /// `build` is passed rather than read here because `CARGO_TARGET_DIR` moves the
 /// output directory and it is then not called `target`; see [`target_dir`].
-fn walker_skips(name: &str, path: &Path, build: &Path) -> bool {
-    matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs") || path == build
+///
+/// **`docs` and `target` are skipped where they are, not wherever they are
+/// spelled.** `docs/` at the root is prose and `target/` at the root is the
+/// build; a directory of either name one level down is neither, and for a
+/// round both were skipped at any depth, so `docs/lnk/Cargo.toml` — a crate
+/// cargo makes a workspace member the moment another crate takes it by path —
+/// was a manifest and a source tree no walker read (RFC 0141). One nested
+/// `target` is still a build directory: the one cargo writes beside a crate the
+/// root's `exclude` names, which is its own workspace (`kernel/proofs`,
+/// `user/shaper`), and only when cargo's `CACHEDIR.TAG` says cargo made it.
+/// `root` is the tree being walked, so a fixture tree is its own root.
+fn walker_skips(name: &str, path: &Path, root: &Path, build: &Path) -> bool {
+    let at_root = path.parent() == Some(root);
+    matches!(name, ".git" | ".claude" | "third_party")
+        || (at_root && matches!(name, "target" | "docs"))
+        || (name == "target" && is_excluded_build_dir(path, root))
+        || path == build
+}
+
+/// Is `path` a `target/` cargo wrote beside a crate the root's `exclude` names?
+fn is_excluded_build_dir(path: &Path, root: &Path) -> bool {
+    let Some(parent) = path.parent().and_then(|p| p.strip_prefix(root).ok()) else {
+        return false;
+    };
+    let parent = parent.to_string_lossy().replace('\\', "/");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    path.join("CACHEDIR.TAG").is_file() && toml_list(&manifest, "exclude").contains(&parent)
 }
 
 /// Crates in the permissive tree permitted to carry a build script.
@@ -501,6 +548,205 @@ const IMPORT_READERS: &[(&str, &str)] = &[
          LineBreakTest.txt by path on the host, and holds the text path's breaks to the \
          clusters over both, so the corpus is read by a test and never compiled, embedded or \
          linked (RFC 0114's second route, RFC 0115's first home)",
+    ),
+    (
+        "user/shaper/tests/run.rs",
+        "E3-B03b0's run through the shape protocol: it opens Inter-Regular.ttf by path on the \
+         host and hands its bytes to the shim, which is what a blob store would hand it, so \
+         the face is read by a test and never compiled, embedded or linked (RFC 0114's \
+         second route, RFC 0141)",
+    ),
+];
+
+/// Permissive manifests permitted to link an import: the manifest, the import,
+/// the one crate of it the manifest may name, and why.
+///
+/// **One row, and the number is the rule.** RFC 0082 imports the shaper and
+/// builds it into a component image of its own; source is not an image, so a
+/// shim has to decode a request, hand the run to the import and encode what
+/// comes back — and a shim links what it shims. `LICENSING.md` has always called
+/// `third_party/<name>/` *imported source and its shim*; the shim is written
+/// here and `third_party/` is imported verbatim (and a hook refuses an agent's
+/// write there), so it lives beside it rather than inside it, and this row is
+/// the exception that makes that true without making a check a suggestion.
+/// RFC 0141.
+///
+/// **The link is by name, and the path check is untouched.** The shim takes
+/// `harfrust = { version = "=0.13.3" }` and `cargo xtask` resolves it from the
+/// import's `vendor/` (`shaper_cargo`), so no manifest carries a path into
+/// `third_party/` and [`licensing_graph_findings`] still refuses every one that
+/// does. What a path row would have made visible, this table makes visible
+/// instead, and more of it: a registry name was a route nothing here read —
+/// `BOUNDARY_BLIND`'s third entry — and for the crates an import vendors it is
+/// now read everywhere.
+///
+/// What holds the exception narrow, each a finding in [`linker_row_findings`]:
+/// at most [`LINKERS_MAX`] rows; the import's record says `Kind: source` and
+/// lists the named crate; the manifest takes that crate at exactly the vendored
+/// version with `=`, by name and never by path, and names no other crate the
+/// import vendors; its directory is outside the workspace, in the root's
+/// `exclude` beside `"third_party"`; **no other manifest names the linker's
+/// directory**, because a permissive crate that took the shim would link the
+/// import one hop away; and **no other manifest names any crate any source
+/// import vendors**. The dependencies are cargo's own reading of every
+/// workspace in the tree (`cargo metadata --no-deps`), so every spelling cargo
+/// accepts is one the check reads.
+///
+/// And where the name resolves is checked, not assumed, because a `[replace]`
+/// or `[patch]` table points it at another copy without changing a character
+/// of the row above: no permissive manifest and no cargo configuration the
+/// shim's build reads may carry either table, and the shim's `Cargo.lock` —
+/// which `--locked` holds its build to — may resolve nothing but this tree's
+/// crates and the import's, at the checksums the import's own lockfile records
+/// ([`shim_lock_findings`]).
+///
+/// *What would reverse this:* a second import that needs a shim, which is a
+/// second row, a [`LINKERS_MAX`] of two and an RFC saying why; or the shim
+/// moving into the import's own tree, which a re-import would then overwrite —
+/// the reason it is not there.
+const IMPORT_LINKERS: &[(&str, &str, &str, &str)] = &[(
+    "user/shaper/Cargo.toml",
+    "third_party/harfrust",
+    "harfrust",
+    "the shaper's shim: it decodes the `shape` protocol, calls HarfRust, and encodes what \
+     comes back, and it is built into the component image `user/shaper/manifest.toml` \
+     names, which is the only place the import runs (RFC 0082, RFC 0141)",
+)];
+
+/// How many rows [`IMPORT_LINKERS`] may carry. One, the shaper's shim.
+/// Unit: manifests.
+const LINKERS_MAX: usize = 1;
+
+/// The code an import runs on the build machine, each crate with why that is
+/// accepted. RFC 0141's decision on `E3-B03b0`'s third question.
+///
+/// `BUILD_SCRIPT_ALLOW` is empty and RFC 0092 is why: a build script or a
+/// procedural macro in the permissive tree can hand any bytes on the machine to
+/// its crate, the import's included, and no source a lint reads would show it.
+/// That argument is about the permissive tree *reaching* the import. Inside the
+/// import's own dependency graph the direction is reversed: what these crates
+/// run executes on the build machine while the import is being compiled, and
+/// what they emit is compiled into the import's crates and nowhere else — never
+/// into a permissive crate, which is what `IMPORT_LINKERS` and both licence nets
+/// hold. So they are **accepted, as the import's code**, on three conditions
+/// that make the acceptance a record rather than a shrug: each is named here with
+/// what it does; the set is compared with the tree in both directions by
+/// [`imported::host_code`], so a re-import that brings a fifth is red until
+/// somebody has read it; and each is byte-identical to what crates.io published,
+/// which `lint-licensing` checks file by file.
+///
+/// What this does not buy, stated rather than implied: reproducibility. A build
+/// script reads its environment — `libm`'s reads `ENSURE_NO_PANIC` — so the
+/// shaper's image is a function of more than the tree. Nothing claims that
+/// image's bytes today (it is `UNSPAWNABLE`, in no generation); the day it is a
+/// generation leaf, those bytes are a claim, and these four rows are what that
+/// claim rests on.
+///
+/// *What would reverse this:* a row whose crate reads a file outside its own
+/// directory or reaches the network, found on a re-import's review — the
+/// supply-chain case, where the answer is a different version or a different
+/// upstream, not a wider rule.
+const IMPORT_HOST_CODE: &[(&str, &str)] = &[
+    (
+        "third_party/harfrust/vendor/bytemuck_derive-1.12.1",
+        "a procedural macro: `#[derive(AnyBitPattern)]` and its kin, expanded into font-types, \
+         read-fonts and harfrust; it reads the tokens it is handed and nothing else, and it \
+         links syn, quote, proc-macro2 and unicode-ident, which exist only to build it",
+    ),
+    (
+        "third_party/harfrust/vendor/libm-0.2.16",
+        "a build script that sets cfgs for the target's float features from cargo's own \
+         `CARGO_CFG_*` variables and one of its own, `ENSURE_NO_PANIC`",
+    ),
+    (
+        "third_party/harfrust/vendor/proc-macro2-1.0.107",
+        "a build script that asks the compiler its version, compiles probe files into its \
+         own `OUT_DIR` to learn which `proc_macro` features exist, and sets cfgs from the \
+         answers",
+    ),
+    (
+        "third_party/harfrust/vendor/quote-1.0.47",
+        "a build script that asks the compiler its version and sets one cfg from the answer",
+    ),
+];
+
+/// Each vendored crate's `.cargo-checksum.json`, by the SHA-256 of the file.
+///
+/// `lint-licensing` holds every file of a vendored crate to the hash that
+/// crate's `.cargo-checksum.json` lists for it, and cargo does the same when it
+/// builds from the vendored source — but the list lives in the directory it
+/// vouches for, so a file edited *together with* its line in the list was
+/// green in both (RFC 0141). This is the anchor outside the directory: the
+/// list's own hash, recorded here, so an edit to a vendored crate is an edit to
+/// this table too, and a reviewer sees it in a diff of `xtask/`.
+///
+/// **It duplicates the import's record, until the record carries it.** The
+/// natural home is a column of the `Crate` table in the import's
+/// `PROVENANCE.md`, beside the crates.io checksum; `third_party/` is written
+/// only by a re-import, and one had not happened when this was added. The day
+/// the column exists, `imported::source_findings` reads it there and this table
+/// goes. [`checksum_anchor_findings`] compares the two directions: every
+/// vendored crate has a row, and every row a crate.
+///
+/// *What would reverse this:* the column above, or cargo anchoring a vendored
+/// directory itself — a directory source whose package checksum covered the
+/// file list, which crates.io's does not.
+const IMPORT_CHECKSUMS: &[(&str, &str)] = &[
+    (
+        "third_party/harfrust/vendor/bitflags-2.13.2",
+        "5bf3e6c5df147aba2885bedde63cd34bcda8c52f31693dcd54f0c8202977ab26",
+    ),
+    (
+        "third_party/harfrust/vendor/bytemuck-1.25.2",
+        "02595fc9ff2f7821f3ef55624da41b605180cde837692f7c4bc7ba869903861f",
+    ),
+    (
+        "third_party/harfrust/vendor/bytemuck_derive-1.12.1",
+        "43ea4856108d81c4ba26633d73ae1c5e636b997b243a1004867cd16fb5aca419",
+    ),
+    (
+        "third_party/harfrust/vendor/core_maths-0.1.1",
+        "fccc9994edfe731548825c4ac178df787c1e9883ef66d191199fe13e30b6e235",
+    ),
+    (
+        "third_party/harfrust/vendor/font-types-0.12.5",
+        "72ebe16e0f7fd895eb2c9036bd626001a30cd7b56bcbc402bb2a8b3822d917ec",
+    ),
+    (
+        "third_party/harfrust/vendor/harfrust-0.13.3",
+        "eb563c6e646a515c6dce52f1e10666c697db1aaf79d3e1a747eb0b0336b3dc65",
+    ),
+    (
+        "third_party/harfrust/vendor/libm-0.2.16",
+        "2a6dd5f5bc45c57ee4b39058fa693d74a95e8d68d245ce0c82d6787ddea71927",
+    ),
+    (
+        "third_party/harfrust/vendor/once_cell-1.21.4",
+        "e77a31c5b91c35d60072d2c1171d2fddec8b099e999a24df03d997c1dce57f25",
+    ),
+    (
+        "third_party/harfrust/vendor/proc-macro2-1.0.107",
+        "f446cfd05e78b027598827cd6a564b7856a55fc5612e992c3dab2c28ba589ba1",
+    ),
+    (
+        "third_party/harfrust/vendor/quote-1.0.47",
+        "77c75949648f39a753e67b9fa616fa255429b9475e52eb8b87ebf70307133d70",
+    ),
+    (
+        "third_party/harfrust/vendor/read-fonts-0.43.3",
+        "e7ca1428485f8fa64311ba3f44f72d8254d8e9e18405b600d1e6b6e8efbe1963",
+    ),
+    (
+        "third_party/harfrust/vendor/smallvec-1.16.2",
+        "bf44178c4946122639147b03d0177bcd5231442d046e7045aac4c7764e839e53",
+    ),
+    (
+        "third_party/harfrust/vendor/syn-3.0.6",
+        "ba0b343cd0647e5c47b412e7e665e34e715af3c3996b675946840954f0c5c876",
+    ),
+    (
+        "third_party/harfrust/vendor/unicode-ident-1.0.26",
+        "6c25daa85d57768da0ae05564ebd36e033df12bdaea8bfc3f7bb36f1cf9e9537",
     ),
 ];
 
@@ -1482,6 +1728,12 @@ fn main() -> ExitCode {
         // policy job lands. E1-P11.
         "test-host" => test_host(),
         "cross" => cross_check(),
+        // The one crate outside the workspace, every check `test` and `lint`
+        // hold it to, in one verb for whoever is working on it. RFC 0141.
+        "shaper" => shaper::test_host()
+            .and_then(|()| shaper::check_aarch64())
+            .and_then(|()| shaper::style())
+            .and_then(|()| shaper::unspawnable().map(|_| ())),
         "verify" => verify(),
         "lint" => lint_all(),
         "lint-determinism" => lint_determinism(),
@@ -1957,6 +2209,11 @@ cargo xtask <command>
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
 
+  shaper             The shim that links HarfRust, outside the workspace: its host
+                     tests (E3-B03b0's run through the shape protocol), its
+                     AArch64 compile, fmt and clippy, and its component image,
+                     linked and measured against what a spawn shape maps. Each
+                     step also runs inside `test` or `lint`. RFC 0141
   unicode [--check]  Regenerate the Unicode tables DERIVED_DATA names in text/src/
                      from third_party/unicode/, or report any that differ from
                      what the generator writes. Run deliberately, never by a
@@ -2244,6 +2501,30 @@ const COMPONENTS: &[&str] = &[
     "panel",
 ];
 
+/// Components this tree declares and does not build into a boot, each with why.
+///
+/// **One row, and it may only ever name the component that runs an import.**
+/// [`declared_components`] is the set every boot, `chaos` and `swap` compare
+/// against, and it is read from the manifests precisely so that a component
+/// cannot fall out of those comparisons by being left off a hand-written list.
+/// This table is a hand-written list that takes a component out of them, so it is
+/// held three ways in [`lint_components`]: each row names a manifest that exists,
+/// whose `image` is an `IMPORT_LINKERS` crate — so no permissive component can be
+/// parked here — and which [`COMPONENTS`] does not also build. And the reason is
+/// checked rather than recorded: `cargo xtask test` links the shaper's image and
+/// measures it against what a spawn shape maps (`shaper::unspawnable`), and an
+/// image that fits is red, naming this row as the thing to delete.
+///
+/// *What would reverse this row:* a frame that reads an image's headers (`E5`)
+/// and maps what it finds, or a shaper that fits in sixteen pages.
+const UNSPAWNABLE: &[(&str, &str)] = &[(
+    "shaper",
+    "its image — the shim, HarfRust, read-fonts and the maths library, linked by \
+     user/init/link.ld and held to the same checks as every component — is several times \
+     the sixteen pages of text the frame maps for a spawned component, and no frame in \
+     this tree reads an image's headers yet (E5). RFC 0141",
+)];
+
 /// Every component the *source tree* declares, by the name in its manifest.
 ///
 /// # Why this exists beside [`COMPONENTS`]
@@ -2281,6 +2562,9 @@ fn declared_components() -> Result<Vec<String>, String> {
                 findings.join("\n")
             )
         })?;
+        if UNSPAWNABLE.iter().any(|(name, _)| *name == checked.name) {
+            continue;
+        }
         names.push(checked.name);
     }
     names.sort();
@@ -2309,7 +2593,7 @@ fn declared_servers() -> Result<Vec<String>, String> {
                 findings.join("\n")
             )
         })?;
-        if checked.serves {
+        if checked.serves && !UNSPAWNABLE.iter().any(|(name, _)| *name == checked.name) {
             names.push(checked.name);
         }
     }
@@ -2333,10 +2617,23 @@ fn lint_components() -> Result<(), String> {
     let declared = declared_components()?;
     let mut built: Vec<String> = COMPONENTS.iter().map(|name| (*name).to_string()).collect();
     built.sort();
+    let parked = unspawnable_findings()?;
+    if !parked.is_empty() {
+        return Err(format!(
+            "{} finding(s) against UNSPAWNABLE:\n{}\n\n\
+             A row there takes a component out of every set a boot, `chaos` and `swap` compare\n\
+             against. It may name only the component that runs an import, and only while that\n\
+             component is not also built (RFC 0141).",
+            parked.len(),
+            parked.join("\n")
+        ));
+    }
     if declared == built {
         println!(
-            "lint-components: ok  ({} component(s); the build list is the manifest set)",
-            built.len()
+            "lint-components: ok  ({} component(s); the build list is the manifest set, less \
+             the {} UNSPAWNABLE names and checks)",
+            built.len(),
+            UNSPAWNABLE.len()
         );
         return Ok(());
     }
@@ -2354,6 +2651,38 @@ fn lint_components() -> Result<(), String> {
         if missing.is_empty() { "none".to_string() } else { join_names(&missing) },
         if extra.is_empty() { "none".to_string() } else { join_names(&extra) },
     ))
+}
+
+/// What keeps [`UNSPAWNABLE`] from being a place to park a component.
+fn unspawnable_findings() -> Result<Vec<String>, String> {
+    let mut findings = Vec::new();
+    let linked: Vec<&str> = IMPORT_LINKERS
+        .iter()
+        .map(|(manifest, ..)| manifest.strip_suffix("/Cargo.toml").unwrap_or(manifest))
+        .collect();
+    let mut images: BTreeMap<String, String> = BTreeMap::new();
+    for path in manifest::files(&root(), &target_dir())? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        if let Ok(checked) = manifest::check(&rel, &text) {
+            images.insert(checked.name, checked.image);
+        }
+    }
+    for (name, _) in UNSPAWNABLE {
+        match images.get(*name) {
+            None => findings
+                .push(format!("  {name}  is a row of UNSPAWNABLE and no manifest declares it")),
+            Some(image) if !linked.contains(&image.as_str()) => findings.push(format!(
+                "  {name}  is a row of UNSPAWNABLE and its image `{image}` links no import: a \
+                 permissive component that cannot be spawned is a defect to fix, not a row"
+            )),
+            Some(_) => {}
+        }
+        if COMPONENTS.contains(name) {
+            findings.push(format!("  {name}  is a row of UNSPAWNABLE and COMPONENTS builds it"));
+        }
+    }
+    Ok(findings)
 }
 
 /// A list of names for a refusal, comma-separated.
@@ -2670,8 +2999,6 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
 /// at once, which is the whole requirement here.
 fn flat_image_with(package: &str, dir: &str, features: &[&str]) -> Result<PathBuf, String> {
     let lld = llvm_tool("rust-lld")?;
-    let objcopy = llvm_tool("llvm-objcopy")?;
-    let nm = llvm_tool("llvm-nm")?;
 
     // The base name is kept before the directory shadows it, because the image
     // is named after the crate rather than called `image.bin` in a directory
@@ -2827,11 +3154,43 @@ fn flat_image_with(package: &str, dir: &str, features: &[&str]) -> Result<PathBu
         return Err(format!("linking {package} against user/init/link.ld failed"));
     }
 
+    let (bin, bytes) = flat_checks(package, name, &dir, &elf)?;
+    let most = image_max(name);
+    if bytes > most {
+        return Err(format!(
+            "the {package} image (shape `{name}`) is {bytes} bytes and the frame maps {most} for it.\n\n\
+             A component that outgrows what its shape reserves needs a loader that reads\n\
+             its headers, which is E5. Until then this is a real bound, and widening it\n\
+             means widening `kernel::process`'s own reservation in the same diff: the two\n\
+             numbers are one number, and `IMAGE_MAX` in xtask says which shape it belongs\n\
+             to."
+        ));
+    }
+
+    Ok(bin)
+}
+
+/// What every linked component image is held to before it is measured: its
+/// first byte is `component::start`, it has no writable data, and it is not
+/// empty. Returns the flat binary and its length.
+///
+/// Split out of [`flat_image_with`] so that `user/shaper`'s image, which is
+/// built outside the workspace and linked from a different pair of archives
+/// ([`shaper_image`]), is held to exactly these checks and not to a copy of
+/// them. The *size* is not judged here: which bound applies is the caller's
+/// question, and for the shaper the answer is that no spawn shape holds it.
+fn flat_checks(
+    package: &str,
+    name: &str,
+    dir: &Path,
+    elf: &Path,
+) -> Result<(PathBuf, u64), String> {
     // The symbol at the first byte. `link.ld` places the entry there by naming
     // the section pattern its function is compiled into; this is what says the
     // pattern still matches. A toolchain that changes how it names sections
     // makes this fail with a sentence, rather than making a boot jump into the
     // middle of some other function.
+    let nm = llvm_tool("llvm-nm")?;
     let nm = nm.to_str().ok_or("llvm-nm's path is not valid UTF-8")?.to_string();
     let elf_path = elf.to_str().ok_or("the image elf path is not valid UTF-8")?.to_string();
     let symbols = capture(&nm, &["--defined-only", "--numeric-sort", &elf_path])?;
@@ -2896,6 +3255,7 @@ fn flat_image_with(package: &str, dir: &str, features: &[&str]) -> Result<PathBu
             writable.join(", ")
         ));
     }
+    let objcopy = llvm_tool("llvm-objcopy")?;
     let objcopy = objcopy.to_str().ok_or("llvm-objcopy's path is not valid UTF-8")?.to_string();
     let bin = dir.join(format!("{name}.bin"));
     let bin_path = bin.to_str().ok_or("the flat image path is not valid UTF-8")?.to_string();
@@ -2907,19 +3267,7 @@ fn flat_image_with(package: &str, dir: &str, features: &[&str]) -> Result<PathBu
     if bytes == 0 {
         return Err(format!("the {package} image is empty: the linker discarded everything"));
     }
-    let most = image_max(name);
-    if bytes > most {
-        return Err(format!(
-            "the {package} image (shape `{name}`) is {bytes} bytes and the frame maps {most} for it.\n\n\
-             A component that outgrows what its shape reserves needs a loader that reads\n\
-             its headers, which is E5. Until then this is a real bound, and widening it\n\
-             means widening `kernel::process`'s own reservation in the same diff: the two\n\
-             numbers are one number, and `IMAGE_MAX` in xtask says which shape it belongs\n\
-             to."
-        ));
-    }
-
-    Ok(bin)
+    Ok((bin, bytes))
 }
 
 /// Boot the kernel and return the exit status QEMU reported.
@@ -10693,7 +11041,7 @@ fn manifests() -> Result<Vec<PathBuf>, String> {
                 // it was found; this is the same tree and the same argument,
                 // and a walker left out of it is how the finding comes back
                 // wearing a different lint's name.
-                if !walker_skips(name, &path, build) {
+                if !walker_skips(name, &path, &root(), build) {
                     walk(&path, build, out)?;
                 }
             } else if name == "Cargo.toml" {
@@ -15332,7 +15680,12 @@ fn test_host() -> Result<(), String> {
                     result this command must not be able to produce."
             .into());
     }
-    sh("cargo", &args)
+    sh("cargo", &args)?;
+    // The one crate outside the workspace with tests that must run on both
+    // architectures: `E3-B03b0`'s run through the `shape` protocol. Here and not
+    // in its own CI step, because this command is what both test jobs run and a
+    // step added to one job and not the other is the drift RFC 0045 removed.
+    shaper::test_host()
 }
 
 /// Compile every crate that reaches the machine for AArch64.
@@ -15374,7 +15727,9 @@ fn cross_check() -> Result<(), String> {
     }
     args.push("--target");
     args.push(AARCH64_TARGET);
-    sh("cargo", &args)
+    sh("cargo", &args)?;
+    // The shim, which reaches the machine and is not a workspace member.
+    shaper::check_aarch64()
 }
 
 /// What would make the architecture checks green while the property was false.
@@ -16053,6 +16408,10 @@ fn test() -> Result<(), String> {
     // model. That is necessary and not sufficient — see the note below.
     test_host()?;
     cross_check()?;
+    // The shaper's image, linked the way a component is and measured, and the
+    // check that `UNSPAWNABLE`'s reason still holds. Here rather than in the
+    // boot suite, because nothing boots it. RFC 0141.
+    shaper::unspawnable()?;
 
     // Read at run time rather than through a `cfg`, so that one binary says the
     // true thing on both runners. On the arm job this whole section is about a
@@ -16484,7 +16843,10 @@ fn lint_style() -> Result<(), String> {
             "-D",
             "warnings",
         ],
-    )
+    )?;
+    // The shim is outside the workspace, so `--all` and `--workspace` above do
+    // not reach it; it is held to the same two checks here.
+    shaper::style()
 }
 
 fn rust_sources() -> Result<Vec<PathBuf>, String> {
@@ -16513,7 +16875,7 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
                 // tree's source and wants linting. Today it is configuration,
                 // prose and other people's checkouts, none of which this
                 // walker has any business compiling.
-                if !walker_skips(name, &path, build) {
+                if !walker_skips(name, &path, &root(), build) {
                     walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
@@ -20090,6 +20452,174 @@ fn is_task_id(text: &str) -> bool {
         && bytes[6..].iter().all(u8::is_ascii_lowercase)
 }
 
+/// The capability types the import's component may declare at all.
+///
+/// A positive list rather than a refusal of `irq`, because RFC 0082's first
+/// property is about *no handle a clock, a locale or an environment could reach
+/// it through*, and a list of what is refused is a list of what somebody thought
+/// of. `untyped` is memory — the account, the heap, the face — and `endpoint` is
+/// its own endpoint and, the day it has one, the store's. A `frame` could be a
+/// device window, a `channel` or a `buffer_set` a route to something this file
+/// did not argue, and `irq` is the thing the property names. *What would widen
+/// it:* the component serving its ring through registered buffers, which is a
+/// `buffer_set` argued in the same diff.
+const IMPORT_COMPONENT_CAPS: &[&str] = &["untyped", "endpoint"];
+
+/// The protocol file RFC 0082's third property is about.
+const SHAPE_PROTOCOL: &str = "abi/src/shape.rs";
+
+/// RFC 0082's three properties, checked on the manifest of the component each
+/// `IMPORT_LINKERS` row builds, and on the protocol that component serves.
+///
+/// 1. **No handle through which a clock could reach it**: no `[[device]]`, no
+///    capability of a type outside [`IMPORT_COMPONENT_CAPS`] — so no `irq` —
+///    and every capability `from = "supervisor"`: no `powerbox` ask, and no
+///    handle from a sibling.
+/// 2. **Its own allocator, sized in its own manifest**: exactly one `heap`
+///    capability, `untyped`, from the supervisor, with a `bytes` count — the
+///    one the frame maps at `f_ring::heap::AT` for `Heap::COMPONENT`.
+/// 3. **Only fixed-point integers cross the ring**: every ring it declares is
+///    a server speaking [`f_abi::shape::PROTOCOL`], and [`SHAPE_PROTOCOL`] names
+///    no binary floating-point type. `lint-determinism` refuses one there too;
+///    this is the check that says *which file* RFC 0082's property is about, so
+///    the property cannot be kept by moving the protocol somewhere the
+///    determinism allow-list covers.
+///
+/// And RFC 0005 rule 4, carried across: the image is built from the shim's
+/// directory rather than from `third_party/`, so the rule `manifest::check`
+/// applies to a `third_party/` image is applied here to the image that links
+/// one — it may not be `shared`.
+fn import_component_findings(
+    manifests: &[(String, String)],
+    linkers: &[(&str, &str, &str, &str)],
+    protocol: Option<&str>,
+) -> Vec<String> {
+    use manifest::Value;
+    let mut findings = Vec::new();
+    let text_of = |table: &manifest::Table, key: &str| match table.get(key).map(|e| &e.value) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    for (cargo, ..) in linkers {
+        let dir = cargo.strip_suffix("/Cargo.toml").unwrap_or(cargo);
+        let docs: Vec<(&String, manifest::Doc)> = manifests
+            .iter()
+            .filter_map(|(rel, text)| manifest::parse(rel, text).ok().map(|doc| (rel, doc)))
+            .filter(|(_, doc)| text_of(&doc.top, "image").as_deref() == Some(dir))
+            .collect();
+        let [(rel, doc)] = docs.as_slice() else {
+            findings.push(format!(
+                "  {dir}  is built into {} component image(s) and RFC 0082 builds the import into \
+                 exactly one: `{dir}/manifest.toml`, the first file that RFC names",
+                docs.len()
+            ));
+            continue;
+        };
+        if text_of(&doc.top, "domain").as_deref() == Some("shared") {
+            findings.push(format!(
+                "  {rel}  links an import and declares `shared` — RFC 0005 rule 4: the licence \
+                 boundary is the speculation boundary, wherever the image is built from"
+            ));
+        }
+        if doc.arrays.get("device").is_some_and(|devices| !devices.is_empty()) {
+            findings.push(format!(
+                "  {rel}  binds a `[[device]]` — RFC 0082's first property: the shaper holds \
+                 no handle a clock could reach it through"
+            ));
+        }
+        let caps = doc.arrays.get("capability").map_or(&[][..], Vec::as_slice);
+        let mut heaps = 0usize;
+        for (line, cap) in caps {
+            let kind = text_of(cap, "type").unwrap_or_default();
+            let name = text_of(cap, "name").unwrap_or_default();
+            if !IMPORT_COMPONENT_CAPS.contains(&kind.as_str()) {
+                findings.push(format!(
+                    "  {rel}:{line}  `{name}` is `{kind}`, and the import's component may hold \
+                     only {} — RFC 0082's first property",
+                    IMPORT_COMPONENT_CAPS.join(" and ")
+                ));
+            }
+            // Every handle from the supervisor, which routes it at spawn and
+            // routes nothing a clock sits behind. A powerbox ask is the obvious
+            // other source; a sibling is the one this check missed for a round
+            // — an endpoint to whichever component holds a clock, or memory
+            // another component writes, both passed (RFC 0141).
+            let from = text_of(cap, "from").unwrap_or_default();
+            if from == "powerbox" {
+                findings.push(format!(
+                    "  {rel}:{line}  `{name}` is a powerbox ask — RFC 0082's first property: \
+                     nothing reaches the shaper that its manifest did not route at spawn"
+                ));
+            } else if from != "supervisor" {
+                findings.push(format!(
+                    "  {rel}:{line}  `{name}` is from `{from}`, and every handle the import's \
+                     component holds is one the supervisor routed at spawn — RFC 0082's first \
+                     property: another component's handle is a route a clock, a locale or an \
+                     environment could reach it through"
+                ));
+            }
+            if name == "heap" {
+                heaps += 1;
+                let sized =
+                    matches!(cap.get("bytes").map(|e| &e.value), Some(Value::Int(n)) if *n > 0);
+                if kind != "untyped"
+                    || !sized
+                    || text_of(cap, "from").as_deref() != Some("supervisor")
+                {
+                    findings.push(format!(
+                        "  {rel}:{line}  `heap` must be `untyped`, from the supervisor, with a \
+                         `bytes` count — RFC 0082's second property"
+                    ));
+                }
+            }
+        }
+        if heaps != 1 {
+            findings.push(format!(
+                "  {rel}  declares {heaps} `heap` capabilities and RFC 0082's second property is \
+                 one: its own allocator, sized in its own manifest"
+            ));
+        }
+        let rings = doc.arrays.get("ring").map_or(&[][..], Vec::as_slice);
+        if rings.is_empty() {
+            findings.push(format!(
+                "  {rel}  declares no ring, and the import is reached over a ring or not at all"
+            ));
+        }
+        for (line, ring) in rings {
+            if text_of(ring, "protocol").as_deref() != Some(f_abi::shape::PROTOCOL)
+                || text_of(ring, "role").as_deref() != Some("server")
+            {
+                findings.push(format!(
+                    "  {rel}:{line}  every ring the import's component declares serves `{}`, whose \
+                     types are {SHAPE_PROTOCOL} — RFC 0082's third property",
+                    f_abi::shape::PROTOCOL
+                ));
+            }
+        }
+    }
+    match protocol {
+        None => findings.push(format!(
+            "  {SHAPE_PROTOCOL}  is not here, and RFC 0082 names it as the second of the two files"
+        )),
+        Some(text) => {
+            let mut carry = Carry::default();
+            for (n, line) in text.lines().enumerate() {
+                let code = strip_to_code(line, &mut carry);
+                for (word, _) in FORBIDDEN_TYPES {
+                    if names_type(&code, word) {
+                        findings.push(format!(
+                            "  {SHAPE_PROTOCOL}:{}  names `{word}` — RFC 0082's third property: \
+                             only fixed-point integers cross the ring",
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    findings
+}
+
 /// Every component manifest in the permissive tree fits `docs/manifest.md`.
 ///
 /// The schema itself is `manifest::check`; this is the walk, the cross-file
@@ -20113,10 +20643,12 @@ fn lint_manifests() -> Result<(), String> {
     // — and a topology decided by either is not a function of the generation
     // root, which is what `E2-B05` claims it is.
     let mut claimed: BTreeMap<(u64, u64), String> = BTreeMap::new();
+    let mut texts: Vec<(String, String)> = Vec::new();
 
     for path in &files {
         let rel = relative(path);
         let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        texts.push((rel.clone(), text.clone()));
         let checked = match manifest::check(&rel, &text) {
             Ok(checked) => checked,
             Err(mut refusals) => {
@@ -20148,6 +20680,9 @@ fn lint_manifests() -> Result<(), String> {
             manifest::Image::Wrong(why) => findings.push(format!("  {rel}  {why}")),
         }
     }
+    // RFC 0082's three properties, on the one component that runs an import.
+    let protocol = std::fs::read_to_string(root().join(SHAPE_PROTOCOL)).ok();
+    findings.extend(import_component_findings(&texts, IMPORT_LINKERS, protocol.as_deref()));
 
     if findings.is_empty() {
         let not_yet = if pending.is_empty() {
@@ -20157,9 +20692,11 @@ fn lint_manifests() -> Result<(), String> {
         };
         println!(
             "lint-manifests: ok  ({} manifest(s) fit the schema; {} device(s) claimed, none \
-             twice{not_yet})",
+             twice{not_yet}; RFC 0082's three properties hold for the {} component(s) that link \
+             an import)",
             files.len(),
-            claimed.len()
+            claimed.len(),
+            IMPORT_LINKERS.len()
         );
         return Ok(());
     }
@@ -22303,6 +22840,1294 @@ fn licensing_graph_findings(manifests: &[(&str, &str)]) -> Vec<String> {
     findings
 }
 
+/// [`IMPORT_HOST_CODE`] against what the import holds, in both directions.
+fn host_code_findings(found: &[(String, &str)], table: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (krate, what) in found {
+        if !table.iter().any(|(row, _)| row == krate) {
+            findings.push(format!(
+                "  {krate}  is {what} that runs on the build machine and is not a row of \
+                 IMPORT_HOST_CODE: read it, and say what it does"
+            ));
+        }
+    }
+    for (row, _) in table {
+        if !found.iter().any(|(krate, _)| krate == row) {
+            findings.push(format!(
+                "  {row}  is a row of IMPORT_HOST_CODE and runs nothing on the build machine, so \
+                 the row says nothing"
+            ));
+        }
+    }
+    findings
+}
+
+/// What keeps [`IMPORT_LINKERS`] an exception rather than a door. See that
+/// table for the conditions; each is one block here.
+///
+/// `manifests` is every permissive `Cargo.toml` as [`licensing_graph_findings`]
+/// receives them, read here for the root's `members` and `exclude` and for the
+/// `[patch]` and `[replace]` tables cargo's view does not report; `view` is
+/// what cargo itself reads each of them as depending on ([`cargo_view`]);
+/// `vendored` is every source import's crates, as [`imported::source_crates`]
+/// reads them from the records. All three are parameters so that a fixture can
+/// drive each block red.
+///
+/// **Cargo's view, not a line reader.** For a round the dependency names came
+/// from a scan of each manifest's lines, and three spellings cargo reads passed
+/// it: a top-level dotted key (`dependencies.harfrust = …` above `[package]`), a
+/// header with spaces in it (`[dependencies . harfrust]`), and anything under a
+/// directory called `docs` at any depth, which no walker read. `cargo metadata
+/// --no-deps` is cargo's own parse, so a spelling cargo accepts is one this
+/// reads, and a crate cargo makes a member is one this sees wherever it sits
+/// (RFC 0141).
+fn linker_row_findings(
+    manifests: &[(&str, &str)],
+    view: &CargoView,
+    vendored: &BTreeMap<String, Vec<(String, String)>>,
+    linkers: &[(&str, &str, &str, &str)],
+) -> Vec<String> {
+    let mut findings = view.unread.clone();
+    if linkers.len() > LINKERS_MAX {
+        findings.push(format!(
+            "  IMPORT_LINKERS  has {} rows and RFC 0141 admits {LINKERS_MAX}: a second shim is \
+             a second argument, and it is an RFC before it is a row",
+            linkers.len()
+        ));
+    }
+    let normal = |name: &str| name.to_ascii_lowercase().replace('_', "-");
+    let root = manifests.iter().find(|(rel, _)| *rel == "Cargo.toml").map_or("", |(_, t)| t);
+    let excluded = toml_list(root, "exclude");
+    let members = toml_list(root, "members");
+    if !excluded.iter().any(|e| e == IMPORTED) && !vendored.is_empty() {
+        findings.push(format!(
+            "  Cargo.toml  must exclude `{IMPORTED}`, so that cargo itself refuses to make an \
+             imported crate a member (RFC 0082's owed row)"
+        ));
+    }
+    for (manifest, import, krate, _) in linkers {
+        let dir = manifest.strip_suffix("/Cargo.toml").unwrap_or(manifest);
+        // The import is source, and lists the crate.
+        let Some(crates) = vendored.get(*import) else {
+            findings.push(format!(
+                "  IMPORT_LINKERS  names `{import}`, which is not a source import: data is read \
+                 by a test or generated into a table, never linked"
+            ));
+            continue;
+        };
+        let Some((_, version)) = crates.iter().find(|(name, _)| normal(name) == normal(krate))
+        else {
+            findings.push(format!(
+                "  IMPORT_LINKERS  names crate `{krate}`, which `{import}/PROVENANCE.md` does not \
+                 list"
+            ));
+            continue;
+        };
+        if !manifests.iter().any(|(rel, _)| rel == manifest) {
+            findings.push(format!("  IMPORT_LINKERS  names {manifest}, which is not here"));
+            continue;
+        }
+        // The manifest takes it at exactly that version, by name, and takes no
+        // other crate of the import — as cargo reads the manifest.
+        let rows: Vec<&CargoDependency> =
+            view.dependencies.iter().filter(|d| d.manifest == *manifest).collect();
+        let taken: Vec<&&CargoDependency> =
+            rows.iter().filter(|d| normal(&d.name) == normal(krate)).collect();
+        let pinned = format!("={version}");
+        match taken.as_slice() {
+            [] => findings.push(format!(
+                "  {manifest}  is a row of IMPORT_LINKERS and does not take `{krate}`, so the row \
+                 says nothing — RFC 0103: count the call site"
+            )),
+            [taken] => {
+                if taken.req != pinned {
+                    findings.push(format!(
+                        "  {manifest}  takes `{krate}` at `{}` and not at `version = \
+                         \"{pinned}\"`: the import is one version, and a range would resolve to \
+                         whatever a vendor directory holds next",
+                        taken.req
+                    ));
+                }
+                if taken.path.is_some() {
+                    findings.push(format!(
+                        "  {manifest}  takes `{krate}` by path: the import is taken by name and \
+                         resolved from its `vendor/`, where cargo verifies every file"
+                    ));
+                }
+            }
+            _ => findings.push(format!("  {manifest}  takes `{krate}` more than once")),
+        }
+        for row in &rows {
+            if normal(&row.name) != normal(krate)
+                && crates.iter().any(|(other, _)| normal(other) == normal(&row.name))
+            {
+                findings.push(format!(
+                    "  {manifest}  takes `{}`, which `{import}` vendors and IMPORT_LINKERS does \
+                     not name — the shim links the import through its one crate",
+                    row.name
+                ));
+            }
+        }
+        // Outside the workspace, so the import is never a member.
+        if members.iter().any(|m| m == dir) || !excluded.iter().any(|e| e == dir) {
+            findings.push(format!(
+                "  Cargo.toml  must exclude `{dir}` and not list it as a member: a crate that \
+                 links the import from inside the workspace puts the import in the workspace's \
+                 lockfile and under its lint table (RFC 0141)"
+            ));
+        }
+        // Nothing takes the linker: that would be the import, one hop away.
+        for row in &view.dependencies {
+            if row.manifest != *manifest && row.path.as_deref() == Some(dir) {
+                findings.push(format!(
+                    "  {}  takes `{dir}`, which links `{import}` — the import one hop away, with \
+                     `{IMPORTED}` spelled nowhere in that manifest",
+                    row.manifest
+                ));
+            }
+        }
+    }
+    // Every other manifest names no crate any source import vendors.
+    for row in &view.dependencies {
+        if linkers.iter().any(|(manifest, ..)| *manifest == row.manifest) {
+            continue;
+        }
+        for (import, crates) in vendored {
+            if crates.iter().any(|(vendored, _)| normal(vendored) == normal(&row.name)) {
+                findings.push(format!(
+                    "  {}  takes `{}`, a crate `{import}` vendors, and is not a row of \
+                     IMPORT_LINKERS — by name this is the import, wherever cargo would fetch it \
+                     from",
+                    row.manifest, row.name
+                ));
+            }
+        }
+    }
+    // And no manifest points a name somewhere else.
+    for (rel, text) in manifests {
+        findings.extend(patch_table_findings(rel, text));
+    }
+    findings
+}
+
+/// One dependency, as cargo read it from a manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CargoDependency {
+    /// The manifest that declares it, relative to the tree.
+    manifest: String,
+    /// The package cargo resolves: the `package =` value when there is one,
+    /// whatever the key says.
+    name: String,
+    /// The version requirement as cargo normalised it — `=0.13.3`, `^1`, `*`.
+    req: String,
+    /// Where a path dependency points, relative to the tree when it is inside
+    /// it; none for a registry or git dependency.
+    path: Option<String>,
+}
+
+/// What cargo reads every manifest in a tree as: its packages and what each
+/// depends on, from `cargo metadata --no-deps` in every workspace the tree
+/// holds.
+#[derive(Debug, Default)]
+struct CargoView {
+    /// Every package, as `(name, version, manifest relative to the tree)`.
+    packages: Vec<(String, String, String)>,
+    /// Every dependency every package declares, in any table, for any target.
+    dependencies: Vec<CargoDependency>,
+    /// A finding for each workspace cargo could not read, since nothing in it
+    /// was checked and a check that goes quiet when its instrument breaks is the
+    /// shape `claims/README.md` exists to prevent.
+    unread: Vec<String>,
+}
+
+/// [`CargoView`] of the tree at `at`, given its manifests (relative paths).
+///
+/// The root first, which is the workspace and every crate cargo makes a member
+/// of it — a path dependency anywhere under the root is one, `docs/` included,
+/// unless `exclude` names it. Then every manifest that view did not cover, from
+/// its own directory: the proof crates, the shim, and anything else that is a
+/// workspace of its own. A manifest cargo will not read from its directory — a
+/// crate inside the root that is neither a member nor excluded — is a finding
+/// rather than a skip.
+///
+/// `--offline` and no `--locked`: `--no-deps` resolves nothing, so it needs no
+/// registry and writes no lockfile, and the shim's view needs none of the
+/// source replacement its build does.
+fn cargo_view(at: &Path, manifests: &[&str]) -> CargoView {
+    let mut view = CargoView::default();
+    let mut asked: Vec<String> = Vec::new();
+    let mut dirs = vec![String::new()];
+    dirs.extend(
+        manifests
+            .iter()
+            .filter(|rel| **rel != "Cargo.toml")
+            .map(|rel| rel.strip_suffix("/Cargo.toml").unwrap_or(rel).to_string()),
+    );
+    fn text_of<'a>(value: &'a Json, key: &str) -> Option<&'a str> {
+        value.get(key).and_then(Json::text)
+    }
+    for dir in dirs {
+        let manifest =
+            if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
+        if asked.contains(&dir) || view.packages.iter().any(|(_, _, m)| *m == manifest) {
+            continue;
+        }
+        asked.push(dir.clone());
+        let args = ["metadata", "--no-deps", "--offline", "--format-version", "1"];
+        let text = match capture_in(&at.join(&dir), "cargo", &args) {
+            Ok(text) => text,
+            Err(why) => {
+                view.unread.push(format!(
+                    "  {manifest}  cargo could not read the workspace here, so nothing it names \
+                     was checked against IMPORT_LINKERS: {why}"
+                ));
+                continue;
+            }
+        };
+        let Some(json) = parse_json(&text) else {
+            view.unread.push(format!("  {manifest}  cargo metadata printed something not JSON"));
+            continue;
+        };
+        for package in json.get("packages").map_or(&[][..], Json::items) {
+            let own = tree_relative(at, text_of(package, "manifest_path").unwrap_or_default());
+            if view.packages.iter().any(|(_, _, m)| *m == own) {
+                continue;
+            }
+            view.packages.push((
+                text_of(package, "name").unwrap_or_default().to_string(),
+                text_of(package, "version").unwrap_or_default().to_string(),
+                own.clone(),
+            ));
+            for dependency in package.get("dependencies").map_or(&[][..], Json::items) {
+                view.dependencies.push(CargoDependency {
+                    manifest: own.clone(),
+                    name: text_of(dependency, "name").unwrap_or_default().to_string(),
+                    req: text_of(dependency, "req").unwrap_or_default().to_string(),
+                    path: text_of(dependency, "path").map(|path| tree_relative(at, path)),
+                });
+            }
+        }
+    }
+    view
+}
+
+/// `path`, which cargo prints absolute, relative to the tree at `at` when it is
+/// inside it, with forward slashes.
+fn tree_relative(at: &Path, path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let base = at.to_string_lossy().replace('\\', "/");
+    path.strip_prefix(&format!("{}/", base.trim_end_matches('/'))).unwrap_or(&path).to_string()
+}
+
+/// A `[patch]` or `[replace]` table in a cargo manifest or configuration file,
+/// in any spelling cargo reads: a header, with or without spaces and quotes,
+/// or a top-level key, dotted or holding an inline table.
+///
+/// **Prohibited rather than inspected**, in every permissive manifest and in
+/// the configuration files the shim's build reads. Either table points a
+/// crate's name at another copy without changing a character of the row that
+/// names it, so the row `IMPORT_LINKERS` checks is still `harfrust = "=0.13.3"`
+/// while cargo builds whatever the table says — and `cargo metadata --no-deps`
+/// does not report either table, so cargo's view cannot stand in for this.
+/// Measured on 2026-09-26: a `[replace]` in `user/shaper/Cargo.toml` naming a
+/// copy under `docs/`, and a `[patch.crates-io]` in a `.cargo/config.toml`, each
+/// built the shim from an unverified HarfRust with every lint green (RFC 0141).
+/// No manifest in this tree has either table; the day one needs one, it is an
+/// argument in an RFC and a row somewhere, not a relaxation here.
+fn patch_table_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut top_level = true;
+    for (n, line) in text.lines().enumerate() {
+        let code = strip_toml_comment(line);
+        let trimmed = code.trim();
+        let path =
+            if let Some(head) = trimmed.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+                top_level = false;
+                toml_key_path(head.trim_start_matches('[').trim_end_matches(']'))
+            } else if let Some((key, _)) = trimmed.split_once('=')
+                && top_level
+            {
+                toml_key_path(key)
+            } else {
+                continue;
+            };
+        if let Some(table) =
+            path.first().filter(|first| matches!(first.as_str(), "patch" | "replace"))
+        {
+            findings.push(format!(
+                "  {rel}:{}  a `[{table}]` table: it points a crate's name at another copy without \
+                 changing the row that names it, which is how the shim can link a HarfRust \
+                 nothing verified — prohibited in every permissive manifest and in the \
+                 configuration the shim's build reads (RFC 0141)",
+                n + 1
+            ));
+        }
+    }
+    findings
+}
+
+/// The registry every crate of a source import was vendored from, as a
+/// lockfile spells it.
+const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+/// The shim's `Cargo.lock` against the import's: what `--locked` holds the
+/// shim's build to is what `lint-licensing` verified.
+///
+/// Every package in the shim's lockfile is one of two things. **This tree's
+/// own**: no `source`, and either the shim itself or a package cargo's view of
+/// the tree has at that name and version (`f-abi`, `f-text`, …). **Or the
+/// import's**: the crates.io source, and the checksum the import's own
+/// `Cargo.lock` records — which [`imported::import_findings`] has already held
+/// to the PROVENANCE row and to the vendored crate's checksum file. A `replace`
+/// row, a git source, a path package that is not this tree's, or a checksum the
+/// import does not record is red.
+///
+/// This is the anchor the `[patch]` refusal is the belt for: `shaper::cargo`
+/// passes `--locked`, so cargo refuses to build from a resolution that differs
+/// from this file, and this file is refused if it resolves anything the import
+/// did not vendor. Measured: a `[replace]` or `[patch]` pointing `harfrust` at a
+/// copy under `docs/` is a `--locked` refusal until the lockfile is rewritten,
+/// and the rewritten lockfile names `harfrust` without a source.
+fn shim_lock_findings(
+    lock_rel: &str,
+    shim_lock: Option<&str>,
+    import_rel: &str,
+    import_lock: Option<&str>,
+    shim: &str,
+    local: &[(String, String)],
+) -> Vec<String> {
+    let (Some(shim_lock), Some(import_lock)) = (shim_lock, import_lock) else {
+        return vec![format!(
+            "  {lock_rel}  and {import_rel}/Cargo.lock must both be here: `--locked` holds the \
+             shim's build to the first, and the second is what the first is checked against"
+        )];
+    };
+    let vendored = imported::lock_checksums(import_lock);
+    let mut findings = Vec::new();
+    for package in imported::lock_packages(shim_lock) {
+        let id = format!("{} {}", package.name, package.version);
+        if let Some(replaced) = &package.replace {
+            findings.push(format!(
+                "  {lock_rel}  resolves `{id}` through a `replace` row (`{replaced}`): the shim \
+                 builds whatever that names, not what the import vendored"
+            ));
+        }
+        match package.source.as_deref() {
+            None => {
+                let ours = package.name == shim
+                    || local.iter().any(|(name, version)| {
+                        *name == package.name && *version == package.version
+                    });
+                if !ours {
+                    findings.push(format!(
+                        "  {lock_rel}  resolves `{id}` from a path, and it is neither the shim nor \
+                         a crate of this tree: a copy of an import's crate somewhere cargo was \
+                         pointed at"
+                    ));
+                }
+            }
+            Some(CRATES_IO_SOURCE) => {
+                let key = format!("{}-{}", package.name, package.version);
+                match (vendored.get(&key), package.checksum.as_deref()) {
+                    (Some(want), Some(have)) if want == have => {}
+                    (Some(want), have) => findings.push(format!(
+                        "  {lock_rel}  pins `{id}` at {} and {import_rel}/Cargo.lock records {want}",
+                        have.unwrap_or("no checksum")
+                    )),
+                    (None, _) => findings.push(format!(
+                        "  {lock_rel}  resolves `{id}` from crates.io, and {import_rel} does not \
+                         vendor it: the shim links the import and nothing else from a registry"
+                    )),
+                }
+            }
+            Some(other) => findings.push(format!(
+                "  {lock_rel}  resolves `{id}` from `{other}`: the import's crates come from \
+                 crates.io through its `vendor/` and from nowhere else"
+            )),
+        }
+    }
+    findings
+}
+
+/// [`shim_lock_findings`] for every [`IMPORT_LINKERS`] row of the tree at
+/// `at`, and [`patch_table_findings`] for every cargo configuration file the
+/// row's build reads: `.cargo/config.toml` and `.cargo/config` in the shim's
+/// directory and in every directory above it, inside this tree and outside it,
+/// and in `CARGO_HOME`.
+///
+/// Outside the tree only the two tables are judged. The other redirects —
+/// `[source]`, `[env]`, `rustflags` — are `lint-boundary`'s prohibition inside
+/// the tree, and outside it they are the machine's: a CI runner's registry
+/// mirror is not this tree's business, a `[patch]` of a vendored crate is.
+fn linker_lock_findings(
+    at: &Path,
+    view: &CargoView,
+    linkers: &[(&str, &str, &str, &str)],
+    home: Option<&Path>,
+) -> Vec<String> {
+    let mut findings = Vec::new();
+    let local: Vec<(String, String)> = view
+        .packages
+        .iter()
+        .filter(|(_, _, manifest)| !manifest.split('/').any(|part| part == IMPORTED))
+        .map(|(name, version, _)| (name.clone(), version.clone()))
+        .collect();
+    for (manifest, import, ..) in linkers {
+        let dir = manifest.strip_suffix("/Cargo.toml").unwrap_or(manifest);
+        let shim = view
+            .packages
+            .iter()
+            .find(|(_, _, m)| m == manifest)
+            .map_or("", |(name, _, _)| name.as_str());
+        let read = |rel: &str| std::fs::read_to_string(at.join(rel)).ok();
+        let lock_rel = format!("{dir}/Cargo.lock");
+        findings.extend(shim_lock_findings(
+            &lock_rel,
+            read(&lock_rel).as_deref(),
+            import,
+            read(&format!("{import}/Cargo.lock")).as_deref(),
+            shim,
+            &local,
+        ));
+        let mut configs: Vec<PathBuf> = Vec::new();
+        for ancestor in at.join(dir).ancestors() {
+            configs.push(ancestor.join(".cargo").join("config.toml"));
+            configs.push(ancestor.join(".cargo").join("config"));
+        }
+        if let Some(home) = home {
+            configs.push(home.join("config.toml"));
+            configs.push(home.join("config"));
+        }
+        for config in configs {
+            let Ok(text) = std::fs::read_to_string(&config) else { continue };
+            let shown = tree_relative(at, &config.to_string_lossy());
+            findings.extend(patch_table_findings(&shown, &text));
+        }
+    }
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+/// Where cargo keeps its own configuration on this machine: `CARGO_HOME`, or
+/// `~/.cargo` when that is unset.
+fn cargo_home() -> Option<PathBuf> {
+    match std::env::var_os("CARGO_HOME") {
+        Some(home) if !home.is_empty() => Some(PathBuf::from(home)),
+        _ => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".cargo")),
+    }
+}
+
+/// [`IMPORT_CHECKSUMS`] against every vendored crate of the tree at `at`, in
+/// both directions: each crate's `.cargo-checksum.json` hashes to its row, and
+/// each row names a crate that is there.
+fn checksum_anchor_findings(at: &Path, crates: &[String], table: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for krate in crates {
+        let file = format!("{krate}/.cargo-checksum.json");
+        let Some((_, want)) = table.iter().find(|(row, _)| row == krate) else {
+            findings.push(format!(
+                "  {krate}  is vendored and has no row in IMPORT_CHECKSUMS, so its checksum file \
+                 vouches for itself"
+            ));
+            continue;
+        };
+        match std::fs::read(at.join(&file)) {
+            Ok(bytes) => {
+                let have = imported::sha256_hex(&bytes);
+                if have != *want {
+                    findings.push(format!(
+                        "  {file}  hashes to {have} and IMPORT_CHECKSUMS records {want}: a \
+                         vendored file was changed together with the list that vouches for it, \
+                         or the import was replaced without its row"
+                    ));
+                }
+            }
+            Err(e) => findings.push(format!("  {file}  cannot be read: {e}")),
+        }
+    }
+    for (row, _) in table {
+        if !crates.iter().any(|krate| krate == row) {
+            findings.push(format!(
+                "  {row}  is a row of IMPORT_CHECKSUMS and no crate is vendored there"
+            ));
+        }
+    }
+    findings
+}
+
+/// A JSON document, as much of one as `cargo metadata` needs read.
+///
+/// A parser, where [`cargo_view_findings`] searches cargo's output for two
+/// tokens, because the question here has structure: *which* manifest names
+/// *which* crate at *what* requirement and by *what* path, and a token search
+/// cannot keep a dependency apart from the package it belongs to. Its producer
+/// is cargo, so the grammar is the whole of JSON with nothing to tolerate; a
+/// document that does not parse is `None`, which the caller reports.
+#[derive(Debug, Clone, PartialEq)]
+enum Json {
+    Null,
+    Bool(bool),
+    /// A number, kept as its text: nothing here does arithmetic on one.
+    Number(String),
+    Str(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// The value under `key`, if this is an object that has one.
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// The string this is, if it is one.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Json::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The items of this array, or none.
+    fn items(&self) -> &[Json] {
+        match self {
+            Json::Array(items) => items,
+            _ => &[],
+        }
+    }
+}
+
+/// Parse one JSON document, all of it.
+fn parse_json(text: &str) -> Option<Json> {
+    let mut chars = text.chars().peekable();
+    let value = json_value(&mut chars)?;
+    json_space(&mut chars);
+    chars.next().is_none().then_some(value)
+}
+
+type JsonChars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+fn json_space(chars: &mut JsonChars) {
+    while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+        chars.next();
+    }
+}
+
+fn json_word(chars: &mut JsonChars, word: &str, value: Json) -> Option<Json> {
+    word.chars().all(|want| chars.next() == Some(want)).then_some(value)
+}
+
+fn json_value(chars: &mut JsonChars) -> Option<Json> {
+    json_space(chars);
+    match *chars.peek()? {
+        '{' => {
+            chars.next();
+            let mut fields = Vec::new();
+            json_space(chars);
+            if chars.peek() == Some(&'}') {
+                chars.next();
+                return Some(Json::Object(fields));
+            }
+            loop {
+                json_space(chars);
+                let key = json_string(chars)?;
+                json_space(chars);
+                (chars.next()? == ':').then_some(())?;
+                fields.push((key, json_value(chars)?));
+                json_space(chars);
+                match chars.next()? {
+                    ',' => {}
+                    '}' => return Some(Json::Object(fields)),
+                    _ => return None,
+                }
+            }
+        }
+        '[' => {
+            chars.next();
+            let mut items = Vec::new();
+            json_space(chars);
+            if chars.peek() == Some(&']') {
+                chars.next();
+                return Some(Json::Array(items));
+            }
+            loop {
+                items.push(json_value(chars)?);
+                json_space(chars);
+                match chars.next()? {
+                    ',' => {}
+                    ']' => return Some(Json::Array(items)),
+                    _ => return None,
+                }
+            }
+        }
+        '"' => json_string(chars).map(Json::Str),
+        't' => json_word(chars, "true", Json::Bool(true)),
+        'f' => json_word(chars, "false", Json::Bool(false)),
+        'n' => json_word(chars, "null", Json::Null),
+        _ => {
+            let mut number = String::new();
+            while let Some(&c) = chars.peek() {
+                if !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')) {
+                    break;
+                }
+                number.push(c);
+                chars.next();
+            }
+            (!number.is_empty()).then_some(Json::Number(number))
+        }
+    }
+}
+
+fn json_string(chars: &mut JsonChars) -> Option<String> {
+    (chars.next()? == '"').then_some(())?;
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'b' => out.push('\u{8}'),
+                'f' => out.push('\u{c}'),
+                'u' => {
+                    let unit = json_hex4(chars)?;
+                    let scalar = if (0xD800..0xDC00).contains(&unit) {
+                        // A surrogate pair: the low half follows as `\uXXXX`.
+                        (chars.next()? == '\\' && chars.next()? == 'u').then_some(())?;
+                        let low = json_hex4(chars)?;
+                        0x10000 + ((unit - 0xD800) << 10) + (low.checked_sub(0xDC00)? & 0x3FF)
+                    } else {
+                        unit
+                    };
+                    out.push(char::from_u32(scalar)?);
+                }
+                other => out.push(other),
+            },
+            other => out.push(other),
+        }
+    }
+}
+
+fn json_hex4(chars: &mut JsonChars) -> Option<u32> {
+    let hex: String = (0..4).map(|_| chars.next()).collect::<Option<String>>()?;
+    u32::from_str_radix(&hex, 16).ok()
+}
+
+/// `IMPORT_LINKERS` and RFC 0082's three properties, each driven red by the
+/// input it exists to refuse. RFC 0141.
+#[cfg(test)]
+mod import_linker_rows {
+    use super::{
+        CargoView, FIXTURE_DIR, IMPORT_CHECKSUMS, IMPORT_HOST_CODE, IMPORT_LINKERS, LINKERS_MAX,
+        SHAPE_PROTOCOL, build_surface_findings, cargo_view, checksum_anchor_findings,
+        host_code_findings, import_component_findings, linker_lock_findings, linker_row_findings,
+        parse_json, patch_table_findings, relative, root, shim_lock_findings, target_dir,
+    };
+    use std::collections::BTreeMap;
+
+    const ROOT: &str = "[workspace]\nmembers = [\"text\"]\nresolver = \"3\"\n\
+        exclude = [\"kernel/proofs\", \"third_party\", \"user/shaper\"]\n";
+    const SHIM: &str = "[package]\nname = \"f-shaper\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
+        [workspace]\n[dependencies]\n\
+        harfrust = { version = \"=0.13.3\", default-features = false, features = [\"libm\"] }\n";
+    const TEXT: &str = "[package]\nname = \"f-text\"\nversion = \"0.0.1\"\nedition = \"2024\"\n";
+    const ROW: (&str, &str, &str, &str) =
+        ("user/shaper/Cargo.toml", "third_party/harfrust", "harfrust", "the shim");
+
+    fn vendored() -> BTreeMap<String, Vec<(String, String)>> {
+        let mut out = BTreeMap::new();
+        out.insert(
+            "third_party/harfrust".to_string(),
+            vec![
+                ("harfrust".to_string(), "0.13.3".to_string()),
+                ("read-fonts".to_string(), "0.43.3".to_string()),
+                ("bytemuck_derive".to_string(), "1.12.1".to_string()),
+            ],
+        );
+        out
+    }
+
+    /// A tree on disk — a workspace, its `text` crate, the shim and whatever
+    /// `extra` adds — with every crate's `src/lib.rs`, and cargo's view of it.
+    /// On disk rather than as strings because the view is cargo's: a fixture
+    /// that handed the check a parse of its own would test the fixture.
+    fn tree(name: &str, root: &str, shim: &str, text: &str, extra: &[(&str, &str)]) -> Checked {
+        let at = target_dir().join(FIXTURE_DIR).join(format!("linkers-{name}"));
+        let _ = std::fs::remove_dir_all(&at);
+        let mut files: Vec<(&str, &str)> =
+            vec![("Cargo.toml", root), ("user/shaper/Cargo.toml", shim), ("text/Cargo.toml", text)];
+        files.extend_from_slice(extra);
+        let mut manifests = Vec::new();
+        for (rel, body) in &files {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("fixture dir");
+            std::fs::write(&path, body).expect("fixture file");
+            if let Some(dir) = rel.strip_suffix("Cargo.toml") {
+                manifests.push((rel.to_string(), body.to_string()));
+                if !body.starts_with("[workspace]") {
+                    let lib = at.join(dir).join("src/lib.rs");
+                    std::fs::create_dir_all(lib.parent().expect("src")).expect("src dir");
+                    std::fs::write(lib, "").expect("lib.rs");
+                }
+            }
+        }
+        let rels: Vec<&str> = manifests.iter().map(|(rel, _)| rel.as_str()).collect();
+        let view = cargo_view(&at, &rels);
+        Checked { manifests, view }
+    }
+
+    struct Checked {
+        manifests: Vec<(String, String)>,
+        view: CargoView,
+    }
+
+    impl Checked {
+        fn findings(&self, linkers: &[(&str, &str, &str, &str)]) -> Vec<String> {
+            let texts: Vec<(&str, &str)> =
+                self.manifests.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
+            linker_row_findings(&texts, &self.view, &vendored(), linkers)
+        }
+    }
+
+    fn red(findings: &[String], needle: &str) {
+        assert!(
+            findings.iter().any(|f| f.contains(needle)),
+            "no finding containing `{needle}` in {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn the_shape_the_rule_admits_reports_nothing() {
+        let checked = tree("admitted", ROOT, SHIM, TEXT, &[]);
+        assert_eq!(checked.findings(&[ROW]), Vec::<String>::new());
+        assert!(checked.view.unread.is_empty(), "{:?}", checked.view.unread);
+    }
+
+    #[test]
+    fn the_tree_this_ships_with_holds() {
+        // Every permissive manifest, as `lint-licensing` reads them, and
+        // cargo's own view of the same tree.
+        let texts: Vec<(String, String)> = super::manifests()
+            .expect("the tree's manifests")
+            .iter()
+            .map(|path| (relative(path), std::fs::read_to_string(path).expect("a manifest")))
+            .collect();
+        let view: Vec<(&str, &str)> = texts.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
+        let rels: Vec<&str> = view.iter().map(|(r, _)| *r).collect();
+        let cargo = cargo_view(&root(), &rels);
+        let vendored = super::imported::source_crates(&root());
+        assert_eq!(
+            linker_row_findings(&view, &cargo, &vendored, IMPORT_LINKERS),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            linker_lock_findings(&root(), &cargo, IMPORT_LINKERS, None),
+            Vec::<String>::new()
+        );
+        assert_eq!(IMPORT_LINKERS.len(), LINKERS_MAX, "the one row RFC 0141 admits is present");
+        // The shim's own view is part of it: cargo read it as its own workspace.
+        assert!(cargo.dependencies.iter().any(|d| d.manifest == IMPORT_LINKERS[0].0));
+    }
+
+    #[test]
+    fn the_row_removed_leaves_the_shim_a_manifest_naming_the_import() {
+        red(&tree("removed", ROOT, SHIM, TEXT, &[]).findings(&[]), "takes `harfrust`");
+    }
+
+    #[test]
+    fn a_second_row_is_a_second_argument() {
+        let second = ("text/Cargo.toml", "third_party/harfrust", "read-fonts", "wider");
+        let text = format!("{TEXT}[dependencies]\nread-fonts = {{ version = \"=0.43.3\" }}\n");
+        red(&tree("second", ROOT, SHIM, &text, &[]).findings(&[ROW, second]), "RFC 0141 admits 1");
+    }
+
+    #[test]
+    fn the_row_is_one_crate_at_one_version_by_name() {
+        let range = SHIM.replace("\"=0.13.3\"", "\"0.13\"");
+        red(&tree("range", ROOT, &range, TEXT, &[]).findings(&[ROW]), "`version = \"=0.13.3\"`");
+        let by_path = SHIM.replace(
+            "version = \"=0.13.3\"",
+            "path = \"../../vendored/harfrust-0.13.3\", version = \"=0.13.3\"",
+        );
+        let copy = "[package]\nname = \"harfrust\"\nversion = \"0.13.3\"\nedition = \"2021\"\n\
+            [features]\nlibm = []\n";
+        red(
+            &tree(
+                "by-path",
+                ROOT,
+                &by_path,
+                TEXT,
+                &[("vendored/harfrust-0.13.3/Cargo.toml", copy)],
+            )
+            .findings(&[ROW]),
+            "by path",
+        );
+        let wider = format!("{SHIM}read-fonts = \"=0.43.3\"\n");
+        red(&tree("wider", ROOT, &wider, TEXT, &[]).findings(&[ROW]), "does not name");
+        let absent = SHIM.replace("harfrust = ", "harfbuzz = ");
+        red(&tree("absent", ROOT, &absent, TEXT, &[]).findings(&[ROW]), "says nothing");
+        let admitted = tree("rows", ROOT, SHIM, TEXT, &[]);
+        let data = ("user/shaper/Cargo.toml", "third_party/inter", "harfrust", "data");
+        red(&admitted.findings(&[data]), "not a source import");
+        let unlisted = ("user/shaper/Cargo.toml", "third_party/harfrust", "skrifa", "later");
+        red(&admitted.findings(&[unlisted]), "does not list");
+    }
+
+    /// Every spelling of a second crate linking the import, each one cargo
+    /// reads — which is the point: the three at the end are the ones a line
+    /// reader missed, and each is now what cargo says rather than what a
+    /// pattern matched.
+    /// One case of the test below: its name, the `text` crate's manifest, the
+    /// root's, and any further files.
+    type Spelling<'a> = (&'a str, String, &'a str, &'a [(&'a str, &'a str)]);
+
+    #[test]
+    fn a_second_crate_linking_the_import_is_refused_by_every_spelling() {
+        let lnk = "[package]\nname = \"lnk\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
+            [dependencies]\nread-fonts = \"=0.43.3\"\n";
+        let cases: [Spelling; 10] = [
+            ("by-name", format!("{TEXT}[dependencies]\nharfrust = \"=0.13.3\"\n"), ROOT, &[]),
+            (
+                "by-rename",
+                format!(
+                    "{TEXT}[dependencies]\nshaping = {{ version = \"1\", package = \"harfrust\" }}\n"
+                ),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-section",
+                format!("{TEXT}[dependencies.read-fonts]\nversion = \"=0.43.3\"\n"),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-dotted-key",
+                format!("{TEXT}[dev-dependencies]\nread_fonts.version = \"=0.43.3\"\n"),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-target-table",
+                format!("{TEXT}[target.'cfg(unix)'.dependencies]\n\"bytemuck_derive\" = \"1\"\n"),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-the-workspace",
+                format!("{TEXT}[dependencies]\nharfrust.workspace = true\n"),
+                "[workspace]\nmembers = [\"text\"]\nresolver = \"3\"\n\
+                 exclude = [\"third_party\", \"user/shaper\"]\n\
+                 [workspace.dependencies]\nharfrust = { version = \"=0.13.3\" }\n",
+                &[],
+            ),
+            (
+                "by-top-level-dotted-key",
+                format!("dependencies.harfrust = {{ version = \"=0.13.3\" }}\n{TEXT}"),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-spaced-header",
+                format!("{TEXT}[dependencies . harfrust]\nversion = \"=0.13.3\"\n"),
+                ROOT,
+                &[],
+            ),
+            (
+                "by-a-crate-under-docs",
+                format!("{TEXT}[dependencies]\nlnk = {{ path = \"docs/lnk\" }}\n"),
+                ROOT,
+                &[("text/docs/lnk/Cargo.toml", lnk)],
+            ),
+            (
+                "by-patch",
+                TEXT.to_string(),
+                "[workspace]\nmembers = [\"text\"]\nresolver = \"3\"\n\
+                 exclude = [\"third_party\", \"user/shaper\"]\n\
+                 [patch.crates-io]\nread-fonts = { path = \"elsewhere\" }\n",
+                &[],
+            ),
+        ];
+        for (spelling, text, root, extra) in cases {
+            let checked = tree(spelling, root, SHIM, &text, extra);
+            let findings = checked.findings(&[ROW]);
+            let named = if spelling == "by-a-crate-under-docs" {
+                "  text/docs/lnk/Cargo.toml  takes `read-fonts`"
+            } else if spelling == "by-patch" {
+                "  Cargo.toml:"
+            } else {
+                "  text/Cargo.toml  takes `"
+            };
+            assert!(findings.iter().any(|f| f.starts_with(named)), "{spelling}: {findings:#?}");
+        }
+    }
+
+    #[test]
+    fn a_crate_that_takes_the_shim_takes_the_import_one_hop_away() {
+        let text = format!("{TEXT}[dependencies]\nf-shaper = {{ path = \"../user/shaper\" }}\n");
+        red(&tree("one-hop", ROOT, SHIM, &text, &[]).findings(&[ROW]), "one hop away");
+    }
+
+    #[test]
+    fn a_manifest_cargo_cannot_read_is_a_finding_and_not_a_skip() {
+        // Inside the root, neither a member nor excluded: cargo refuses it.
+        let stray = "[package]\nname = \"stray\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
+            [dependencies]\nharfrust = \"=0.13.3\"\n";
+        let checked = tree("stray", ROOT, SHIM, TEXT, &[("tools/stray/Cargo.toml", stray)]);
+        red(&checked.findings(&[ROW]), "tools/stray/Cargo.toml  cargo could not read");
+    }
+
+    #[test]
+    fn the_code_the_import_runs_on_the_build_machine_is_named_and_read() {
+        let found = super::imported::host_code(&root());
+        assert_eq!(host_code_findings(&found, IMPORT_HOST_CODE), Vec::<String>::new());
+        assert_eq!(found.len(), IMPORT_HOST_CODE.len());
+
+        // A fifth arriving with a re-import, and a row left behind by one that left.
+        let mut more = found.clone();
+        more.push(("third_party/harfrust/vendor/cc-1.0.0".to_string(), "a build script"));
+        red(&host_code_findings(&more, IMPORT_HOST_CODE), "cc-1.0.0  is a build script");
+        red(
+            &host_code_findings(&found[1..], IMPORT_HOST_CODE),
+            "runs nothing on the build machine",
+        );
+    }
+
+    #[test]
+    fn the_linker_and_the_import_stay_outside_the_workspace() {
+        let member = ROOT.replace("\"text\"]", "\"text\", \"user/shaper\"]");
+        red(
+            &tree("member", &member, SHIM, TEXT, &[]).findings(&[ROW]),
+            "must exclude `user/shaper`",
+        );
+        let open = ROOT.replace("\"third_party\", ", "");
+        red(&tree("open", &open, SHIM, TEXT, &[]).findings(&[ROW]), "must exclude `third_party`");
+    }
+
+    // ---------------------------------------------------------------------
+    // Where the shim's HarfRust resolves from: the lockfile, and the tables
+    // that would point its name somewhere else. RFC 0141, audit 1's first
+    // finding.
+    // ---------------------------------------------------------------------
+
+    const IMPORT_LOCK: &str = "version = 4\n\n[[package]]\nname = \"harfrust\"\n\
+        version = \"0.13.3\"\n\
+        source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+        checksum = \"948d0741125ba89cd3e1c23e5642415b6ade7e1d29d67ba25fb925b533e989d6\"\n";
+
+    fn shim_lock(harfrust: &str) -> String {
+        format!(
+            "version = 4\n\n[[package]]\nname = \"f-abi\"\nversion = \"0.0.1\"\n\n\
+             [[package]]\nname = \"f-shaper\"\nversion = \"0.0.1\"\ndependencies = [\n \
+             \"f-abi\",\n \"harfrust\",\n]\n\n[[package]]\n{harfrust}"
+        )
+    }
+
+    const VERIFIED: &str = "name = \"harfrust\"\nversion = \"0.13.3\"\n\
+        source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+        checksum = \"948d0741125ba89cd3e1c23e5642415b6ade7e1d29d67ba25fb925b533e989d6\"\n";
+
+    fn lock(text: &str) -> Vec<String> {
+        let local = [("f-abi".to_string(), "0.0.1".to_string())];
+        shim_lock_findings(
+            "user/shaper/Cargo.lock",
+            Some(text),
+            "third_party/harfrust",
+            Some(IMPORT_LOCK),
+            "f-shaper",
+            &local,
+        )
+    }
+
+    #[test]
+    fn the_shims_lockfile_resolves_the_import_and_this_tree_and_nothing_else() {
+        assert_eq!(lock(&shim_lock(VERIFIED)), Vec::<String>::new());
+        // What `[replace]` and `[patch]` each write, measured.
+        let replaced = shim_lock(&format!(
+            "{VERIFIED}replace = \"harfrust 0.13.3\"\n\n\
+            [[package]]\nname = \"harfrust\"\nversion = \"0.13.3\"\n"
+        ));
+        red(&lock(&replaced), "through a `replace` row");
+        red(&lock(&replaced), "from a path, and it is neither the shim nor a crate of this tree");
+        let patched = shim_lock("name = \"harfrust\"\nversion = \"0.13.3\"\n");
+        red(&lock(&patched), "from a path, and it is neither");
+        let git = shim_lock(
+            "name = \"harfrust\"\nversion = \"0.13.3\"\nsource = \"git+https://example.invalid\"\n",
+        );
+        red(&lock(&git), "from `git+https://example.invalid`");
+        let other = shim_lock(&VERIFIED.replace("948d07", "000000"));
+        red(&lock(&other), "and third_party/harfrust/Cargo.lock records 948d07");
+        let unvendored = shim_lock(&VERIFIED.replace("0.13.3", "0.13.4"));
+        red(&lock(&unvendored), "does not vendor it");
+        red(
+            &shim_lock_findings("user/shaper/Cargo.lock", None, "x", Some(IMPORT_LOCK), "f", &[]),
+            "must both be here",
+        );
+    }
+
+    #[test]
+    fn a_patch_or_replace_table_is_refused_in_every_spelling_cargo_reads() {
+        for (spelling, text) in [
+            (
+                "a header",
+                "[package]\nname = \"x\"\n[patch.crates-io]\nharfrust = { path = \"d\" }\n",
+            ),
+            ("a spaced, quoted header", "[ patch . \"crates-io\" ]\nharfrust = { path = \"d\" }\n"),
+            ("a top-level dotted key", "patch.crates-io.harfrust = { path = \"d\" }\n[package]\n"),
+            ("a top-level inline table", "replace = { \"harfrust:0.13.3\" = { path = \"d\" } }\n"),
+            ("a replace header", "[replace]\n\"harfrust:0.13.3\" = { path = \"../../docs/h\" }\n"),
+        ] {
+            assert!(!patch_table_findings("m/Cargo.toml", text).is_empty(), "{spelling}");
+        }
+        // A crate called `patch` is a dependency, not a table.
+        let crate_named_patch = "[package]\nname = \"x\"\n[dependencies]\npatch = \"1\"\n";
+        assert_eq!(patch_table_findings("m/Cargo.toml", crate_named_patch), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_patch_in_the_configuration_the_shims_build_reads_is_refused() {
+        let at = target_dir().join(FIXTURE_DIR).join("linkers-config-patch");
+        let _ = std::fs::remove_dir_all(&at);
+        let home = at.join("home");
+        for (rel, text) in [
+            ("user/shaper/.cargo/config.toml", "[patch.crates-io]\nharfrust = { path = \"d\" }\n"),
+            ("user/.cargo/config", "patch.crates-io.harfrust = { path = \"d\" }\n"),
+            ("home/config.toml", "[replace]\n\"harfrust:0.13.3\" = { path = \"d\" }\n"),
+        ] {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+            std::fs::write(path, text).expect("config");
+        }
+        let findings = linker_lock_findings(&at, &CargoView::default(), &[ROW], Some(&home));
+        for needle in [
+            "  user/shaper/.cargo/config.toml:1  a `[patch]` table",
+            "  user/.cargo/config:1  a `[patch]` table",
+            "  home/config.toml:1  a `[replace]` table",
+        ] {
+            red(&findings, needle);
+        }
+    }
+
+    #[test]
+    fn the_configuration_surface_reads_every_spelling_of_a_redirect() {
+        let at = target_dir().join(FIXTURE_DIR).join("linkers-config-spellings");
+        let _ = std::fs::remove_dir_all(&at);
+        for (rel, text) in [
+            (".cargo/config", "[patch.crates-io]\nunicode-ident = { path = \"v\" }\n"),
+            ("a/.cargo/config.toml", "source.crates-io.replace-with = \"v\"\n"),
+            ("b/.cargo/config.toml", "[ source . crates-io ]\nreplace-with = \"v\"\n"),
+            ("c/.cargo/config.toml", "build = { rustflags = [\"-L\", \"v\"] }\n"),
+            ("d/docs/.cargo/config.toml", "[env]\nX = \"v\"\n"),
+            ("e/target/.cargo/config.toml", "[env]\nX = \"v\"\n"),
+        ] {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+            std::fs::write(path, text).expect("config");
+        }
+        let findings = build_surface_findings(&at, &[]);
+        for needle in [
+            "  .cargo/config:2  `patch.crates-io.unicode-ident` redirects",
+            "  a/.cargo/config.toml:1  `source.crates-io.replace-with` redirects",
+            "  b/.cargo/config.toml:2  `source.crates-io.replace-with` redirects",
+            "  c/.cargo/config.toml:1  `build.rustflags` redirects",
+            "  d/docs/.cargo/config.toml:2  `env.X` redirects",
+            "  e/target/.cargo/config.toml:2  `env.X` redirects",
+        ] {
+            red(&findings, needle);
+        }
+    }
+
+    #[test]
+    fn a_build_directory_is_skipped_only_where_cargo_writes_one() {
+        let at = target_dir().join(FIXTURE_DIR).join("linkers-walker");
+        let _ = std::fs::remove_dir_all(&at);
+        for (rel, text) in [
+            ("Cargo.toml", "[workspace]\nexclude = [\"proofs\"]\n"),
+            ("proofs/target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n"),
+            ("proofs/target/.cargo/config.toml", "[env]\nX = \"v\"\n"),
+            ("text/target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n"),
+            ("text/target/.cargo/config.toml", "[env]\nX = \"v\"\n"),
+        ] {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+            std::fs::write(path, text).expect("file");
+        }
+        let findings = build_surface_findings(&at, &[]);
+        red(&findings, "  text/target/.cargo/config.toml:2");
+        assert!(!findings.iter().any(|f| f.contains("proofs/target")), "{findings:#?}");
+    }
+
+    // ---------------------------------------------------------------------
+    // The checksum files, anchored outside the import.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_checksum_file_is_anchored_outside_the_crate_it_vouches_for() {
+        let crates = super::imported::vendored_crate_dirs(&root());
+        assert_eq!(
+            checksum_anchor_findings(&root(), &crates, IMPORT_CHECKSUMS),
+            Vec::<String>::new()
+        );
+        assert_eq!(crates.len(), IMPORT_CHECKSUMS.len());
+
+        let at = target_dir().join(FIXTURE_DIR).join("linkers-anchors");
+        let _ = std::fs::remove_dir_all(&at);
+        let krate = "third_party/s/vendor/foo-1.0.0";
+        std::fs::create_dir_all(at.join(krate)).expect("dir");
+        std::fs::write(at.join(krate).join(".cargo-checksum.json"), "{\"files\":{}}").expect("w");
+        let want = super::imported::sha256_hex(b"{\"files\":{}}");
+        let crates = vec![krate.to_string()];
+        assert_eq!(checksum_anchor_findings(&at, &crates, &[(krate, &want)]), Vec::<String>::new());
+        // The file and the list it vouches for, edited together.
+        std::fs::write(at.join(krate).join(".cargo-checksum.json"), "{\"files\":{\"a\":\"b\"}}")
+            .expect("w");
+        red(&checksum_anchor_findings(&at, &crates, &[(krate, &want)]), "hashes to");
+        red(&checksum_anchor_findings(&at, &crates, &[]), "has no row in IMPORT_CHECKSUMS");
+        red(&checksum_anchor_findings(&at, &[], &[(krate, &want)]), "no crate is vendored there");
+    }
+
+    #[test]
+    fn cargo_metadata_is_read_as_json() {
+        let json = parse_json(
+            "{\"a\":[1,-2.5e3,true,false,null],\"b\":{\"c\":\"x\\\"y\\u00e9\\ud83d\\ude00\"}}",
+        )
+        .expect("JSON");
+        assert_eq!(json.get("a").map(|a| a.items().len()), Some(5));
+        assert_eq!(
+            json.get("b").and_then(|b| b.get("c")).and_then(super::Json::text),
+            Some("x\"y\u{e9}\u{1F600}")
+        );
+        assert!(parse_json("{\"a\":1,}").is_none(), "a trailing comma");
+        assert!(parse_json("{\"a\":1} x").is_none(), "something after the document");
+    }
+
+    /// A manifest with RFC 0082's three properties and nothing else, for the
+    /// property check to be driven red one property at a time.
+    const COMPONENT: &str = "schema = 5\nname = \"shaper\"\nimage = \"user/shaper\"\n\
+        domain = \"private\"\n\
+        [[capability]]\nname = \"heap\"\ntype = \"untyped\"\nrights = [\"read\"]\n\
+        from = \"supervisor\"\nbytes = 4096\n\
+        [[capability]]\nname = \"self\"\ntype = \"endpoint\"\nrights = [\"write\"]\n\
+        from = \"supervisor\"\n\
+        [[ring]]\nname = \"shape\"\nrole = \"server\"\nprotocol = \"shape\"\n";
+
+    const PROTOCOL: &str = "pub struct Glyph {\n    pub x_advance_design_units: i32,\n}\n";
+
+    fn component(text: &str, protocol: Option<&str>) -> Vec<String> {
+        let texts = vec![("user/shaper/manifest.toml".to_string(), text.to_string())];
+        import_component_findings(&texts, &[ROW], protocol)
+    }
+
+    #[test]
+    fn the_three_properties_hold_on_a_manifest_that_has_them() {
+        assert_eq!(component(COMPONENT, Some(PROTOCOL)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_tree_this_ships_with_has_the_three_properties() {
+        let rel = "user/shaper/manifest.toml";
+        let text = std::fs::read_to_string(root().join(rel)).expect("the shaper's manifest");
+        let protocol = std::fs::read_to_string(root().join(SHAPE_PROTOCOL)).expect("the protocol");
+        let findings =
+            import_component_findings(&[(rel.to_string(), text)], IMPORT_LINKERS, Some(&protocol));
+        assert_eq!(findings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_handle_a_clock_could_reach_it_through_is_refused() {
+        let irq = format!(
+            "{COMPONENT}[[capability]]\nname = \"tick\"\ntype = \"irq\"\nrights = []\n\
+             from = \"supervisor\"\n"
+        );
+        red(&component(&irq, Some(PROTOCOL)), "`tick` is `irq`");
+        let device = format!("{COMPONENT}[[device]]\nvendor = 0x1af4\ndevice = 0x1041\n");
+        red(&component(&device, Some(PROTOCOL)), "binds a `[[device]]`");
+        let ask = format!(
+            "{COMPONENT}[[capability]]\nname = \"clock\"\ntype = \"endpoint\"\nrights = []\n\
+             from = \"powerbox\"\n"
+        );
+        red(&component(&ask, Some(PROTOCOL)), "powerbox ask");
+        let window = format!(
+            "{COMPONENT}[[capability]]\nname = \"window\"\ntype = \"frame\"\nrights = []\n\
+             from = \"supervisor\"\nframes = 1\n"
+        );
+        red(&component(&window, Some(PROTOCOL)), "`window` is `frame`");
+        // A handle from a sibling is a route the supervisor did not route: an
+        // endpoint to whoever holds a clock, or memory another component writes.
+        let sibling = format!(
+            "{COMPONENT}[[capability]]\nname = \"clock\"\ntype = \"endpoint\"\nrights = []\n\
+             from = \"sibling:input\"\n"
+        );
+        red(&component(&sibling, Some(PROTOCOL)), "`clock` is from `sibling:input`");
+        let shared = format!(
+            "{COMPONENT}[[capability]]\nname = \"page\"\ntype = \"untyped\"\nrights = [\"read\"]\n\
+             from = \"sibling:store\"\nbytes = 4096\n"
+        );
+        red(&component(&shared, Some(PROTOCOL)), "`page` is from `sibling:store`");
+    }
+
+    #[test]
+    fn its_own_allocator_is_sized_in_its_own_manifest() {
+        let none = COMPONENT.replace("name = \"heap\"", "name = \"scratch\"");
+        red(&component(&none, Some(PROTOCOL)), "0 `heap` capabilities");
+        let no_bytes = COMPONENT.replace("bytes = 4096\n", "");
+        red(&component(&no_bytes, Some(PROTOCOL)), "`heap` must be `untyped`");
+    }
+
+    #[test]
+    fn only_integers_cross_the_ring() {
+        let other = COMPONENT.replace("protocol = \"shape\"", "protocol = \"scene\"");
+        red(&component(&other, Some(PROTOCOL)), "RFC 0082's third property");
+        // The float types are spelled at run time, so that this file names none.
+        for width in [16, 32, 64, 128] {
+            let float = PROTOCOL.replace("i32", &format!("f{width}"));
+            red(&component(COMPONENT, Some(&float)), &format!("names `f{width}`"));
+        }
+        red(&component(COMPONENT, None), "is not here");
+        let shared = COMPONENT.replace("\"private\"", "\"shared\"");
+        red(&component(&shared, Some(PROTOCOL)), "rule 4");
+        let texts = vec![
+            ("user/shaper/manifest.toml".to_string(), COMPONENT.to_string()),
+            ("user/other/manifest.toml".to_string(), COMPONENT.to_string()),
+        ];
+        let findings = import_component_findings(&texts, &[ROW], Some(PROTOCOL));
+        red(&findings, "built into 2 component image(s)");
+    }
+}
+
+/// The strings of a one- or many-line TOML array `key = [...]`, from the first
+/// line that opens it. Comments are stripped first.
+fn toml_list(text: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut open = false;
+    for line in text.lines() {
+        let code = strip_toml_comment(line);
+        let trimmed = code.trim_start();
+        if !open {
+            if let Some(rest) = toml_array_opens(trimmed, key) {
+                out.extend(toml_strings(rest));
+                if rest.contains(']') {
+                    return out;
+                }
+                open = true;
+            }
+        } else {
+            out.extend(toml_strings(&code));
+            if code.contains(']') {
+                return out;
+            }
+        }
+    }
+    out
+}
+
 /// One TOML line with any comment removed, quotes respected.
 ///
 /// Both quote characters, because TOML has two string kinds and a check that
@@ -22484,17 +24309,6 @@ fn cargo_view_findings(at: &Path) -> Vec<String> {
     findings
 }
 
-/// Net three: the surfaces that are prohibited rather than inspected.
-///
-/// A build script, a symlink and a configuration row each reach the imported
-/// tree without leaving a route in any source, so there is nothing for a matcher
-/// to match. Refusing the mechanism closes the family; chasing its traces closes
-/// one spelling. RFC 0092.
-///
-/// `flags` is passed rather than read from the environment so that a fixture can
-/// hand this function a `RUSTFLAGS` value without mutating the process it runs
-/// in — the test harness is threaded, and a lint that only works when nothing
-/// else is running is not a lint.
 /// Whether a `.cargo/config.toml` row can redirect a build.
 ///
 /// `table` is the last `[…]` header seen, so `build` plus `rustflags` reads as
@@ -22502,14 +24316,79 @@ fn cargo_view_findings(at: &Path) -> Vec<String> {
 /// spelling cargo’s own documentation uses and the one a reader can search the
 /// file for.
 ///
-/// Two whole tables are redirects whatever their leaf key is. `[env]` sets a
+/// Four whole tables are redirects whatever their leaf key is. `[env]` sets a
 /// variable every build step reads, and `[source]` replaces where a dependency
-/// comes from without changing a character of the manifest that names it.
-fn config_row_redirects(table: &str, key: &str) -> bool {
-    CONFIG_REDIRECTS.contains(&key)
-        || table == "env"
-        || table == "source"
-        || table.starts_with("source.")
+/// comes from without changing a character of the manifest that names it;
+/// `[patch]` and `[replace]` do the same to one crate at a time, and cargo reads
+/// both from a configuration file as well as from a manifest — which is how the
+/// shim could be pointed at a copy of HarfRust nothing had verified while every
+/// lint stayed green (RFC 0141).
+///
+/// `path` is the row's whole key, header and all, as [`toml_key_path`] reads it,
+/// so a header written `[ source . crates-io ]` and a top-level dotted
+/// `source.crates-io.replace-with` are the one table they are to cargo. For a
+/// round both were read as some other table, and passed.
+fn config_row_redirects(path: &[String]) -> bool {
+    let first = path.first().map_or("", String::as_str);
+    let leaf = path.last().map_or("", String::as_str);
+    CONFIG_REDIRECTS.contains(&leaf) || matches!(first, "env" | "source" | "patch" | "replace")
+}
+
+/// A TOML key or table header as its segments: split at the dots outside
+/// quotes, each segment trimmed of the whitespace TOML allows around a dot and
+/// of its quotes. `[ source . "crates-io" ]` and `source.crates-io` are one
+/// path, which is what cargo reads them as.
+fn toml_key_path(text: &str) -> Vec<String> {
+    let clean = |part: &str| part.trim().trim_matches(['"', '\'']).to_string();
+    let mut out = Vec::new();
+    let mut part = String::new();
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        match (quote, c) {
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                part.push(c);
+            }
+            (Some(open), _) if c == open => {
+                quote = None;
+                part.push(c);
+            }
+            (None, '.') => {
+                out.push(clean(&part));
+                part.clear();
+            }
+            _ => part.push(c),
+        }
+    }
+    out.push(clean(&part));
+    out
+}
+
+/// The keys an inline table on one row sets, at any depth, each as a path
+/// relative to the row: in `build = { rustflags = […] }` that is `rustflags`.
+/// Keys only — an `=` inside a string is a value's — and nested tables are read
+/// flat, so `{ a = { b = 1 } }` is `a` and `b`, each a leaf the prohibition
+/// judges; that is coarser than cargo and it errs toward refusing.
+fn inline_table_keys(value: &str) -> Vec<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (at, c) in value.char_indices() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(open), _) if c == open => quote = None,
+            (None, '{' | ',') => start = at + 1,
+            (None, '=') => {
+                let key = value[start..at].trim();
+                if !key.is_empty() {
+                    keys.push(toml_key_path(key));
+                }
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    keys
 }
 
 /// One `.cargo/config.toml` under the permissive tree, judged twice.
@@ -22531,33 +24410,48 @@ fn config_row_redirects(table: &str, key: &str) -> bool {
 /// *key* and rejecting it on the key is what sees that: the continuation
 /// `"-C", "code-model=kernel",` carries an `=` and sets nothing.
 ///
-/// *Reversal:* a configuration written as dotted keys — `build.rustflags = […]`
-/// with no `[build]` header — is read here as the bare key `build.rustflags`,
-/// which is the same string the allow-list carries, so it is caught; but
-/// `[target]` followed by `x86_64-unknown-none.rustflags` composes a third
-/// spelling this function would not match against the allow-list and would
-/// therefore refuse. Refusing is the safe direction, and the repair is an
-/// allow-list row rather than a parser.
+/// A key is read as its whole path — the header's segments and the row's, each
+/// trimmed of spaces and quotes by [`toml_key_path`] — so `build.rustflags =
+/// […]` with no header, `[build]` then `rustflags`, and `[target]` then
+/// `x86_64-unknown-none.rustflags` are each the one dotted string the
+/// allow-list carries; and an inline table's keys are rows of their own, so
+/// `build = { rustflags = […] }` is `build.rustflags` and `patch = { … }` is a
+/// `[patch]` table. *Reversal:* a key split across the lines of a multi-line
+/// inline value, which TOML does not allow and cargo refuses to parse.
 fn config_findings(rel: &str, text: &str) -> Vec<String> {
     let mut findings = Vec::new();
-    let mut table = String::new();
+    let mut table: Vec<String> = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let code = strip_toml_comment(line);
         let trimmed = code.trim();
         if let Some(head) = trimmed.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
-            table = head.trim().to_string();
+            table = toml_key_path(head.trim_start_matches('[').trim_end_matches(']'));
             continue;
         }
-        if let Some((key, _)) = trimmed.split_once('=') {
-            let key = key.trim().trim_matches(['"', '\'']);
-            let dotted = if table.is_empty() { key.to_string() } else { format!("{table}.{key}") };
-            let allowed = CONFIG_ALLOW.iter().any(|(file, row, _)| *file == rel && *row == dotted);
-            if config_row_redirects(&table, key) && !allowed {
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let mut row = table.clone();
+            row.extend(toml_key_path(key));
+            let mut paths = vec![row.clone()];
+            if value.contains('{') {
+                paths.extend(inline_table_keys(value).into_iter().map(|inner| {
+                    let mut path = row.clone();
+                    path.extend(inner);
+                    path
+                }));
+            }
+            for path in paths {
+                let dotted = path.join(".");
+                let allowed =
+                    CONFIG_ALLOW.iter().any(|(file, row, _)| *file == rel && *row == dotted);
+                if !config_row_redirects(&path) || allowed {
+                    continue;
+                }
                 findings.push(format!(
                     "  {rel}:{}  `{dotted}` redirects the build, and configuration is prohibited \
-                     rather than inspected: a `[source]` replacement, an `[env]` row, a linker \
-                     wrapper or a relative `-L` reaches the import without naming it; \
-                     `CONFIG_ALLOW` is where a row that has an argument goes",
+                     rather than inspected: a `[source]` replacement, a `[patch]` or `[replace]` \
+                     table, an `[env]` row, a linker wrapper or a relative `-L` reaches the \
+                     import without naming it; `CONFIG_ALLOW` is where a row that has an \
+                     argument goes",
                     n + 1
                 ));
             }
@@ -22574,6 +24468,17 @@ fn config_findings(rel: &str, text: &str) -> Vec<String> {
     findings
 }
 
+/// Net three: the surfaces that are prohibited rather than inspected.
+///
+/// A build script, a symlink and a configuration row each reach the imported
+/// tree without leaving a route in any source, so there is nothing for a matcher
+/// to match. Refusing the mechanism closes the family; chasing its traces closes
+/// one spelling. RFC 0092.
+///
+/// `flags` is passed rather than read from the environment so that a fixture can
+/// hand this function a `RUSTFLAGS` value without mutating the process it runs
+/// in — the test harness is threaded, and a lint that only works when nothing
+/// else is running is not a lint.
 fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
     let mut findings = Vec::new();
     let build = target_dir();
@@ -22597,7 +24502,7 @@ fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
                 continue;
             }
             if path.is_dir() {
-                if !walker_skips(&name, &path, &build) {
+                if !walker_skips(&name, &path, at, &build) {
                     stack.push(path);
                 }
                 continue;
@@ -22608,7 +24513,10 @@ fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
                      machine to its crate through `OUT_DIR` or point the linker into the import"
                 ));
             }
-            if name == "config.toml"
+            // `config` as well as `config.toml`: cargo reads the file without
+            // the extension too — deprecated, with a `warning:` line, but read —
+            // and for a round only the spelling with it was judged (RFC 0141).
+            if (name == "config.toml" || name == "config")
                 && dir.file_name().and_then(|n| n.to_str()) == Some(".cargo")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
@@ -22685,7 +24593,12 @@ fn compiled_file_findings(at: &Path, build: &Path) -> Result<(Vec<String>, usize
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
             if path.is_dir() {
-                if path.file_name().and_then(|n| n.to_str()) != Some(FIXTURE_DIR) {
+                // The shim's build is walked as a pair of its own, against its
+                // own directory — its dep-info is relative to it — so the
+                // workspace's walk does not read it a second time against the
+                // wrong base.
+                let shim = path == shaper::build_dir() && at != shaper::dir().as_path();
+                if path.file_name().and_then(|n| n.to_str()) != Some(FIXTURE_DIR) && !shim {
                     stack.push(path);
                 }
                 continue;
@@ -22968,7 +24881,13 @@ fn warm_the_proof_crates(at: &Path, roots: &[(PathBuf, PathBuf)]) -> Result<usiz
         if tree == at || holds_dep_info(build) {
             continue;
         }
-        run_in(tree, "cargo", &["check", "--quiet"])?;
+        if *tree == shaper::dir() {
+            // Resolved from the vendored import, which only `shaper::cargo`
+            // knows how to ask for.
+            shaper::cargo(&["check", "--quiet"], None)?;
+        } else {
+            run_in(tree, "cargo", &["check", "--quiet"])?;
+        }
         built += 1;
     }
     Ok(built)
@@ -23032,6 +24951,20 @@ fn boundary_roots(at: &Path, build: &Path) -> Vec<(PathBuf, PathBuf)> {
             let own = dir.join("target");
             roots.push((dir, own));
         }
+    }
+    // The shim, which is its own workspace for the proof crates' reason and one
+    // of its own (RFC 0141), so its dep-info is written relative to its own
+    // directory. It is the one tree here that *does* compile imported source, so
+    // it is the one where this net has the most to say: every dep-info in it must
+    // be wholly the import's — HarfRust and its crates — or wholly this tree's,
+    // and a crate of the shim's that named a file under the import would be the
+    // mixed dep-info this net refuses.
+    let shim = shaper::dir();
+    if at == root().as_path()
+        && build == target_dir().as_path()
+        && shim.join("Cargo.toml").is_file()
+    {
+        roots.push((shim, shaper::build_dir()));
     }
     roots
 }
@@ -23864,8 +25797,51 @@ fn lint_licensing() -> Result<(), String> {
     let manifest_view: Vec<(&str, &str)> =
         manifest_texts.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
     let graph = licensing_graph_findings(&manifest_view);
+    // Cargo's own reading of every workspace in the tree, which is what the
+    // linker rows are checked against rather than a scan of lines (RFC 0141).
+    let rels: Vec<&str> = manifest_view.iter().map(|(rel, _)| *rel).collect();
+    let cargo = cargo_view(&root(), &rels);
+    let mut linkers = linker_row_findings(
+        &manifest_view,
+        &cargo,
+        &imported::source_crates(&root()),
+        IMPORT_LINKERS,
+    );
+    linkers.extend(linker_lock_findings(&root(), &cargo, IMPORT_LINKERS, cargo_home().as_deref()));
+    let host = host_code_findings(&imported::host_code(&root()), IMPORT_HOST_CODE);
+    let vendored_dirs = imported::vendored_crate_dirs(&root());
+    let anchors = checksum_anchor_findings(&root(), &vendored_dirs, IMPORT_CHECKSUMS);
 
     let mut problems = String::new();
+    if !anchors.is_empty() {
+        problems.push_str(&format!(
+            "{} finding(s) against IMPORT_CHECKSUMS, the anchor outside each vendored crate for \
+             the checksum file inside it:\n{}\n\n\
+             A vendored file changed together with its `.cargo-checksum.json` is otherwise \
+             green (RFC 0141).\n",
+            anchors.len(),
+            anchors.join("\n")
+        ));
+    }
+    if !linkers.is_empty() {
+        problems.push_str(&format!(
+            "{} finding(s) against IMPORT_LINKERS, the one permissive manifest admitted to link \
+             an import:\n{}\n\n\
+             The exception is the shaper's shim and nothing wider (RFC 0141).\n",
+            linkers.len(),
+            linkers.join("\n")
+        ));
+    }
+    if !host.is_empty() {
+        problems.push_str(&format!(
+            "\n{} finding(s) against IMPORT_HOST_CODE, the import's code that runs on the build \
+             machine:\n{}\n\n\
+             A procedural macro or a build script in an import is accepted as the import's code \
+             once it is named and read — not by default (RFC 0141).\n",
+            host.len(),
+            host.join("\n")
+        ));
+    }
     if !missing.is_empty() {
         problems.push_str(&format!(
             "{} licence header finding(s) — every file opens with `{PERMISSIVE_SPDX}` \
@@ -23950,9 +25926,12 @@ fn lint_licensing() -> Result<(), String> {
     if problems.is_empty() {
         let derived = DERIVED_DATA.len();
         println!(
-            "lint-licensing: ok  ({} manifest(s) carry no path into {IMPORTED}/, \
-             {sources} source(s) neither name it nor compile it)",
-            manifest_view.len()
+            "lint-licensing: ok  ({} manifest(s) carry no path into {IMPORTED}/; {} \
+             IMPORT_LINKERS row(s) take one vendored crate by name at one version, and no \
+             other manifest names any crate an import vendors; {sources} source(s) neither \
+             name it nor compile it)",
+            manifest_view.len(),
+            IMPORT_LINKERS.len()
         );
         println!(
             "lint-licensing: spdx ok  ({} source(s) open with the permissive line exactly; \
@@ -23967,12 +25946,28 @@ fn lint_licensing() -> Result<(), String> {
         println!(
             "lint-licensing: imports ok  ({} imported tree(s) carry LICENSE and PROVENANCE.md; \
              {} file(s), {} byte(s), each the size and SHA-256 recorded; {} self-stated \
-             version(s) agree)",
-            seen.trees, seen.files, seen.bytes, seen.versions
+             version(s) agree; {} vendored crate(s) held to their row, their lockfile and \
+             their own checksum file)",
+            seen.trees, seen.files, seen.bytes, seen.versions, seen.crates
         );
         println!(
             "lint-licensing: tooling ok  (every reader under a TOOLING prefix is named in that \
              row's reason)"
+        );
+        println!(
+            "lint-licensing: host code ok  ({} crate(s) of an import run on the build machine, \
+             each a row of IMPORT_HOST_CODE, and every row one of them)",
+            IMPORT_HOST_CODE.len()
+        );
+        println!(
+            "lint-licensing: resolution ok  ({} dependency row(s) read as cargo reads them, in \
+             {} package(s); the shim's lockfile resolves only this tree's crates and the \
+             import's, at its checksums; no [patch] or [replace] in any manifest or in the \
+             configuration the shim's build reads; {} checksum file(s) anchored in \
+             IMPORT_CHECKSUMS)",
+            cargo.dependencies.len(),
+            cargo.packages.len(),
+            vendored_dirs.len()
         );
         println!(
             "lint-licensing: tables ok  ({compared} generated table(s) are byte-identical to what \
@@ -25779,14 +27774,16 @@ f-text = { path = \"text\" }
     /// command against, which is the same defect as a guard nothing kills, one
     /// document over.
     ///
-    /// The second assertion is the more interesting one: both files must be
+    /// The second assertion was, until `E3-B03b0`, that both files were
     /// **absent**, because that absence is what RFC 0082's *What cannot be
-    /// observed on the day this is accepted* asserts. The day the import task
-    /// lands either of them this test goes red, and the repair is to rewrite
-    /// that section rather than to relax this — an RFC that still says a file
-    /// does not exist after it does is the citation hazard RFC 0084 records.
+    /// observed on the day this is accepted* asserted — and the test said that
+    /// the day the import task landed either of them it would go red and the
+    /// repair would be to rewrite that section rather than relax the assertion.
+    /// It went red on 2026-09-26, and that is what was done: the section now
+    /// opens by saying both files exist and naming RFC 0141, and this asserts
+    /// both halves of that — the files are there, and the RFC says so.
     #[test]
-    fn the_two_files_rfc_0082_owes_are_named_by_path_and_are_not_there_yet() {
+    fn the_two_files_rfc_0082_owes_are_named_by_path_and_are_there() {
         let owed =
             ["user/shaper/manifest.toml", "abi/src/shape.rs"].map(|rel| (rel, root().join(rel)));
         let rfc = root()
@@ -25801,11 +27798,15 @@ f-text = { path = \"text\" }
                  one `test -f` per file to discharge the clause"
             );
             assert!(
-                !path.exists(),
-                "`{rel}` exists, and RFC 0082 still says it does not. The import task has \
-                 landed part of the entry: rewrite that section rather than this assertion"
+                path.exists(),
+                "`{rel}` is gone, and RFC 0082's *What cannot be observed* opens by saying it \
+                 exists (RFC 0141). Rewrite that paragraph rather than this assertion"
             );
         }
+        assert!(
+            text.contains("Superseded on 2026-09-26 by `E3-B03b0` and RFC 0141"),
+            "RFC 0082 still says the two files it owes do not exist"
+        );
     }
 
     #[test]

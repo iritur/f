@@ -24,9 +24,12 @@
 //! count intact, which is not — and that module is written around the second
 //! one.
 //!
-//! Where the shaper itself comes from is `E3-B03a`'s decision, and if the
-//! answer is *imported* then it arrives behind the licence boundary and is
-//! reached over a ring rather than by a dependency row here. RFC 0003.
+//! The shaper itself is imported (RFC 0082): HarfRust, behind the licence
+//! boundary in a component of its own (`user/shaper`), answering the `shape`
+//! protocol in `f_abi::shape` with glyphs and design-unit positions. It is
+//! reached over a ring and not by a dependency row here, and this crate still
+//! has none; [`face`] is the admission a face passes before the shaper is
+//! handed it. RFC 0141.
 //!
 //! [`bidi_class`], [`bidi_brackets`], [`line_break`], [`grapheme_break`],
 //! [`east_asian_width`], [`general_category`], [`indic_conjunct_break`] and
@@ -50,9 +53,10 @@
 //!
 //! [`paragraph`] is the three composed: a text set in lines at the
 //! opportunities [`line`] offers, measured by a [`metric::Pen`], and each line
-//! shown in the order [`bidi`] gives it. The shaper's answer is a parameter,
-//! because RFC 0082's import has not landed and a width invented here would be
-//! this crate pretending it had (`E3-B03k`).
+//! shown in the order [`bidi`] gives it. The shaper's answer is a parameter:
+//! the import has landed (`E3-B03b0`), and a width is what a caller holding a
+//! `shape` reply passes in, rather than something this crate reaches across a
+//! ring for (`E3-B03k`).
 
 #![no_std]
 

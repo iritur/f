@@ -37,9 +37,10 @@
 //!
 //! # The shaper's seat
 //!
-//! RFC 0082 put the shaper behind the licence boundary and it has not landed,
-//! so nothing in this tree can say how wide a run of scalars is in a real face.
-//! This module does not pretend to: [`Setting::set`] takes the answer as a
+//! RFC 0082 put the shaper behind the licence boundary. When this was written it
+//! had not landed; since `E3-B03b0` it has (`user/shaper`, RFC 0141), and it is
+//! still on the far side of a ring this crate does not hold — so this module
+//! still does not measure a run itself: [`Setting::set`] takes the answer as a
 //! parameter — *how many design units does this run advance the pen* — and
 //! calls it once per segment between two opportunities, in logical order, with
 //! the segment's trailing spaces asked about separately. Per segment rather
