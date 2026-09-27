@@ -23,7 +23,24 @@ members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", 
 # put there. Three directories that differ only in what they link is a shape
 # rather than a finding, and a fourth would be the moment to ask whether the
 # shared half wants a name.
-exclude = ["kernel/proofs", "ring/proofs", "abi/proofs"]
+#
+# `third_party` is the row RFC 0082 owed since 2026-09-15, and it is a different
+# kind of exclusion from the three above: not a crate with a toolchain of its
+# own, but a tree cargo must never make a member of. Cargo adds a path dependency
+# under the workspace root to the workspace automatically unless this list names
+# it, so without the row the first permissive crate to take an imported crate by
+# path would put that crate under this workspace's lint table and licence field
+# with nobody having decided anything. With it, cargo refuses the membership and
+# `lint-licensing` is left guarding only the link.
+#
+# `user/shaper` is the one crate that does link an import, and it is excluded
+# for that reason rather than for a toolchain: HarfRust and its thirteen crates
+# resolve from `third_party/harfrust/vendor` through a source replacement only
+# `cargo xtask` passes, so as a member it would put the import into this
+# workspace's lockfile and make every `cargo test --workspace` need the vendored
+# source. It is its own workspace instead, and `IMPORT_LINKERS` in
+# `xtask/src/main.rs` requires both of these rows. RFC 0141.
+exclude = ["kernel/proofs", "ring/proofs", "abi/proofs", "third_party", "user/shaper"]
 
 [workspace.package]
 version = "0.0.1"

@@ -9,76 +9,107 @@
 //! question it settles is whether a component may load a given run of bytes at
 //! all, and the answer has to be decidable before a single byte moves. So the
 //! part of a face this module knows is the part a loader must agree about with
-//! whoever stocked it — a magic, a schema, a design-unit grid, and one advance
-//! per glyph — and nothing else.
+//! whoever stocked it — a magic, a version, a design-unit grid, a glyph count,
+//! and one advance per glyph — and nothing else.
 //!
-//! **It is not a font parser and must not grow into one.** `E3-B03a` decides
-//! where the shaper comes from and `E3-B03e` onwards is where a real table
-//! directory, a `cmap` and a `glyf` arrive. When a shaper lands, the thing it
-//! parses is a face this module has already *admitted*, and the split stays: one
-//! reader decides whether these bytes are the ones the manifest named, another
-//! decides what they mean. Collapsing the two would make the provenance check
-//! depend on a parser's opinion, and a parser is exactly the thing that will one
-//! day be handed a hostile file.
+//! **It is not a font parser and must not grow into one.** The shaper parses a
+//! face (RFC 0082, `user/shaper`), and what it parses is a face this module has
+//! already *admitted*: `f_shaper::shape` refuses an address its manifest does
+//! not declare, hashes the bytes against the address it was asked for, calls
+//! [`Face::read`], and only then hands them to the import.
+//! The split stays — one reader decides whether these bytes are a face this tree
+//! will hold, another decides what they mean — because a provenance check that
+//! depended on a parser's opinion would be a parser, and a parser is exactly the
+//! thing that will one day be handed a hostile file.
 //!
-//! *What would reverse this module:* a real face format arriving whose own
-//! header carries a units-per-em and a glyph count. At that point [`Face::read`]
-//! reads *that* header instead of this one and the format below is deleted
-//! rather than kept beside it — two face formats in one tree is two readers with
-//! different beliefs about one blob, which is the failure RFC 0030 wrote the
-//! component file to avoid one level up.
+//! # The format gave way on the day a real face arrived
+//!
+//! Until `E3-B03b0` this module read a format of its own — an eight-byte magic,
+//! a schema, a grid, a count and a list of advances — and said what would end
+//! it: *a real face format arriving whose own header carries a units-per-em and
+//! a glyph count. At that point `Face::read` reads that header instead of this
+//! one and the format below is deleted rather than kept beside it.* Inter
+//! arrived (`third_party/inter/`, 2,937 glyphs, which the old format's bound of
+//! 1,024 refused), and its own header carries both. So this module now reads
+//! the OpenType font file format — the `sfnt` table directory, and from it
+//! `head`, `hhea`, `maxp` and `hmtx` — and the old format is gone rather than
+//! kept beside it. RFC 0141.
+//!
+//! Four tables and not one more. `head` for the grid and the magic that says
+//! the file is a font; `maxp` for the count; `hhea` and `hmtx` for the advances,
+//! which is what the old format carried and what [`Face::advance_design_units`]
+//! still answers. `cmap`, `glyf`, `GSUB` and `GPOS` are the shaper's.
+//!
+//! **What does not survive the change: *every byte is judged*.** The old format
+//! could say it, because it had no byte a reader did not read. A real face has
+//! hundreds of kilobytes this module never looks at — outlines, layout tables,
+//! hinting programs — so the claim is narrowed to what still holds: every byte
+//! is *named* (the content address covers all of them, which is `E3-B03b`'s
+//! property and was never this module's), the directory is judged whole, every
+//! table it names lies inside the blob, and nothing trails the last table but
+//! the zero padding the format requires. A blob with a byte past that is two
+//! addresses for one face, and is refused, as it was before.
+//!
+//! # Why TrueType outlines and nothing else
+//!
+//! [`Face::read`] admits a file whose `sfntVersion` is `0x00010000` — TrueType
+//! outlines — and refuses `OTTO` (CFF outlines), a collection and every
+//! wrapper. Not because the others are worse: because the one face this tree
+//! holds is TrueType, `cargo xtask lint-licensing` admits a `.ttf` into a data
+//! import only when its first four bytes say so, and a reader that admitted a
+//! format nothing in the tree carries would be a claim with no instance.
+//! *Reversal:* the first CFF face imported, which is one constant here and one
+//! word in that lint's rule, argued in the same diff.
 //!
 //! # Determinism
 //!
 //! No clock, no draw, no map, no float. An advance is a design-unit integer and
 //! [`crate::metric`] is where it stops being one; this module never divides.
 
-/// The first eight bytes of a face.
-///
-/// A blob store holds runs of bytes with no kind in them, so the only thing that
-/// distinguishes a face from an object that happens to be the right length is a
-/// pattern at its front. A blob that is not one is refused rather than read
-/// approximately.
-pub const MAGIC: u64 = 0x465f_4641_4345_0001;
+/// The `sfntVersion` of a font with TrueType outlines: the only kind admitted.
+/// Unit: none — a fixed bit pattern, big-endian in the file.
+pub const SFNT_TRUETYPE: u32 = 0x0001_0000;
 
-/// The schema this build knows, and the only value a face may carry.
-///
-/// One. A later schema is refused rather than read approximately, for
-/// `f_abi::manifest::SCHEMA`'s reason: a reader that guesses at fields it was
-/// not written for is two readers with different beliefs about one face.
-pub const SCHEMA: u32 = 1;
+/// `head.magicNumber`, which every OpenType font carries at the same offset.
+/// Unit: none — a fixed bit pattern.
+pub const HEAD_MAGIC: u32 = 0x5f0f_3cf5;
 
-/// Bytes before the first advance.
-///
-/// Twenty-four, and every one of them is judged. There is no padding here on
-/// purpose — the whole point of the task this serves is that the face's *bytes*
-/// are its name, and a byte nobody reads is a byte two faces can differ in while
-/// hashing to two addresses that mean one thing.
+/// Bytes before the first table record: `sfntVersion`, `numTables` and the
+/// three search fields.
 /// Unit: bytes.
-pub const HEAD_BYTES: usize = 24;
+pub const DIRECTORY_HEAD_BYTES: usize = 12;
 
-/// Bytes in one advance.
+/// Bytes in one table record: a tag, a checksum, an offset and a length.
 /// Unit: bytes.
-pub const ADVANCE_BYTES: usize = 2;
+pub const TABLE_RECORD_BYTES: usize = 16;
 
-/// The most glyphs a face of this format may carry.
+/// Bytes in one `hmtx` long metric: an advance and a left side bearing.
+/// Unit: bytes.
+pub const METRIC_BYTES: usize = 4;
+
+/// The most glyphs a face may carry.
 ///
-/// A thousand and twenty-four, and the bound is here because a length that is a
-/// function of a count read out of the blob is a length the blob's author
-/// chooses. It is not a statement about typography — a real face has far more —
-/// it is a statement about what this format is for, which is a face small enough
-/// that a component can hold one in a buffer it declared. The reversal is the
-/// same one the module comment states: a real face format arrives and this
-/// number goes with the rest of it.
+/// Sixty-five thousand five hundred and thirty-five, which is the format's own
+/// bound — `maxp.numGlyphs` is sixteen bits — and not a number this tree chose.
+/// The old format's 1,024 was a statement about a face small enough to copy
+/// into a buffer a component declared; this reader borrows and copies nothing,
+/// so the only length it computes from a count is checked against the blob's
+/// own length before it is used.
 /// Unit: glyphs.
-pub const GLYPHS_MAX: usize = 1024;
+pub const GLYPHS_MAX: usize = u16::MAX as usize;
+
+/// The smallest design-unit grid this build will believe.
+///
+/// Sixteen, which is the OpenType specification's lower bound for
+/// `head.unitsPerEm` and [`crate::metric::UPEM_MIN`]: a face this module admits
+/// is one the metric module can scale.
+/// Unit: design units per em.
+pub const UNITS_PER_EM_MIN: u32 = 16;
 
 /// The largest design-unit grid this build will believe.
 ///
-/// Sixteen thousand three hundred and eighty-four, which is what a font format's
-/// units-per-em is bounded at wherever anybody here has read one. Zero is
-/// refused because every advance in the face would then be a division by it the
-/// moment [`crate::metric`] scaled one.
+/// Sixteen thousand three hundred and eighty-four, the specification's upper
+/// bound for `head.unitsPerEm` and [`crate::metric::UPEM_MAX`].
 /// Unit: design units per em.
 pub const UNITS_PER_EM_MAX: u32 = 16_384;
 
@@ -89,20 +120,28 @@ pub const UNITS_PER_EM_MAX: u32 = 16_384;
 /// a refusal somebody debugs by bisecting a blob.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
-    /// Shorter than a head, or a length the head's own count does not agree
-    /// with — in either direction.
+    /// Shorter than its directory, a table that runs past the end, a table too
+    /// short for the fields read from it, or bytes after the last table other
+    /// than its zero padding.
     Truncated,
-    /// The first eight bytes are not [`MAGIC`]. Not a face.
+    /// Not a font with TrueType outlines: the `sfntVersion` is something else,
+    /// or `head.magicNumber` is not [`HEAD_MAGIC`].
     NotAFace,
-    /// A schema this build does not know.
+    /// A table this module reads is written to a version it does not know.
     Schema,
-    /// A count is zero or past [`GLYPHS_MAX`].
+    /// A count is out of range: no tables, no glyphs, or more long metrics
+    /// than glyphs.
     Count,
-    /// A quantity is out of range: a zero units-per-em, or one past
+    /// The design-unit grid is outside [`UNITS_PER_EM_MIN`] to
     /// [`UNITS_PER_EM_MAX`].
     Quantity,
     /// A reserved field is not zero. R04.
     Reserved,
+    /// The directory names a table twice, or out of order — two answers to
+    /// *where is `hmtx`*, which is two readers with different beliefs.
+    Directory,
+    /// A table this module reads is not in the directory.
+    Missing,
 }
 
 impl Refusal {
@@ -111,76 +150,146 @@ impl Refusal {
     pub const fn message(self) -> &'static str {
         match self {
             Self::Truncated => "the blob is not the length the face it declares would be",
-            Self::NotAFace => "the blob does not begin with the face magic",
-            Self::Schema => "the face is written to a schema this build does not know",
-            Self::Count => "the glyph count is zero or past this build's bound",
-            Self::Quantity => "the design-unit grid is zero or past this build's bound",
+            Self::NotAFace => "the blob is not a font with TrueType outlines",
+            Self::Schema => "a table is written to a version this build does not know",
+            Self::Count => "a count in the face is zero or out of range",
+            Self::Quantity => "the design-unit grid is outside the format's bounds",
             Self::Reserved => "a reserved field is not zero",
+            Self::Directory => "the table directory is out of order or names a table twice",
+            Self::Missing => "a table this build reads is not in the face",
         }
     }
+}
+
+/// A big-endian word at `at`, or `None` past the end.
+fn be16(bytes: &[u8], at: usize) -> Option<u16> {
+    let pair = bytes.get(at..at.checked_add(2)?)?;
+    Some(u16::from_be_bytes([pair[0], pair[1]]))
+}
+
+/// A big-endian double word at `at`, or `None` past the end.
+fn be32(bytes: &[u8], at: usize) -> Option<u32> {
+    let quad = bytes.get(at..at.checked_add(4)?)?;
+    Some(u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]]))
 }
 
 /// A face, borrowed out of the bytes a store handed back.
 ///
 /// Nothing is copied and nothing is allocated: the advances stay where the store
 /// left them. That is the property that makes it affordable for a component to
-/// re-read a face rather than cache a parse of it, which matters here for the
-/// reason it matters in `f_abi::manifest` — a cached parse is a second belief
-/// about a blob, and the address names the blob.
-/// Two faces are equal when their grid and their advances are, which is the
-/// only reading that agrees with the address: the bytes are the name, and there
-/// is nothing in this type that is not in the bytes.
+/// re-read a face rather than cache a parse of it — a cached parse is a second
+/// belief about a blob, and the address names the blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Face<'a> {
     /// The design-unit grid. Unit: design units per em.
     units_per_em: u32,
-    /// One advance per glyph, little-endian, as the blob carries them.
+    /// `maxp.numGlyphs`. Unit: glyphs.
+    glyphs: u16,
+    /// `hhea.numberOfHMetrics`. Unit: long metrics.
+    metrics: u16,
+    /// The `hmtx` table, checked long enough for both counts.
     /// Unit: bytes.
-    advances: &'a [u8],
+    hmtx: &'a [u8],
 }
 
 impl<'a> Face<'a> {
     /// Believe a run of bytes, or say why not.
     ///
-    /// The length is checked **exactly**. A trailing byte is a byte no reader
-    /// judges, and the whole of this task is that the bytes are the name: two
-    /// blobs that differ only in a byte nobody reads would hash to two addresses
-    /// naming one face, and then a declaration would not decide anything.
+    /// The directory is judged whole — every record, in order, inside the blob —
+    /// before any table is read, and the blob must end where its last table
+    /// does, padded with zeros to a multiple of four as the format requires.
     ///
     /// # Errors
     ///
     /// A [`Refusal`] naming which disbelief. Fail closed, R04.
     pub fn read(bytes: &'a [u8]) -> Result<Self, Refusal> {
-        let head = bytes.get(..HEAD_BYTES).ok_or(Refusal::Truncated)?;
-        let word = |at: usize| -> u32 {
-            let mut out = [0u8; 4];
-            out.copy_from_slice(&head[at..at + 4]);
-            u32::from_le_bytes(out)
-        };
-        let mut magic = [0u8; 8];
-        magic.copy_from_slice(&head[..8]);
-        if u64::from_le_bytes(magic) != MAGIC {
+        let version = be32(bytes, 0).ok_or(Refusal::Truncated)?;
+        if version != SFNT_TRUETYPE {
             return Err(Refusal::NotAFace);
         }
-        if word(8) != SCHEMA {
-            return Err(Refusal::Schema);
-        }
-        let units_per_em = word(12);
-        if units_per_em == 0 || units_per_em > UNITS_PER_EM_MAX {
-            return Err(Refusal::Quantity);
-        }
-        let glyphs = word(16) as usize;
-        if glyphs == 0 || glyphs > GLYPHS_MAX {
+        let tables = usize::from(be16(bytes, 4).ok_or(Refusal::Truncated)?);
+        if tables == 0 {
             return Err(Refusal::Count);
         }
-        if word(20) != 0 {
-            return Err(Refusal::Reserved);
+        let directory = DIRECTORY_HEAD_BYTES + tables * TABLE_RECORD_BYTES;
+        if bytes.len() < directory {
+            return Err(Refusal::Truncated);
         }
-        let advances = bytes
-            .get(HEAD_BYTES..)
-            .filter(|rest| rest.len() == glyphs * ADVANCE_BYTES)
-            .ok_or(Refusal::Truncated)?;
-        Ok(Self { units_per_em, advances })
+        let mut end = directory;
+        let mut previous: Option<u32> = None;
+        let (mut head, mut hhea, mut hmtx, mut maxp) = (None, None, None, None);
+        for index in 0..tables {
+            let at = DIRECTORY_HEAD_BYTES + index * TABLE_RECORD_BYTES;
+            let tag = be32(bytes, at).ok_or(Refusal::Truncated)?;
+            if previous.is_some_and(|before| before >= tag) {
+                return Err(Refusal::Directory);
+            }
+            previous = Some(tag);
+            let offset = be32(bytes, at + 8).ok_or(Refusal::Truncated)? as usize;
+            let length = be32(bytes, at + 12).ok_or(Refusal::Truncated)? as usize;
+            let stop = offset.checked_add(length).ok_or(Refusal::Truncated)?;
+            let table = bytes.get(offset..stop).ok_or(Refusal::Truncated)?;
+            end = end.max(stop);
+            match &tag.to_be_bytes() {
+                b"head" => head = Some(table),
+                b"hhea" => hhea = Some(table),
+                b"hmtx" => hmtx = Some(table),
+                b"maxp" => maxp = Some(table),
+                _ => {}
+            }
+        }
+        // Nothing after the last table but the format's own padding. The
+        // content address covers these bytes; this is what makes two blobs
+        // that differ only in them two faces rather than one face with two
+        // names.
+        let padded = end.next_multiple_of(4);
+        if bytes.len() != padded || bytes[end..].iter().any(|b| *b != 0) {
+            return Err(Refusal::Truncated);
+        }
+
+        let head = head.ok_or(Refusal::Missing)?;
+        if be16(head, 0).ok_or(Refusal::Truncated)? != 1 {
+            return Err(Refusal::Schema);
+        }
+        if be32(head, 12).ok_or(Refusal::Truncated)? != HEAD_MAGIC {
+            return Err(Refusal::NotAFace);
+        }
+        let units_per_em = u32::from(be16(head, 18).ok_or(Refusal::Truncated)?);
+        if !(UNITS_PER_EM_MIN..=UNITS_PER_EM_MAX).contains(&units_per_em) {
+            return Err(Refusal::Quantity);
+        }
+
+        let maxp = maxp.ok_or(Refusal::Missing)?;
+        if !matches!(be32(maxp, 0).ok_or(Refusal::Truncated)?, 0x0000_5000 | 0x0001_0000) {
+            return Err(Refusal::Schema);
+        }
+        let glyphs = be16(maxp, 4).ok_or(Refusal::Truncated)?;
+        if glyphs == 0 {
+            return Err(Refusal::Count);
+        }
+
+        let hhea = hhea.ok_or(Refusal::Missing)?;
+        if be16(hhea, 0).ok_or(Refusal::Truncated)? != 1 {
+            return Err(Refusal::Schema);
+        }
+        // Four reserved words and `metricDataFormat`, all zero by the
+        // specification's own words.
+        for at in [24, 26, 28, 30, 32] {
+            if be16(hhea, at).ok_or(Refusal::Truncated)? != 0 {
+                return Err(Refusal::Reserved);
+            }
+        }
+        let metrics = be16(hhea, 34).ok_or(Refusal::Truncated)?;
+        if metrics == 0 || metrics > glyphs {
+            return Err(Refusal::Count);
+        }
+
+        let hmtx = hmtx.ok_or(Refusal::Missing)?;
+        let needed = usize::from(metrics) * METRIC_BYTES + usize::from(glyphs - metrics) * 2;
+        if hmtx.len() < needed {
+            return Err(Refusal::Truncated);
+        }
+        Ok(Self { units_per_em, glyphs, metrics, hmtx })
     }
 
     /// The design-unit grid every advance in this face is in.
@@ -194,7 +303,7 @@ impl<'a> Face<'a> {
     /// Unit: glyphs.
     #[must_use]
     pub const fn glyphs(&self) -> usize {
-        self.advances.len() / ADVANCE_BYTES
+        self.glyphs as usize
     }
 
     /// One glyph's advance, or `None` past the count.
@@ -202,38 +311,79 @@ impl<'a> Face<'a> {
     /// `None` and not zero, because zero is a real advance — a combining mark
     /// has one — so a reader that answered zero for a glyph this face does not
     /// carry would be handing back a plausible number for a question it could
-    /// not answer.
+    /// not answer. A glyph past `hhea.numberOfHMetrics` takes the last long
+    /// metric's advance, as the format says.
     /// Unit: design units.
     #[must_use]
     pub fn advance_design_units(&self, glyph: usize) -> Option<u16> {
-        let at = glyph.checked_mul(ADVANCE_BYTES)?;
-        let pair = self.advances.get(at..at + ADVANCE_BYTES)?;
-        Some(u16::from_le_bytes([pair[0], pair[1]]))
+        if glyph >= self.glyphs() {
+            return None;
+        }
+        let index = glyph.min(usize::from(self.metrics) - 1);
+        be16(self.hmtx, index * METRIC_BYTES)
     }
 }
 
-/// How many bytes a face of `glyphs` glyphs occupies.
+// The layout [`compose`] writes: a directory of four records, then the four
+// tables in tag order, each at a multiple of four.
+const HEAD_BYTES: usize = 54;
+const HHEA_BYTES: usize = 36;
+const MAXP_BYTES: usize = 6;
+const COMPOSED_TABLES: usize = 4;
+const COMPOSED_DIRECTORY: usize = DIRECTORY_HEAD_BYTES + COMPOSED_TABLES * TABLE_RECORD_BYTES;
+
+/// How many bytes a face of `glyphs` glyphs occupies as [`compose`] writes it.
 /// Unit: bytes.
 #[must_use]
 pub const fn bytes_for(glyphs: usize) -> usize {
-    HEAD_BYTES + glyphs * ADVANCE_BYTES
+    let head = COMPOSED_DIRECTORY;
+    let hhea = head + HEAD_BYTES.next_multiple_of(4);
+    let hmtx = hhea + HHEA_BYTES;
+    let maxp = hmtx + glyphs * METRIC_BYTES;
+    (maxp + MAXP_BYTES).next_multiple_of(4)
+}
+
+/// The OpenType table checksum: the sum of the table's big-endian words, the
+/// last one padded with zeros.
+fn checksum(table: &[u8]) -> u32 {
+    table.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
 }
 
 /// Write a face into `into`, and answer how long it is.
 ///
+/// # What it writes
+///
+/// The smallest file [`Face::read`] admits: a directory and four tables —
+/// `head`, `hhea`, `hmtx` and `maxp` — with the grid and the advances given and
+/// every other field zero or the specification's fixed value. It has no `cmap`,
+/// no outlines and no layout tables, so no shaper and no rasteriser would do
+/// anything with it; what it is for is *addressing*, and it is a real instance
+/// of the one format this module reads rather than a second format kept beside
+/// it. Its checksums are right, because a file that claimed to be a font with a
+/// wrong one would be a lie about a format this module otherwise tells the
+/// truth about.
+///
 /// # Why a writer is in the permissive tree at all
 ///
-/// Because the thing being demonstrated is *addressing*, and a demonstration
-/// whose subject is a file checked into the tree demonstrates the tree's file
-/// rather than the addressing. A face composed here is a face whose bytes are a
+/// Because the thing being demonstrated is *addressing*, and the frame cannot
+/// reach the face that is not composed. `E3-B03b`'s boot has the frame compose
+/// the declared face and hash it itself; the frame cannot read
+/// `third_party/inter/` (RFC 0081, RFC 0082), so the face whose address it
+/// computes has to be one it can build from constants. A face composed here is a
 /// function of its arguments, so the content address a manifest declares is
 /// reproducible from the source by anybody, on either architecture, with no
-/// binary in the repository — which is what makes the agreement between a
-/// manifest and the component that stocks the face checkable at all.
+/// binary in the repository.
 ///
-/// *What would reverse it:* a real face in `third_party/`, reached over a ring
-/// under RFC 0003. Then the address in a manifest names an imported file, this
-/// function has no caller outside a test, and it goes.
+/// *What would reverse it:* a boot in which the frame checks an address it did
+/// not compute — a face that arrives from outside the build, stocked by a
+/// component and declared by a hash the frame is handed rather than derives.
+/// Then `user/objects/manifest.toml`'s `[[face]]` names an imported file, this
+/// function has no caller outside a test, and it goes. That is `E3-B03b`'s
+/// boot changing shape, and it is not this function's to decide.
 ///
 /// # Errors
 ///
@@ -242,7 +392,7 @@ pub const fn bytes_for(glyphs: usize) -> usize {
 /// believe — checked here rather than written and discovered later, because a
 /// writer that can emit a blob its own reader refuses is a writer that will.
 pub fn compose(into: &mut [u8], units_per_em: u32, advances: &[u16]) -> Result<usize, Refusal> {
-    if units_per_em == 0 || units_per_em > UNITS_PER_EM_MAX {
+    if !(UNITS_PER_EM_MIN..=UNITS_PER_EM_MAX).contains(&units_per_em) {
         return Err(Refusal::Quantity);
     }
     if advances.is_empty() || advances.len() > GLYPHS_MAX {
@@ -250,15 +400,69 @@ pub fn compose(into: &mut [u8], units_per_em: u32, advances: &[u16]) -> Result<u
     }
     let total = bytes_for(advances.len());
     let out = into.get_mut(..total).ok_or(Refusal::Truncated)?;
-    out[..8].copy_from_slice(&MAGIC.to_le_bytes());
-    out[8..12].copy_from_slice(&SCHEMA.to_le_bytes());
-    out[12..16].copy_from_slice(&units_per_em.to_le_bytes());
-    out[16..20].copy_from_slice(&(advances.len() as u32).to_le_bytes());
-    out[20..24].copy_from_slice(&0u32.to_le_bytes());
+    out.fill(0);
+    let glyphs = advances.len() as u16;
+
+    let head_at = COMPOSED_DIRECTORY;
+    let hhea_at = head_at + HEAD_BYTES.next_multiple_of(4);
+    let hmtx_at = hhea_at + HHEA_BYTES;
+    let maxp_at = hmtx_at + advances.len() * METRIC_BYTES;
+    let hmtx_len = advances.len() * METRIC_BYTES;
+
+    // The directory: four tables, so the search fields are those of the
+    // largest power of two not above four — the specification's arithmetic.
+    out[0..4].copy_from_slice(&SFNT_TRUETYPE.to_be_bytes());
+    out[4..6].copy_from_slice(&(COMPOSED_TABLES as u16).to_be_bytes());
+    out[6..8].copy_from_slice(&64u16.to_be_bytes());
+    out[8..10].copy_from_slice(&2u16.to_be_bytes());
+    out[10..12].copy_from_slice(&0u16.to_be_bytes());
+
+    // `head`: version 1.0, revision 1.0, the magic, the grid, and a direction
+    // hint of 2 (the value the specification says to use).
+    let head = &mut out[head_at..head_at + HEAD_BYTES];
+    head[0..2].copy_from_slice(&1u16.to_be_bytes());
+    head[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[12..16].copy_from_slice(&HEAD_MAGIC.to_be_bytes());
+    head[18..20].copy_from_slice(&(units_per_em as u16).to_be_bytes());
+    head[48..50].copy_from_slice(&2i16.to_be_bytes());
+
+    // `hhea`: version 1.0, the widest advance, a caret straight up, and every
+    // long metric one per glyph.
+    let widest = advances.iter().copied().max().unwrap_or(0);
+    let hhea = &mut out[hhea_at..hhea_at + HHEA_BYTES];
+    hhea[0..2].copy_from_slice(&1u16.to_be_bytes());
+    hhea[10..12].copy_from_slice(&widest.to_be_bytes());
+    hhea[18..20].copy_from_slice(&1i16.to_be_bytes());
+    hhea[34..36].copy_from_slice(&glyphs.to_be_bytes());
+
+    // `hmtx`: each advance, and a zero side bearing.
     for (index, advance) in advances.iter().enumerate() {
-        let at = HEAD_BYTES + index * ADVANCE_BYTES;
-        out[at..at + ADVANCE_BYTES].copy_from_slice(&advance.to_le_bytes());
+        let at = hmtx_at + index * METRIC_BYTES;
+        out[at..at + 2].copy_from_slice(&advance.to_be_bytes());
     }
+
+    // `maxp` version 0.5, which is the count and nothing else.
+    out[maxp_at..maxp_at + 4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+    out[maxp_at + 4..maxp_at + 6].copy_from_slice(&glyphs.to_be_bytes());
+
+    let records = [
+        (*b"head", head_at, HEAD_BYTES),
+        (*b"hhea", hhea_at, HHEA_BYTES),
+        (*b"hmtx", hmtx_at, hmtx_len),
+        (*b"maxp", maxp_at, MAXP_BYTES),
+    ];
+    for (index, (tag, at, len)) in records.iter().enumerate() {
+        let sum = checksum(&out[*at..*at + *len]);
+        let record = DIRECTORY_HEAD_BYTES + index * TABLE_RECORD_BYTES;
+        out[record..record + 4].copy_from_slice(tag);
+        out[record + 4..record + 8].copy_from_slice(&sum.to_be_bytes());
+        out[record + 8..record + 12].copy_from_slice(&(*at as u32).to_be_bytes());
+        out[record + 12..record + 16].copy_from_slice(&(*len as u32).to_be_bytes());
+    }
+    // `head.checkSumAdjustment`, over the whole file with the field zero, as
+    // the specification defines it.
+    let adjustment = 0xb1b0_afbau32.wrapping_sub(checksum(out));
+    out[head_at + 8..head_at + 12].copy_from_slice(&adjustment.to_be_bytes());
     Ok(total)
 }
 
@@ -285,10 +489,7 @@ pub fn compose(into: &mut [u8], units_per_em: u32, advances: &[u16]) -> Result<u
 /// its address. Everything about it is real except the permission, which is the
 /// only variable `E3-B03b`'s second clause is about.
 ///
-/// *What would reverse this module:* a face that arrives from outside the build
-/// — RFC 0003's imported font, reached over a ring — at which point the declared
-/// address names an imported file, [`compose`] loses its only non-test caller,
-/// and these constants go with it.
+/// *What would reverse this module:* [`compose`]'s reversal, and the same day.
 pub mod fixture {
     use super::{Refusal, bytes_for, compose};
 
@@ -355,16 +556,18 @@ pub mod fixture {
 const _: () = assert!(fixture::DECLARED.len() == fixture::UNDECLARED.len());
 // And the two things that make `Truncated` the only refusal either writer can
 // answer, which is what their doc comments claim: a grid inside the format's
-// bounds and a glyph count inside them. A fixture that drifted outside would
-// make `fixture::declared` fallible in a way its callers do not handle, and
-// `kernel/src/objects.rs` would report it as a defect in this crate — which it
-// would be, discovered at a boot rather than at a build.
-const _: () = assert!(fixture::UNITS_PER_EM > 0 && fixture::UNITS_PER_EM <= UNITS_PER_EM_MAX);
+// bounds and a glyph count inside them.
+const _: () =
+    assert!(fixture::UNITS_PER_EM >= UNITS_PER_EM_MIN && fixture::UNITS_PER_EM <= UNITS_PER_EM_MAX);
 const _: () = assert!(!fixture::DECLARED.is_empty() && fixture::DECLARED.len() <= GLYPHS_MAX);
 const _: () = assert!(fixture::DECLARED[1] != fixture::UNDECLARED[1]);
 const _: () = assert!(fixture::DECLARED[0] == fixture::UNDECLARED[0]);
 const _: () = assert!(fixture::DECLARED[2] == fixture::UNDECLARED[2]);
 const _: () = assert!(fixture::DECLARED[3] == fixture::UNDECLARED[3]);
+// The bounds this module reads against are the metric module's: a face admitted
+// here is one `crate::metric::Scale` can be built for.
+const _: () = assert!(UNITS_PER_EM_MIN == crate::metric::UPEM_MIN as u32);
+const _: () = assert!(UNITS_PER_EM_MAX == crate::metric::UPEM_MAX as u32);
 
 #[cfg(test)]
 mod tests {
@@ -373,26 +576,28 @@ mod tests {
     /// The face every test here composes, and the one `user/objects` stocks.
     ///
     /// Taken from [`fixture`] rather than spelled again, because a second
-    /// transcription is a second face: these bytes are hashed into
-    /// `user/objects/manifest.toml` and the frame recomputes the same address,
-    /// so a copy that drifted would be a test passing about a face nothing else
-    /// in the tree holds.
+    /// transcription is a second face.
     const ADVANCES: [u16; 4] = fixture::DECLARED;
 
+    /// Room for a composed face, with some to spare for the trailing-byte test.
+    const ROOM: usize = fixture::BYTES + 8;
+
     /// One byte wrong in a composed face, and what reading it should earn.
-    ///
-    /// A named type rather than the tuple spelled at the use site, for the
-    /// reason `f_abi::manifest::tests::Lie` is one: a signature a reader has to
-    /// parse before they can read the cases is a signature in the way.
     type Lie = (&'static str, fn(&mut [u8]), Refusal);
 
     fn composed(into: &mut [u8]) -> usize {
         compose(into, 1000, &ADVANCES).expect("the fixture is one this writer admits")
     }
 
+    /// Where a composed face's four tables start, as `compose` lays them out.
+    const HEAD_AT: usize = COMPOSED_DIRECTORY;
+    const HHEA_AT: usize = HEAD_AT + 56;
+    const HMTX_AT: usize = HHEA_AT + HHEA_BYTES;
+    const MAXP_AT: usize = HMTX_AT + 4 * METRIC_BYTES;
+
     #[test]
     fn a_composed_face_reads_back_as_what_was_written() {
-        let mut buffer = [0u8; 64];
+        let mut buffer = [0u8; ROOM];
         let len = composed(&mut buffer);
         assert_eq!(len, bytes_for(ADVANCES.len()));
         let face = Face::read(&buffer[..len]).expect("a face this writer wrote");
@@ -405,33 +610,82 @@ mod tests {
     }
 
     #[test]
+    fn a_composed_face_carries_the_checksums_the_format_defines() {
+        // The whole file sums to the specification's constant once
+        // `checkSumAdjustment` is in place, and each record's checksum is its
+        // table's.
+        let mut buffer = [0u8; ROOM];
+        let len = composed(&mut buffer);
+        assert_eq!(checksum(&buffer[..len]), 0xb1b0_afba);
+        for index in 0..COMPOSED_TABLES {
+            let record = DIRECTORY_HEAD_BYTES + index * TABLE_RECORD_BYTES;
+            let sum = be32(&buffer, record + 4).expect("a checksum");
+            let at = be32(&buffer, record + 8).expect("an offset") as usize;
+            let length = be32(&buffer, record + 12).expect("a length") as usize;
+            let mut table = [0u8; ROOM];
+            table[..length].copy_from_slice(&buffer[at..at + length]);
+            if &buffer[record..record + 4] == b"head" {
+                table[8..12].fill(0);
+            }
+            assert_eq!(checksum(&table[..length]), sum, "table {index}");
+        }
+    }
+
+    #[test]
     fn every_structural_lie_is_refused() {
         // One byte wrong at a time, because a fixture that breaks two things is
         // caught by whichever check notices first and the check it was written
-        // for stays unexercised. `f_abi::manifest`'s own table says the same.
-        let mut sound = [0u8; 64];
+        // for stays unexercised.
+        let mut sound = [0u8; ROOM];
         let len = composed(&mut sound);
         let cases: &[Lie] = &[
-            ("magic", |b| b[0] ^= 1, Refusal::NotAFace),
-            ("schema", |b| b[8] = 2, Refusal::Schema),
-            ("a zero grid", |b| b[12..16].copy_from_slice(&0u32.to_le_bytes()), Refusal::Quantity),
+            ("a CFF face", |b| b[0..4].copy_from_slice(b"OTTO"), Refusal::NotAFace),
+            ("a collection", |b| b[0..4].copy_from_slice(b"ttcf"), Refusal::NotAFace),
+            ("no tables", |b| b[4..6].copy_from_slice(&0u16.to_be_bytes()), Refusal::Count),
             (
-                "a grid past the bound",
-                |b| b[12..16].copy_from_slice(&(UNITS_PER_EM_MAX + 1).to_le_bytes()),
-                Refusal::Quantity,
-            ),
-            ("no glyphs", |b| b[16..20].copy_from_slice(&0u32.to_le_bytes()), Refusal::Count),
-            (
-                "more glyphs than the bound",
-                |b| b[16..20].copy_from_slice(&(GLYPHS_MAX as u32 + 1).to_le_bytes()),
-                Refusal::Count,
-            ),
-            ("a reserved word", |b| b[20] = 1, Refusal::Reserved),
-            (
-                "a count the blob cannot carry",
-                |b| b[16..20].copy_from_slice(&5u32.to_le_bytes()),
+                "a table past the end",
+                |b| b[12 + 3 * 16 + 12..12 + 3 * 16 + 16].copy_from_slice(&4096u32.to_be_bytes()),
                 Refusal::Truncated,
             ),
+            (
+                "two tables out of order",
+                |b| {
+                    for i in 0..4 {
+                        b.swap(12 + i, 12 + 16 + i);
+                    }
+                },
+                Refusal::Directory,
+            ),
+            ("head's magic", |b| b[HEAD_AT + 12] ^= 1, Refusal::NotAFace),
+            ("head's version", |b| b[HEAD_AT + 1] = 2, Refusal::Schema),
+            (
+                "a grid below the format's",
+                |b| b[HEAD_AT + 18..HEAD_AT + 20].copy_from_slice(&15u16.to_be_bytes()),
+                Refusal::Quantity,
+            ),
+            (
+                "a grid past the format's",
+                |b| b[HEAD_AT + 18..HEAD_AT + 20].copy_from_slice(&16_385u16.to_be_bytes()),
+                Refusal::Quantity,
+            ),
+            ("maxp's version", |b| b[MAXP_AT + 2] = 0x60, Refusal::Schema),
+            ("no glyphs", |b| b[MAXP_AT + 4..MAXP_AT + 6].fill(0), Refusal::Count),
+            ("hhea's version", |b| b[HHEA_AT + 1] = 2, Refusal::Schema),
+            ("a reserved word in hhea", |b| b[HHEA_AT + 25] = 1, Refusal::Reserved),
+            ("a metric data format", |b| b[HHEA_AT + 33] = 1, Refusal::Reserved),
+            (
+                "more long metrics than glyphs",
+                |b| b[HHEA_AT + 34..HHEA_AT + 36].copy_from_slice(&5u16.to_be_bytes()),
+                Refusal::Count,
+            ),
+            (
+                "a count hmtx cannot carry",
+                |b| {
+                    b[MAXP_AT + 4..MAXP_AT + 6].copy_from_slice(&6u16.to_be_bytes());
+                },
+                Refusal::Truncated,
+            ),
+            ("a table this module reads, renamed", |b| b[12 + 16 * 2] = b'j', Refusal::Missing),
         ];
         for (what, break_it, expect) in cases {
             let mut broken = sound;
@@ -446,18 +700,21 @@ mod tests {
 
     #[test]
     fn a_trailing_byte_is_refused_rather_than_ignored() {
-        // The load-bearing one: the bytes are the name, so a blob with a byte
-        // nobody judges is a blob two addresses could name one meaning of.
-        let mut buffer = [0u8; 64];
+        // The load-bearing one that survived the format: a blob with a byte past
+        // its last table is a blob two addresses could name one face with.
+        let mut buffer = [0u8; ROOM];
         let len = composed(&mut buffer);
         assert!(Face::read(&buffer[..len]).is_ok());
-        assert_eq!(Face::read(&buffer[..len + 1]), Err(Refusal::Truncated));
+        assert_eq!(Face::read(&buffer[..len + 4]), Err(Refusal::Truncated));
         assert_eq!(Face::read(&buffer[..len - 1]), Err(Refusal::Truncated));
+        // And the padding is the format's zero, not a byte anybody may set.
+        buffer[len - 1] = 1;
+        assert_eq!(Face::read(&buffer[..len]), Err(Refusal::Truncated));
     }
 
     #[test]
     fn the_writer_refuses_what_its_own_reader_would() {
-        let mut buffer = [0u8; 64];
+        let mut buffer = [0u8; ROOM];
         assert_eq!(compose(&mut buffer, 0, &ADVANCES), Err(Refusal::Quantity));
         assert_eq!(compose(&mut buffer, UNITS_PER_EM_MAX + 1, &ADVANCES), Err(Refusal::Quantity));
         assert_eq!(compose(&mut buffer, 1000, &[]), Err(Refusal::Count));
@@ -466,12 +723,8 @@ mod tests {
 
     #[test]
     fn one_advance_changed_is_a_different_face() {
-        // The whole of the undeclared half, at this level: the two blobs are
-        // both readable, both well formed, and differ in two bytes. Nothing
-        // about *reading* one tells them apart, which is why the declaration is
-        // an address and not a shape.
-        let mut first = [0u8; 64];
-        let mut second = [0u8; 64];
+        let mut first = [0u8; ROOM];
+        let mut second = [0u8; ROOM];
         let len = composed(&mut first);
         let mut other = ADVANCES;
         other[1] += 1;
@@ -480,13 +733,25 @@ mod tests {
         assert!(Face::read(&second[..len]).is_ok());
         assert_ne!(first, second);
     }
+
+    #[test]
+    fn a_glyph_past_the_long_metrics_takes_the_last_one() {
+        // `hmtx`'s own rule, which a real face uses and the composed one does
+        // not: fewer long metrics than glyphs, and the rest share the last
+        // advance.
+        let mut buffer = [0u8; ROOM];
+        let len = composed(&mut buffer);
+        buffer[HHEA_AT + 34..HHEA_AT + 36].copy_from_slice(&2u16.to_be_bytes());
+        let face = Face::read(&buffer[..len]).expect("two long metrics and two short ones");
+        assert_eq!(face.advance_design_units(0), Some(0));
+        assert_eq!(face.advance_design_units(1), Some(512));
+        assert_eq!(face.advance_design_units(2), Some(512));
+        assert_eq!(face.advance_design_units(3), Some(512));
+        assert_eq!(face.advance_design_units(4), None);
+    }
+
     #[test]
     fn the_two_fixture_faces_are_both_faces_and_are_not_the_same_one() {
-        // The property the whole of `E3-B03b`'s second clause rests on: the
-        // undeclared twin is refused for its *address* and for nothing else, so
-        // it has to be as readable as the face beside it. A twin that failed
-        // `read` would make the boot's refusal ambiguous between a permission
-        // and a parse.
         let mut declared = [0u8; fixture::BYTES];
         let mut twin = [0u8; fixture::BYTES];
         let one = fixture::declared(&mut declared).expect("the declared fixture composes");
@@ -503,16 +768,27 @@ mod tests {
     }
 
     #[test]
-    fn the_twin_differs_in_exactly_one_advance() {
+    fn the_twin_differs_only_where_one_advance_and_the_checksums_say_it_does() {
+        // The old format's twin differed in one byte. A real format carries
+        // checksums over what changed, so the twin now differs in the advance's
+        // low byte and in the three words that sum it: `hmtx`'s record, and
+        // `head.checkSumAdjustment`, which covers the whole file.
         let mut declared = [0u8; fixture::BYTES];
         let mut twin = [0u8; fixture::BYTES];
         let len = fixture::declared(&mut declared).expect("composes");
         let _ = fixture::undeclared(&mut twin).expect("composes");
-        let differing =
-            declared[..len].iter().zip(twin.iter()).filter(|(left, right)| left != right).count();
-        // One byte, because 512 and 513 differ only in their low byte. Written
-        // as a count rather than as an index so that a fixture whose twin moved
-        // to a different glyph still holds this.
-        assert_eq!(differing, 1, "the twin is the smallest difference the format can carry");
+        let differing: [usize; 1] = [HMTX_AT + METRIC_BYTES + 1];
+        for at in 0..len {
+            let in_advance = differing.contains(&at);
+            let in_a_checksum = (12 + 2 * 16 + 4..12 + 2 * 16 + 8).contains(&at)
+                || (HEAD_AT + 8..HEAD_AT + 12).contains(&at);
+            if !in_advance && !in_a_checksum {
+                assert_eq!(
+                    declared[at], twin[at],
+                    "byte {at} is neither the advance nor a checksum"
+                );
+            }
+        }
+        assert_ne!(declared[HMTX_AT + METRIC_BYTES + 1], twin[HMTX_AT + METRIC_BYTES + 1]);
     }
 }

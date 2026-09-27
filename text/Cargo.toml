@@ -14,9 +14,9 @@ description = "Text metrics as fixed-point integers, and the corpus of scripts a
 # system to reach for a float, and a shaping cache is the single most natural
 # place to reach for a `HashMap`. A crate with no dependencies cannot inherit
 # either from somebody else's public type, which leaves both of them as choices
-# this crate makes in the open. The shaper itself is `E3-B03a`'s decision and
-# may land behind the licence boundary, where it is reached over a ring and not
-# by a dependency row.
+# this crate makes in the open. The shaper itself landed behind the licence
+# boundary (RFC 0082, RFC 0141): it is `user/shaper`, reached over a ring and
+# not by a dependency row, and this row stays empty for that reason.
 
 [lints]
 workspace = true

@@ -386,6 +386,19 @@ which is therefore named here with an owner rather than assumed.
 
 ### What cannot be observed on the day this is accepted, and what closes it
 
+**Superseded on 2026-09-26 by `E3-B03b0` and RFC 0141, and kept as it was
+written below because it was true on the day.** Both files exist now:
+`user/shaper/manifest.toml` declares the component and `abi/src/shape.rs` the
+protocol, and `cargo xtask lint-manifests` checks this RFC's three properties
+against the first and names the second. One detail below did not survive
+contact: the manifest's `image` is `user/shaper`, the shim's crate, and not a
+path into `third_party/` — an image is built from a crate, the import's crates
+are libraries, and the crate that makes them a component is written here. RFC
+0141 records that, the rule-4 check it carries across, and why the shim links
+the import by name rather than by the path row observation 3 refuses.
+`xtask`'s `the_two_files_rfc_0082_owes_are_named_by_path_and_are_there` holds
+this paragraph to the tree.
+
 Plainly, because the alternative is a clause everybody assumes somebody checked:
 `third_party/` is empty — `find third_party -type f` returns `README.md` and
 nothing else — `user/shaper/manifest.toml` does not exist, and

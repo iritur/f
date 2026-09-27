@@ -26,6 +26,7 @@ pub mod participate;
 pub mod reserve;
 pub mod scene;
 pub mod semantic;
+pub mod shape;
 pub mod state;
 pub mod store;
 pub mod swap;

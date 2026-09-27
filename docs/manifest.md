@@ -88,7 +88,11 @@ Two rules join `image` and `domain`, and they are the two lines of RFC 0005 a
 lint can enforce:
 
 - An `image` under `third_party/` may not declare `shared` (rule 4: the licence
-  boundary is the speculation boundary).
+  boundary is the speculation boundary). Nor may an image built from a crate
+  that links an import — `user/shaper`, the shim `IMPORT_LINKERS` names — whose
+  directory is in the permissive tree and whose code is mostly not; `cargo xtask
+  lint-manifests` applies rule 4 to it, and RFC 0082's three properties besides
+  (RFC 0141).
 - An `image` named by hash must declare `hostile`. A hash names bytes with no
   source in this tree, so nobody here vouches for them, and RFC 0005's table
   puts code nobody vouches for in `hostile`. What would reverse this is a

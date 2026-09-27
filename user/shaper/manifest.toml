@@ -1,0 +1,184 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# shaper: the component RFC 0082 builds the imported shaper into, and the first
+# of the two files that RFC names by path. `abi/src/shape.rs` is the second.
+#
+# What this component is: HarfRust (`third_party/harfrust/`, MIT) behind the shim
+# in `user/shaper/src/`, answering one run of text at a time with glyphs and
+# design-unit positions. What it is not, today: running. Its image is larger
+# than any text a spawn shape maps, so it is **declared and not built into a
+# boot** — `UNSPAWNABLE` in `xtask/src/main.rs` says so as a checked row, and
+# `cargo xtask test` links the image, measures it and goes red the day it fits.
+# This file is written now, against the schema, because RFC 0082's three
+# properties are properties *of this file*, and `cargo xtask lint-manifests`
+# checks all three on every lint whether or not a frame can spawn the result.
+#
+# `docs/manifest.md` is the schema field by field. RFC 0141 is why the image is
+# this directory rather than a path into `third_party/`.
+
+schema = 5
+name   = "shaper"
+
+# The shim's crate, which links the import. Not `third_party/harfrust`: an image
+# is built from a crate, the import's crates are libraries, and the crate that
+# makes them a component — a decoder, an encoder, an entry — is written here.
+# `lint-manifests` holds this image to RFC 0005 rule 4 exactly as if it were
+# under `third_party/`, because it is the import that runs in it (RFC 0141).
+image  = "user/shaper"
+
+# `private`, and rule 4 is the floor rather than the reason. RFC 0005's table
+# puts *every imported driver* in `private`, and this is imported code that
+# parses a font file — the classic place a hostile input lands. `hostile` was
+# considered and not taken: it holds a whole core for the component's lifetime,
+# and RFC 0082's argument for the import being affordable at all is that it is
+# off the frame path in steady state (the cache is in front of it), which a
+# core held idle would be a strange way to honour. *What would move it:* a face
+# arriving from somewhere nobody in this tree vouches for — a download, a
+# document's embedded font — which is `hostile`'s own row.
+domain = "private"
+
+# --- No device, no interrupt, no powerbox: RFC 0082's first property --------
+#
+# There is no `[[device]]` table, no `irq` capability and no `powerbox` ask in
+# this file, and that is the property rather than an omission: the shaper holds
+# no handle through which a clock, a locale database or an environment could
+# reach it. `lint-manifests` refuses any of the three here, and admits only
+# `untyped` and `endpoint` capabilities at all. What it cannot deny is the
+# door's `PROGRESS`, which needs no handle; RFC 0082 says so, and says that what
+# removes its effect is the third property below and a corpus shaped on both
+# architectures, not this file.
+
+# --- Needs: routed at spawn, in this order ------------------------------------
+
+# The heap, and RFC 0082's second property: *its own allocator, inside its own
+# address space, sized in its own manifest*. The frame maps a capability named
+# `heap` at `f_ring::heap::AT` before the first instruction, and
+# `f_ring::heap::Heap::COMPONENT` is the shim's `#[global_allocator]` over it.
+#
+# **Thirty-two pages, and the number is measured rather than chosen.** HarfRust
+# building its per-face data for Inter and shaping one run peaked at 79,712
+# bytes of live allocation above the face itself, and 86,056 for a 148-byte run —
+# longer than any request carries — with every block rounded up to the heap's
+# sixteen-byte granularity. Measured on 2026-09-26 on x86-64, by a program
+# outside this tree wrapping the system allocator in a counter, over the same
+# vendored crates and the same face; a program and not a test, because counting
+# allocations takes an `unsafe impl GlobalAlloc` and RFC 0001 permits that in
+# `abi`, `ring` and `kernel` only. 131,072 is that peak with half as much again,
+# which is the margin for a script whose plan compiles more lookups than Latin's.
+# *What would move it:* the frame's `heap_peak` reading on the day this component
+# runs, which replaces a host measurement with the component's own, or `starved`
+# ever set.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 131_072
+
+# The face, held in memory the component was given rather than memory it
+# allocated, because the import borrows the bytes for as long as it shapes with
+# them. A hundred and one pages is Inter-Regular's 411,640 bytes rounded up to a
+# page — the one face `[[face]]` below declares, so the region is sized for what
+# this component may load and not for a face nobody named.
+[[capability]]
+name   = "face"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 413_696
+
+# The component's own endpoint, which its clients connect through. `write` is
+# the right to connect and `grant` the right to hand the endpoint on; not
+# `revoke`, for `user/store`'s reason.
+[[capability]]
+name   = "self"
+type   = "endpoint"
+rights = ["write", "grant"]
+from   = "supervisor"
+
+# --- The ring: RFC 0082's third property ----------------------------------------
+
+# One server ring per client speaking `shape`, whose types are
+# `abi/src/shape.rs`: integers, every position `_design_units`, and no float,
+# which `lint-determinism` refuses there and `lint-manifests` names this file for.
+# `inline`, because a request is 232 bytes and a reply a few kilobytes and
+# nothing is transferred by a device. Four clients: the text path is one, and a
+# restart of it is a second connection while the first is still being torn
+# down.
+[[ring]]
+name        = "shape"
+role        = "server"
+protocol    = "shape"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+clients     = 4
+features    = []
+
+# --- The face it may load -------------------------------------------------------
+
+# `E3-B03b`: a face is addressed by content hash and declared before it is used.
+# This is Inter 4.001 Regular's SHA-256, which `third_party/inter/PROVENANCE.md`
+# records and `lint-licensing` holds to the bytes; the shim hashes whatever it is
+# handed against the address a request names before it believes it.
+[[face]]
+name = "inter-regular"
+hash = "sha256:40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82"
+
+# --- Restart ------------------------------------------------------------------
+
+# On a fault, which RFC 0082 names as the reason the shaper is a component at
+# all: a shaper that faults takes text down and not the compositor, and a
+# restart loses nothing but cache entries the permissive side still holds.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 10
+backoff_max_ms   = 1_000
+max_restarts     = 8
+budget_window_ms = 60_000
+
+# --- Reservation ----------------------------------------------------------------
+
+# Soft, and a mebibyte, which is the arithmetic and not a round number picked
+# for looking round: this is what the component is *made of* — `docs/manifest.md`
+# is careful that the `heap` and `face` needs above are not part of it — and the
+# image alone is about 149 pages of text (`cargo xtask test` prints the measured
+# figure), so a stack, a control ring, a state tree, a capability table and the
+# page tables for all of it fit in what is left of 256. *What would move it:* the
+# image, which is the term here that nobody chose.
+[reservation]
+class        = "soft"
+memory_bytes = 1_048_576
+
+# --- Transfer -------------------------------------------------------------------
+
+# `restart_only`: nothing here outlives a request. The cache is on the other
+# side of the ring (RFC 0082), which is what makes that true.
+[transfer]
+mode = "restart_only"
+
+# --- State ----------------------------------------------------------------------
+
+[[state]]
+id   = 1
+name = "shaper"
+kind = "subtree"
+unit = "none"
+
+# Runs shaped. The number RFC 0082's third reversal condition counts per frame on
+# a scene whose text did not change, and wants to be zero.
+[[state]]
+id     = 2
+parent = "shaper"
+name   = "runs"
+kind   = "counter"
+unit   = "events"
+
+# Requests refused, by any `f_abi::shape::Refusal`.
+[[state]]
+id     = 3
+parent = "shaper"
+name   = "refused"
+kind   = "counter"
+unit   = "entries"

@@ -261,9 +261,17 @@ memory_bytes = 65_536
 # names an imported file rather than a composition, `f_text::face::compose` loses
 # its only non-test caller, and the name below stays exactly where it is — which
 # is the point of naming a face by a word and addressing it by a hash.
+#
+# **One arrived on 2026-09-26, and this digest moved without that happening.**
+# Inter, imported as data for the shaper, is a real face, and `f_text::face` now
+# reads the OpenType format its header is written in rather than a format of its
+# own (RFC 0141) — so the composition is a minimal OpenType file, and its digest
+# is not the one the old format produced. It is still a composition, because the
+# frame composes and hashes this face itself and the frame cannot reach the
+# import; `f_text::face::compose` says what ends that.
 [[face]]
 name = "regular"
-hash = "sha256:1ecfbbb8cf48189488be6273d0407449ac6e0518c792f74e47eb67a09f1731c8"
+hash = "sha256:924f1f780c38d3dec64de771230ca3efd21727cb96fd764faf6db724aada1baf"
 
 # --- Transfer: what this component declares about being updated in place ------
 

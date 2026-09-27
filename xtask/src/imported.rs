@@ -87,6 +87,36 @@ const DATA_NAMES: &[&str] = &["LICENSE", "PROVENANCE.md"];
 /// The extensions a data import may hold.
 const DATA_EXTENSIONS: &[&str] = &["txt"];
 
+/// The one font file a data import may hold, by extension *and* by its first
+/// four bytes, and the rule is that narrow on purpose. RFC 0141.
+///
+/// RFC 0114's category is *files no compiler in this workspace reads*, held by
+/// an allow-list of extensions so that a language nobody thought of is refused
+/// by default. A face is not text, so `txt` does not admit it; and a face is
+/// not inert in general either — a TrueType file carries hinting programs, which
+/// are instructions for an interpreter, and a CFF face carries charstrings,
+/// which are too. So the rule admits exactly what this tree holds and argues
+/// it: `ttf`, whose bytes begin with the TrueType `sfntVersion` `00 01 00 00`
+/// (so a renamed CFF face, `OTTO`, a collection, `ttcf`, or a wrapper is still
+/// refused), in a data import. What reads it here is the shaper behind the
+/// licence boundary — `GSUB`, `GPOS`, `cmap`, `hmtx` — and `f_text::face`'s
+/// admission, which reads four tables of integers. **Nothing in this tree runs
+/// its hinting programs**, which is the sentence that makes it data here; the
+/// day something does — Skrifa's hinter, `docs/TECHNICAL-DEBT.md`'s planned
+/// import — that sentence is false and this rule is the one to revisit, with
+/// the interpreter behind the boundary like the shaper.
+///
+/// Not `otf`, not `woff`, not `ttc`, and not a list: a second font format is a
+/// second argument, made on the day there is a face in it. `the_font_rule_is_
+/// one_extension_and_one_magic` holds all three refusals.
+const DATA_FONT: (&str, [u8; 4]) = ("ttf", [0x00, 0x01, 0x00, 0x00]);
+
+/// Is `file`, whose first bytes are `head`, the one font a data import admits?
+fn is_admitted_font(file: &str, head: &[u8]) -> bool {
+    let (extension, magic) = DATA_FONT;
+    file.rsplit_once('.').is_some_and(|(_, ext)| ext == extension) && head.starts_with(&magic)
+}
+
 /// How one upstream file becomes one table.
 ///
 /// A row of [`SHAPES`] and a row of `DERIVED_DATA` are the whole cost of a new
@@ -187,7 +217,7 @@ pub const SHAPES: &[(&str, Shape)] = &[
 /// Every code point, as a `u32`. Unit: code points.
 const CODE_SPACE: u32 = 0x11_0000;
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     crate::pack::hex(&f_hash::sha256(bytes))
 }
 
@@ -976,12 +1006,48 @@ pub struct Imports {
     pub bytes: u64,
     /// Files whose self-stated version was compared. Unit: none — a count.
     pub versions: usize,
+    /// Vendored crates held to their record, their lockfile and their own
+    /// checksum file. Unit: none — a count.
+    pub crates: usize,
 }
 
-/// One import's `PROVENANCE.md`, as its two tables say it.
+/// One import's `PROVENANCE.md`, as its tables say it.
+///
+/// Four table shapes, told apart by their header row and not by position: the
+/// `Field | Value` table every import has; a data import's `File | Bytes |
+/// SHA-256 | From`; a data import's `Archive | Bytes | SHA-256`, naming what the
+/// files were extracted from (`third_party/inter`'s shape, RFC 0141); and a
+/// source import's `Crate | Version | Licence | checksum | Why`
+/// (`third_party/harfrust`'s). A row under a header this reader does not know is
+/// a finding rather than a skip, which is why the two newer imports turned
+/// `lint-licensing` red on arrival and why this reader grew rather than a
+/// record being bent to fit it.
 struct Provenance {
     fields: BTreeMap<String, String>,
     files: BTreeMap<String, (u64, String)>,
+    /// `Archive` rows: the name, its size and its SHA-256. The archive is not in
+    /// the import — it is where the files came from — so it is checked for
+    /// shape and never looked for on disk.
+    archives: Vec<(String, u64, String)>,
+    /// `Crate` rows, keyed `name-version` as `cargo vendor --versioned-dirs`
+    /// names each directory: the crate, its version, its licence and
+    /// crates.io's checksum.
+    crates: BTreeMap<String, (String, String, String, String)>,
+}
+
+/// Is `value` a SHA-256 in lower-case hex, the one spelling this reader takes?
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Does `value` carry a git commit — forty lower-case hex digits — as a word?
+///
+/// `E3-B03b0`'s exit asks the record for *a commit hash*, and a `Commit` field
+/// that said `the one tagged 0.13.3` would be a field present and a hash absent.
+fn names_a_commit(value: &str) -> bool {
+    value.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| {
+        word.len() == 40 && word.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 fn cells(line: &str) -> Option<Vec<String>> {
@@ -989,46 +1055,103 @@ fn cells(line: &str) -> Option<Vec<String>> {
     Some(inner.split('|').map(|c| c.trim().to_string()).collect())
 }
 
-/// Read both tables. A row this cannot read is a finding rather than a row it
+/// Which of [`Provenance`]'s four tables a row is under.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Table {
+    Fields,
+    Files,
+    Archives,
+    Crates,
+}
+
+/// Read every table. A row this cannot read is a finding rather than a row it
 /// skips, because a skipped row is a file with no record that looks recorded.
+///
+/// A row is read under the header above it, and the header is recognised by its
+/// first cell and its width together — `Field` and two columns, `File` and four,
+/// `Archive` and three, `Crate` and five — so a row of the wrong width under a
+/// known header, and any row under an unknown one, is a finding.
 fn parse_provenance(rel: &str, text: &str) -> (Provenance, Vec<String>) {
     let mut findings = Vec::new();
-    let mut fields = BTreeMap::new();
-    let mut files = BTreeMap::new();
+    let mut record = Provenance {
+        fields: BTreeMap::new(),
+        files: BTreeMap::new(),
+        archives: Vec::new(),
+        crates: BTreeMap::new(),
+    };
+    let mut under: Option<Table> = None;
     for (index, line) in text.split('\n').enumerate() {
         let n = index + 1;
-        let Some(row) = cells(line) else { continue };
+        let Some(row) = cells(line) else {
+            // A line that is not a table row ends the table: a header two
+            // paragraphs up does not govern a row down here.
+            if !line.trim().is_empty() {
+                under = None;
+            }
+            continue;
+        };
         if row.iter().all(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')) {
             continue;
         }
-        match row.as_slice() {
-            [key, _] if key == "Field" => {}
-            [key, value] => {
-                if fields.insert(key.clone(), value.clone()).is_some() {
+        let header = match (row.first().map(String::as_str), row.len()) {
+            (Some("Field"), 2) => Some(Table::Fields),
+            (Some("File"), 4) => Some(Table::Files),
+            (Some("Archive"), 3) => Some(Table::Archives),
+            (Some("Crate"), 5) => Some(Table::Crates),
+            _ => None,
+        };
+        if header.is_some() {
+            under = header;
+            continue;
+        }
+        let bytes_sha = |bytes: &str, sha: &str, findings: &mut Vec<String>| {
+            let sha = sha.trim_matches('`').to_string();
+            let Ok(size) = bytes.parse::<u64>() else {
+                findings.push(format!("  {rel}:{n}  `{bytes}` is not a byte count"));
+                return None;
+            };
+            if !is_sha256(&sha) {
+                findings.push(format!("  {rel}:{n}  `{sha}` is not a SHA-256 in lowercase hex"));
+                return None;
+            }
+            Some((size, sha))
+        };
+        match (under, row.as_slice()) {
+            (Some(Table::Fields), [key, value]) => {
+                if record.fields.insert(key.clone(), value.clone()).is_some() {
                     findings.push(format!("  {rel}:{n}  names `{key}` twice"));
                 }
             }
-            [file, _, _, _] if file == "File" => {}
-            [file, bytes, sha, _from] => {
+            (Some(Table::Files), [file, bytes, sha, _from]) => {
                 let path = file.trim_matches('`').to_string();
+                let Some(entry) = bytes_sha(bytes, sha, &mut findings) else { continue };
+                if record.files.insert(path.clone(), entry).is_some() {
+                    findings.push(format!("  {rel}:{n}  records `{path}` twice"));
+                }
+            }
+            (Some(Table::Archives), [name, bytes, sha]) => {
+                let name = name.trim_matches('`').to_string();
+                let Some((size, sha)) = bytes_sha(bytes, sha, &mut findings) else { continue };
+                record.archives.push((name, size, sha));
+            }
+            (Some(Table::Crates), [name, version, licence, sha, _why]) => {
+                let name = name.trim_matches('`').to_string();
                 let sha = sha.trim_matches('`').to_string();
-                let Ok(size) = bytes.parse::<u64>() else {
-                    findings.push(format!("  {rel}:{n}  `{bytes}` is not a byte count"));
-                    continue;
-                };
-                if sha.len() != 64 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                if !is_sha256(&sha) {
                     findings
                         .push(format!("  {rel}:{n}  `{sha}` is not a SHA-256 in lowercase hex"));
                     continue;
                 }
-                if files.insert(path.clone(), (size, sha)).is_some() {
-                    findings.push(format!("  {rel}:{n}  records `{path}` twice"));
+                let key = format!("{name}-{version}");
+                let row = (name, version.clone(), licence.clone(), sha);
+                if record.crates.insert(key.clone(), row).is_some() {
+                    findings.push(format!("  {rel}:{n}  records crate `{key}` twice"));
                 }
             }
             _ => findings.push(format!("  {rel}:{n}  a table row this reader cannot read")),
         }
     }
-    (Provenance { fields, files }, findings)
+    (record, findings)
 }
 
 /// Every file under `dir`, relative to it, with `/` separators.
@@ -1051,7 +1174,8 @@ fn files_under(dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// RFC 0114's third check: every imported tree carries `LICENSE` and a
-/// `PROVENANCE.md`, and a data import's record is read against its bytes.
+/// `PROVENANCE.md`, and its record is read against its bytes — a data import's
+/// file by file, and a source import's crate by crate and file by file.
 ///
 /// # Why the hash comparison is part of this check and not a fifth
 ///
@@ -1063,11 +1187,28 @@ fn files_under(dir: &Path) -> Result<Vec<String>, String> {
 /// a different question — whether a committed table is what the generator
 /// writes — and it lives in [`table_findings`].
 ///
+/// # A source import, read the same way (RFC 0141)
+///
+/// `third_party/harfrust` is the first source import, and its record says
+/// *Changed: nothing is checkable rather than asserted*. Cargo checks it only
+/// while it builds the crates from the vendored source `cargo xtask` names, and
+/// only against each crate's own `.cargo-checksum.json`. So this check makes the
+/// sentence true on every lint and without a build: [`source_findings`] holds
+/// each `vendor/<crate>-<version>/` to a `Crate` row, each row's checksum to the
+/// import's own `Cargo.lock` and to the crate's `.cargo-checksum.json`, every
+/// file in the crate to the SHA-256 that file records for it — every file
+/// listed, and nothing on disk that it does not list — and each crate's own
+/// `license` to its row and to [`IMPORT_LICENCES`]. The checksum file itself is
+/// anchored outside the import, by `IMPORT_CHECKSUMS` in `main.rs`, because a
+/// file edited together with the list that vouches for it is otherwise green.
+///
 /// # What it does not check
 ///
-/// A source import's commit against its upstream, since nothing here can reach
-/// upstream: for `Kind: source` the fields are required and not verified. There
-/// is no such import today, so the gap is stated before it has an occupant.
+/// A commit against its upstream, since nothing here can reach upstream: the
+/// `Commit` field must *carry* a forty-digit hash, which is the shape `E3-B03b0`'s
+/// exit asks for, and is not verified against anything. An archive a data
+/// import's files were extracted from is checked for shape and not for bytes,
+/// because it is not in the tree.
 ///
 /// # Errors
 ///
@@ -1112,6 +1253,13 @@ pub fn import_findings(at: &Path) -> Result<(Vec<String>, Imports), String> {
                 findings.push(format!("  {record}  records no `{key}`"));
             }
         }
+        if let Some(commit) = provenance.fields.get("Commit")
+            && !names_a_commit(commit)
+        {
+            findings.push(format!(
+                "  {record}  `Commit` carries no forty-digit commit hash: `{commit}`"
+            ));
+        }
         if let Some(date) = provenance.fields.get("Imported") {
             let shape = date.len() == 10
                 && date
@@ -1122,71 +1270,602 @@ pub fn import_findings(at: &Path) -> Result<(Vec<String>, Imports), String> {
                 findings.push(format!("  {record}  `Imported` is `{date}`, not YYYY-MM-DD"));
             }
         }
-        if kind != Some("data") {
-            continue;
-        }
-        let version = provenance.fields.get("Version").cloned().unwrap_or_default();
-        let on_disk = files_under(&dir)?;
-        for file in &on_disk {
-            if file == "PROVENANCE.md" {
-                continue;
-            }
-            let admitted = DATA_NAMES.contains(&file.as_str())
-                || file.rsplit_once('.').is_some_and(|(_, ext)| DATA_EXTENSIONS.contains(&ext));
-            if !admitted {
-                findings.push(format!(
-                    "  {rel}/{file}  is in a data import and is not a data file: the category \
-                     holds files no compiler in this workspace reads (RFC 0114), held by \
-                     extension — {} — rather than by a list of languages",
-                    DATA_EXTENSIONS.join(", ")
-                ));
-            }
-            let Some((size, sha)) = provenance.files.get(file) else {
-                findings.push(format!("  {rel}/{file}  has no row in PROVENANCE.md"));
-                continue;
-            };
-            let bytes =
-                std::fs::read(dir.join(file)).map_err(|e| format!("reading {rel}/{file}: {e}"))?;
-            seen.files += 1;
-            seen.bytes += bytes.len() as u64;
-            if bytes.len() as u64 != *size {
-                findings.push(format!(
-                    "  {rel}/{file}  is {} byte(s) and PROVENANCE.md records {size}",
-                    bytes.len()
-                ));
-            }
-            let actual = sha256_hex(&bytes);
-            if actual != *sha {
-                findings.push(format!(
-                    "  {rel}/{file}  hashes to {actual} and PROVENANCE.md records {sha}"
-                ));
-            }
-            if let Some(stated) = std::str::from_utf8(&bytes).ok().and_then(self_stated_version) {
-                seen.versions += 1;
-                if stated != version {
-                    findings.push(format!(
-                        "  {rel}/{file}  says it is version {stated} and PROVENANCE.md records \
-                         {version}"
-                    ));
-                }
-            }
-        }
-        for file in provenance.files.keys() {
-            if !on_disk.contains(file) {
-                findings.push(format!("  {record}  records `{file}`, which is not in the import"));
-            }
+        match kind {
+            Some("data") => data_findings(&dir, &rel, &provenance, &mut findings, &mut seen)?,
+            Some("source") => source_findings(&dir, &rel, &provenance, &mut findings, &mut seen)?,
+            _ => {}
         }
     }
     Ok((findings, seen))
 }
 
-/// The names of every file a data import holds, other than its licence and its
-/// record: the second needle `IMPORT_READERS` reads for, because a path can be
-/// assembled without spelling the import's directory and still spell its file.
+/// A data import's files against its record: every file a row, every row a
+/// file, each the size and SHA-256 recorded, each a kind of file the category
+/// admits, and each self-stated version the record's.
+fn data_findings(
+    dir: &Path,
+    rel: &str,
+    provenance: &Provenance,
+    findings: &mut Vec<String>,
+    seen: &mut Imports,
+) -> Result<(), String> {
+    let record = format!("{rel}/PROVENANCE.md");
+    if !provenance.crates.is_empty() {
+        findings.push(format!("  {record}  is a data import and records crates"));
+    }
+    let version = provenance.fields.get("Version").cloned().unwrap_or_default();
+    let on_disk = files_under(dir)?;
+    for file in &on_disk {
+        if file == "PROVENANCE.md" {
+            continue;
+        }
+        let bytes =
+            std::fs::read(dir.join(file)).map_err(|e| format!("reading {rel}/{file}: {e}"))?;
+        let admitted = DATA_NAMES.contains(&file.as_str())
+            || file.rsplit_once('.').is_some_and(|(_, ext)| DATA_EXTENSIONS.contains(&ext))
+            || is_admitted_font(file, &bytes);
+        if !admitted {
+            findings.push(format!(
+                "  {rel}/{file}  is in a data import and is not a data file: the category \
+                 holds files no compiler in this workspace reads (RFC 0114), held by \
+                 extension — {} — rather than by a list of languages, and one font rule: \
+                 `.{}` beginning with the TrueType version {:02x?} (RFC 0141)",
+                DATA_EXTENSIONS.join(", "),
+                DATA_FONT.0,
+                DATA_FONT.1
+            ));
+        }
+        let Some((size, sha)) = provenance.files.get(file) else {
+            findings.push(format!("  {rel}/{file}  has no row in PROVENANCE.md"));
+            continue;
+        };
+        seen.files += 1;
+        seen.bytes += bytes.len() as u64;
+        if bytes.len() as u64 != *size {
+            findings.push(format!(
+                "  {rel}/{file}  is {} byte(s) and PROVENANCE.md records {size}",
+                bytes.len()
+            ));
+        }
+        let actual = sha256_hex(&bytes);
+        if actual != *sha {
+            findings.push(format!(
+                "  {rel}/{file}  hashes to {actual} and PROVENANCE.md records {sha}"
+            ));
+        }
+        if let Some(stated) = std::str::from_utf8(&bytes).ok().and_then(self_stated_version) {
+            seen.versions += 1;
+            if stated != version {
+                findings.push(format!(
+                    "  {rel}/{file}  says it is version {stated} and PROVENANCE.md records \
+                     {version}"
+                ));
+            }
+        }
+    }
+    for file in provenance.files.keys() {
+        if !on_disk.contains(file) {
+            findings.push(format!("  {record}  records `{file}`, which is not in the import"));
+        }
+    }
+    for (archive, _, _) in &provenance.archives {
+        if on_disk.contains(archive) {
+            findings.push(format!(
+                "  {rel}/{archive}  is recorded as the archive the files came from, and an \
+                 archive is not kept in the import"
+            ));
+        }
+    }
+    // The archive the record says the files came from has a row, and a row
+    // names an archive the record says they came from. For a round the table
+    // was optional: deleting it left the record as green as it was, so the one
+    // measurement of what was fetched could go without a finding (RFC 0141).
+    let retrieved = provenance.fields.get("Retrieved with").map_or("", String::as_str);
+    let named = archives_named(retrieved);
+    for archive in &named {
+        if !provenance.archives.iter().any(|(row, _, _)| row == archive) {
+            findings.push(format!(
+                "  {record}  `Retrieved with` names the archive `{archive}` and no `Archive` row \
+                 records its size and SHA-256"
+            ));
+        }
+    }
+    for (row, _, _) in &provenance.archives {
+        if !named.contains(row) {
+            findings.push(format!(
+                "  {record}  records the archive `{row}`, which `Retrieved with` does not name"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a file name ends in when it is an archive a data import's files could
+/// have been extracted from.
+const ARCHIVE_EXTENSIONS: &[&str] =
+    &[".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst", ".7z"];
+
+/// Every archive a `Retrieved with` field names, by its file name: the last
+/// path segment of any word ending in one of [`ARCHIVE_EXTENSIONS`].
+fn archives_named(retrieved: &str) -> Vec<String> {
+    let mut out: Vec<String> = retrieved
+        .split(|c: char| c.is_whitespace() || matches!(c, '`' | ',' | '"' | '\'' | '(' | ')'))
+        .filter_map(|word| word.rsplit('/').next())
+        .map(|word| word.trim_end_matches(['.', ';', ':']))
+        .filter(|word| {
+            ARCHIVE_EXTENSIONS.iter().any(|ext| word.len() > ext.len() && word.ends_with(ext))
+        })
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The files a source import holds beside `vendor/`: its licence, its record,
+/// and the lockfile that is its resolution.
+const SOURCE_TOP: &[&str] = &["LICENSE", "PROVENANCE.md", "Cargo.lock"];
+
+/// Where `cargo vendor --versioned-dirs` put the crates.
+const VENDOR: &str = "vendor";
+
+/// The file `cargo vendor` writes into every crate it vendors.
+const CARGO_CHECKSUM: &str = ".cargo-checksum.json";
+
+/// A source import's crates against its record, its lockfile and their own
+/// checksum files. See [`import_findings`] for why.
+///
+/// The one shape of source import this tree has is a `cargo vendor` set, and
+/// this reads that shape and refuses anything else under the import's top
+/// level. *Reversal:* a source import that is not Rust — a C driver, RFC 0003's
+/// first expectation — which needs a record of its own shape and a reader for
+/// it, not this one loosened.
+fn source_findings(
+    dir: &Path,
+    rel: &str,
+    provenance: &Provenance,
+    findings: &mut Vec<String>,
+    seen: &mut Imports,
+) -> Result<(), String> {
+    let record = format!("{rel}/PROVENANCE.md");
+    if !provenance.files.is_empty() || !provenance.archives.is_empty() {
+        findings.push(format!("  {record}  is a source import and records data files"));
+    }
+    if provenance.crates.is_empty() {
+        findings.push(format!(
+            "  {record}  records no crates — a source import names every crate it vendors, \
+             with its version and checksum"
+        ));
+    }
+    let on_disk = files_under(dir)?;
+    for file in &on_disk {
+        if !SOURCE_TOP.contains(&file.as_str()) && !file.starts_with(&format!("{VENDOR}/")) {
+            findings.push(format!(
+                "  {rel}/{file}  is in a source import outside `{VENDOR}/` and is not one of {}",
+                SOURCE_TOP.join(", ")
+            ));
+        }
+    }
+    let locked = std::fs::read_to_string(dir.join("Cargo.lock"))
+        .map(|text| lock_checksums(&text))
+        .unwrap_or_default();
+    if locked.is_empty() {
+        findings.push(format!("  {rel}/Cargo.lock  is missing or pins no checksum"));
+    }
+
+    let vendored: BTreeSet<String> = on_disk
+        .iter()
+        .filter_map(|file| file.strip_prefix(&format!("{VENDOR}/")))
+        .filter_map(|file| file.split_once('/').map(|(krate, _)| krate.to_string()))
+        .collect();
+    for krate in &vendored {
+        let Some((_, _, licence, sha)) = provenance.crates.get(krate) else {
+            findings
+                .push(format!("  {rel}/{VENDOR}/{krate}/  has no `Crate` row in PROVENANCE.md"));
+            continue;
+        };
+        match locked.get(krate) {
+            Some(lock) if lock == sha => {}
+            Some(lock) => findings
+                .push(format!("  {record}  records {krate} as {sha} and Cargo.lock pins {lock}")),
+            None => findings.push(format!("  {rel}/Cargo.lock  pins no {krate}")),
+        }
+        let crate_dir = dir.join(VENDOR).join(krate);
+        let Ok(json) = std::fs::read_to_string(crate_dir.join(CARGO_CHECKSUM)) else {
+            findings.push(format!("  {rel}/{VENDOR}/{krate}/  carries no {CARGO_CHECKSUM}"));
+            continue;
+        };
+        let Some((listed, package)) = cargo_checksum(&json) else {
+            findings.push(format!(
+                "  {rel}/{VENDOR}/{krate}/{CARGO_CHECKSUM}  is not the shape cargo writes"
+            ));
+            continue;
+        };
+        if package != *sha {
+            findings.push(format!(
+                "  {rel}/{VENDOR}/{krate}/{CARGO_CHECKSUM}  names package {package} and \
+                 PROVENANCE.md records {sha}"
+            ));
+        }
+        let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).unwrap_or_default();
+        findings.extend(licence_findings(&format!("{rel}/{VENDOR}/{krate}"), &manifest, licence));
+        let files = files_under(&crate_dir)?;
+        for file in &files {
+            if file == CARGO_CHECKSUM {
+                continue;
+            }
+            let Some(want) = listed.get(file) else {
+                findings.push(format!(
+                    "  {rel}/{VENDOR}/{krate}/{file}  is not listed in {CARGO_CHECKSUM}, so it is \
+                     not what upstream published"
+                ));
+                continue;
+            };
+            let bytes = std::fs::read(crate_dir.join(file))
+                .map_err(|e| format!("reading {rel}/{VENDOR}/{krate}/{file}: {e}"))?;
+            seen.files += 1;
+            seen.bytes += bytes.len() as u64;
+            let actual = sha256_hex(&bytes);
+            if actual != *want {
+                findings.push(format!(
+                    "  {rel}/{VENDOR}/{krate}/{file}  hashes to {actual} and {CARGO_CHECKSUM} \
+                     records {want}"
+                ));
+            }
+        }
+        for file in listed.keys() {
+            if !files.contains(file) {
+                findings.push(format!(
+                    "  {rel}/{VENDOR}/{krate}/{CARGO_CHECKSUM}  lists `{file}`, which is not \
+                     in the crate"
+                ));
+            }
+        }
+    }
+    for krate in provenance.crates.keys() {
+        if !vendored.contains(krate) {
+            findings
+                .push(format!("  {record}  records crate `{krate}`, which is not in `{VENDOR}/`"));
+        }
+    }
+    seen.crates += vendored.len();
+    Ok(())
+}
+
+/// Every `[[package]]` in a lockfile that carries a checksum, keyed
+/// `name-version` as `cargo vendor --versioned-dirs` names its directories.
+pub(crate) fn lock_checksums(text: &str) -> BTreeMap<String, String> {
+    lock_packages(text)
+        .into_iter()
+        .filter_map(|p| p.checksum.map(|sum| (format!("{}-{}", p.name, p.version), sum)))
+        .collect()
+}
+
+/// One `[[package]]` of a lockfile, as cargo wrote it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct LockPackage {
+    /// Its name.
+    pub name: String,
+    /// Its version.
+    pub version: String,
+    /// Where it resolved from — `registry+…`, `git+…` — and none for a path.
+    pub source: Option<String>,
+    /// The registry's SHA-256 of the package, for a registry source.
+    pub checksum: Option<String>,
+    /// The package a `[replace]` table put in its place, if one did.
+    pub replace: Option<String>,
+}
+
+/// Every `[[package]]` in a lockfile.
+///
+/// Line by line, because a lockfile is cargo's own output in one shape: a
+/// `[[package]]` header, then `name`, `version`, `source`, `checksum` and
+/// `replace` rows, then a `dependencies` array this does not need. A row this
+/// does not know is skipped: the callers judge what is here, and a row cargo
+/// adds later is not one they depend on.
+pub(crate) fn lock_packages(text: &str) -> Vec<LockPackage> {
+    let mut out: Vec<LockPackage> = Vec::new();
+    let value = |line: &str, key: &str| {
+        line.strip_prefix(key)
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(|rest| rest.trim().trim_matches('"').to_string())
+    };
+    for line in text.lines() {
+        if line.trim() == "[[package]]" {
+            out.push(LockPackage::default());
+            continue;
+        }
+        let Some(package) = out.last_mut() else { continue };
+        if let Some(v) = value(line, "name") {
+            package.name = v;
+        } else if let Some(v) = value(line, "version") {
+            package.version = v;
+        } else if let Some(v) = value(line, "source") {
+            package.source = Some(v);
+        } else if let Some(v) = value(line, "checksum") {
+            package.checksum = Some(v);
+        } else if let Some(v) = value(line, "replace") {
+            package.replace = Some(v);
+        }
+    }
+    out
+}
+
+/// The licences a crate of a source import may be under: `deny.toml`'s
+/// `[licenses] allow`, which is what the permissive tree's own dependencies are
+/// held to, and `Zlib`.
+///
+/// Stated here because `cargo deny` runs over the workspace and the shim is
+/// outside it (RFC 0141), so until this list existed nothing read the licence
+/// of any crate linked into the shaper's image — PROVENANCE.md's column was
+/// parsed and dropped, and a crate re-licensed GPL-3.0 in both its manifest and
+/// its checksum file left every lint green. `Zlib` is the one addition, and it
+/// is `bytemuck`'s: permissive, no copyleft, no patent clause to weigh, and in
+/// `LICENSING.md`'s sentence of what the shaper's image carries. It is not in
+/// `deny.toml` because nothing in the workspace needs it, and adding it there
+/// would widen the workspace for an import's sake. The test
+/// `the_import_licences_are_deny_toml_s_and_zlib` holds the two lists together,
+/// so a licence admitted to one and not the other is red.
+///
+/// *What would reverse this:* an import whose crate needs a licence outside the
+/// list — which is a licence argued in an RFC before it is a row here.
+pub(crate) const IMPORT_LICENCES: &[&str] =
+    &["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"];
+
+/// The `license` a crate's own `Cargo.toml` states in `[package]`.
+///
+/// `cargo vendor` writes the normalised manifest crates.io serves, so the row
+/// is `license = "…"` on one line; `license-file` is not a licence this reads,
+/// and a crate that has only that is a finding.
+fn crate_licence(manifest: &str) -> Option<String> {
+    let mut section = String::new();
+    for line in manifest.lines() {
+        let code = line.trim();
+        if let Some(head) = code.strip_prefix('[') {
+            section = head.trim_end_matches(']').trim().to_string();
+            continue;
+        }
+        if section != "package" {
+            continue;
+        }
+        let Some(rest) = code.strip_prefix("license") else { continue };
+        let Some(value) = rest.trim_start().strip_prefix('=') else { continue };
+        return Some(value.trim().trim_matches('"').to_string());
+    }
+    None
+}
+
+/// Every licence an SPDX expression names — the operators, the parentheses and
+/// the old `/` spelling of `OR` taken out.
+///
+/// **Every one, and not a choice among them.** `cargo deny` accepts an
+/// expression it can satisfy; this refuses any expression that *names* a
+/// licence outside [`IMPORT_LICENCES`], because the record carries one column
+/// per crate and a reader of it should not have to know which branch somebody
+/// chose. Stricter, and the direction that costs a row rather than a surprise.
+fn licence_ids(expression: &str) -> Vec<String> {
+    expression
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '/'))
+        .filter(|word| !word.is_empty() && !matches!(*word, "AND" | "OR" | "WITH"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A vendored crate's own `license` against its record's `Licence` column and
+/// against [`IMPORT_LICENCES`]. `at` names the crate in the finding.
+fn licence_findings(at: &str, manifest: &str, recorded: &str) -> Vec<String> {
+    let Some(own) = crate_licence(manifest) else {
+        return vec![format!(
+            "  {at}/Cargo.toml  states no `license`, so nothing says what the shaper's image \
+             carries from it"
+        )];
+    };
+    let mut findings = Vec::new();
+    if own != recorded {
+        findings.push(format!(
+            "  {at}/Cargo.toml  is `{own}` and its `Crate` row in PROVENANCE.md records \
+             `{recorded}`"
+        ));
+    }
+    let mut named = licence_ids(&own);
+    named.extend(licence_ids(recorded));
+    named.sort();
+    named.dedup();
+    for id in named {
+        if !IMPORT_LICENCES.contains(&id.as_str()) {
+            findings.push(format!(
+                "  {at}  names `{id}`, which is not a licence an import's crate may carry: {} \
+                 (deny.toml's list and Zlib)",
+                IMPORT_LICENCES.join(", ")
+            ));
+        }
+    }
+    findings
+}
+
+/// Every vendored crate's directory, relative to `at`, for every source import:
+/// `third_party/<import>/vendor/<crate>-<version>`.
+pub fn vendored_crate_dirs(at: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for import in source_crates(at).keys() {
+        let Ok(entries) = std::fs::read_dir(at.join(import).join(VENDOR)) else { continue };
+        let mut dirs: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        dirs.sort();
+        out.extend(dirs.into_iter().map(|name| format!("{import}/{VENDOR}/{name}")));
+    }
+    out
+}
+
+/// A `.cargo-checksum.json`: every file and its SHA-256, and the package's.
+///
+/// Not a JSON parser: the file is cargo's output in one shape — string keys and
+/// string values, an object `files` of them and a string `package` — so this
+/// reads the strings in order, decoding the escapes JSON allows in them, and
+/// takes the pairs inside `files` and the value after `package`. A shape it does
+/// not recognise is `None`, which the caller reports, rather than a partial
+/// reading it would then believe.
+fn cargo_checksum(json: &str) -> Option<(BTreeMap<String, String>, String)> {
+    // Tokens: a string, or one of the structural characters.
+    let mut tokens: Vec<Result<String, char>> = Vec::new();
+    let mut chars = json.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                let mut s = String::new();
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            'u' => {
+                                let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                                s.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                            }
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            other => s.push(other),
+                        },
+                        other => s.push(other),
+                    }
+                }
+                tokens.push(Ok(s));
+            }
+            '{' | '}' | ':' | ',' => tokens.push(Err(c)),
+            c if c.is_whitespace() => {}
+            _ => return None,
+        }
+    }
+    let mut files = BTreeMap::new();
+    let mut package = None;
+    let mut depth = 0usize;
+    let mut in_files = false;
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Err('{') => depth += 1,
+            Err('}') => {
+                depth = depth.checked_sub(1)?;
+                in_files = false;
+            }
+            Ok(key) if tokens.get(i + 1) == Some(&Err(':')) => {
+                match tokens.get(i + 2) {
+                    Some(Err('{')) if depth == 1 && key == "files" => in_files = true,
+                    Some(Ok(value)) if in_files && depth == 2 => {
+                        files.insert(key.clone(), value.clone());
+                        i += 3;
+                        continue;
+                    }
+                    Some(Ok(value)) if depth == 1 && key == "package" => {
+                        package = Some(value.clone());
+                        i += 3;
+                        continue;
+                    }
+                    Some(Ok(_)) if depth == 1 => {
+                        i += 3;
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (!files.is_empty()).then_some(())?;
+    Some((files, package?))
+}
+
+/// Every vendored crate of every source import that executes on the build
+/// machine when the import is built — a procedural macro, or a crate with a
+/// build script — as `(third_party/<import>/vendor/<crate>, what it is)`.
+///
+/// Read from each crate's own `Cargo.toml`, which `cargo vendor` normalises: a
+/// build script is a `build = "…"` row, or a `build.rs` with no `build = false`
+/// to say it is not one; a procedural macro is `proc-macro = true`. This is
+/// what `IMPORT_HOST_CODE` in `main.rs` is compared against in both directions,
+/// so a re-import that brings a new one is red until somebody has read it.
+/// RFC 0141.
+pub fn host_code(at: &Path) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for rel in vendored_crate_dirs(at) {
+        let dir = at.join(&rel);
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+        let rows: Vec<String> = manifest
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or("").replace(' ', ""))
+            .collect();
+        if rows.iter().any(|row| row == "proc-macro=true" || row == "proc_macro=true") {
+            out.push((rel.clone(), "a procedural macro"));
+        }
+        let declared = rows.iter().find_map(|row| row.strip_prefix("build="));
+        let builds = match declared {
+            Some("false") => false,
+            Some(_) => true,
+            None => dir.join("build.rs").is_file(),
+        };
+        if builds {
+            out.push((rel, "a build script"));
+        }
+    }
+    out
+}
+
+/// Every source import and the crates its record lists, as
+/// `(third_party/<name>, [(crate, version)])`.
+///
+/// What `IMPORT_LINKERS` is checked against: the one manifest allowed to take a
+/// crate of an import by name, and every other manifest that may take none.
+pub fn source_crates(at: &Path) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(at.join("third_party")) else { return out };
+    for dir in entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()) {
+        let Ok(text) = std::fs::read_to_string(dir.join("PROVENANCE.md")) else { continue };
+        let (record, _) = parse_provenance("", &text);
+        if record.fields.get("Kind").map(String::as_str) != Some("source") {
+            continue;
+        }
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let crates = record
+            .crates
+            .values()
+            .map(|(name, version, ..)| (name.clone(), version.clone()))
+            .collect();
+        out.insert(format!("third_party/{name}"), crates);
+    }
+    out
+}
+
+/// The names of every file a **data** import holds, other than its licence and
+/// its record: the second needle `IMPORT_READERS` reads for, because a path can
+/// be assembled without spelling the import's directory and still spell its
+/// file.
+///
+/// Data imports only, and the restriction is RFC 0141's. A source import's file
+/// names are `lib.rs`, `mod.rs`, `Cargo.toml` and `README.md` — words every
+/// crate in the permissive tree says — so taken as needles they found three
+/// hundred readers on the day HarfRust arrived, every one of them false. What
+/// guards a source import is the other needle, the import's directory, and the
+/// fact that nothing opens source at run time: source is linked (by the one
+/// `IMPORT_LINKERS` row) or it is not reached at all.
 pub fn data_file_names(at: &Path) -> Vec<String> {
     let mut names = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(at.join("third_party")) else { return Vec::new() };
     for dir in entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()) {
+        let kind = std::fs::read_to_string(dir.join("PROVENANCE.md"))
+            .ok()
+            .and_then(|text| parse_provenance("", &text).0.fields.get("Kind").cloned());
+        // A tree whose record does not say `source` is read as data: an import
+        // with no record is refused by the check above, and until it is fixed
+        // its file names are needles rather than a silence.
+        if kind.as_deref() == Some("source") {
+            continue;
+        }
         for file in files_under(&dir).unwrap_or_default() {
             let base = file.rsplit('/').next().unwrap_or(&file).to_string();
             if !DATA_NAMES.contains(&base.as_str()) {
@@ -1540,5 +2219,310 @@ mod tests {
             seen.trees,
             seen.files
         );
+    }
+
+    /// RFC 0141's font rule: one extension and one magic, and nothing either
+    /// side of it.
+    #[test]
+    fn the_font_rule_is_one_extension_and_one_magic() {
+        use super::is_admitted_font;
+        let truetype: &[u8] = &[0x00, 0x01, 0x00, 0x00, 0x00, 0x11];
+        assert!(is_admitted_font("Inter-Regular.ttf", truetype));
+        assert!(is_admitted_font("sub/Face.ttf", truetype));
+        assert!(!is_admitted_font("Inter-Regular.otf", truetype), "a second extension");
+        assert!(!is_admitted_font("Inter-Regular.woff2", truetype), "a wrapper");
+        assert!(!is_admitted_font("Inter-Regular.ttc", truetype), "a collection");
+        assert!(!is_admitted_font("Inter-Regular.TTF", truetype), "a spelling");
+        assert!(!is_admitted_font("Inter-Regular.ttf", b"OTTO\0\x11"), "CFF outlines renamed");
+        assert!(!is_admitted_font("Inter-Regular.ttf", b"ttcf\0\x02"), "a collection renamed");
+        assert!(!is_admitted_font("Inter-Regular.ttf", b"wOF2"), "a wrapper renamed");
+        assert!(!is_admitted_font("Inter-Regular.ttf", &truetype[..3]), "too short to say");
+    }
+
+    fn record_with(kind: &str, extra_fields: &str, tables: &str) -> String {
+        format!(
+            "| Field | Value |\n|---|---|\n| Kind | {kind} |\n| Upstream | https://example.invalid/ |\n\
+             | Version | 1.0 |\n| Imported | 2026-09-26 |\n| Changed | nothing |\n{extra_fields}\n\
+             {tables}"
+        )
+    }
+
+    #[test]
+    fn a_data_import_holds_a_face_and_names_its_archive() {
+        let face: &[u8] = &[0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4];
+        let files = format!(
+            "| Archive | Bytes | SHA-256 |\n|---|---|---|\n| `face.zip` | 12 | `{}` |\n\n\
+             | File | Bytes | SHA-256 | From |\n|---|---|---|---|\n\
+             | `LICENSE` | 6 | `{}` | x |\n| `Face.ttf` | {} | `{}` | x |\n",
+            "b".repeat(64),
+            sha256_hex(b"terms\n"),
+            face.len(),
+            sha256_hex(face)
+        );
+        let retrieved = "| Retrieved with | `curl` of `https://example.invalid/v1/face.zip`, then \
+                         two files extracted |";
+        let record = record_with("data", retrieved, &files);
+        let at = fixture(
+            "import-face",
+            &[
+                ("third_party/f/LICENSE", b"terms\n"),
+                ("third_party/f/Face.ttf", face),
+                ("third_party/f/PROVENANCE.md", record.as_bytes()),
+            ],
+        );
+        let (findings, seen) = import_findings(&at).expect("listed");
+        assert_eq!(findings, Vec::<String>::new());
+        assert_eq!(seen.files, 2);
+
+        // The same bytes under a second extension are not admitted, and an
+        // archive kept in the import is not an archive.
+        std::fs::write(at.join("third_party/f/Face.otf"), face).expect("w");
+        std::fs::write(at.join("third_party/f/face.zip"), b"PK\x03\x04").expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        let all = findings.join("\n");
+        for needle in [
+            "Face.otf  is in a data import and is not a data file",
+            "Face.otf  has no row",
+            "face.zip  is recorded as the archive",
+        ] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
+
+        // An archive row that is not an archive's.
+        let bad = record_with("data", retrieved, &files.replace(&"b".repeat(64), "not-a-hash"));
+        std::fs::write(at.join("third_party/f/PROVENANCE.md"), bad).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(
+            findings.iter().any(|f| f.contains("`not-a-hash` is not a SHA-256")),
+            "{findings:#?}"
+        );
+    }
+
+    /// A one-crate source import, as `cargo vendor --versioned-dirs` lays one
+    /// out, with its record, its lockfile and its crate's checksum file.
+    fn source_fixture(name: &str) -> (PathBuf, String) {
+        let lib: &[u8] = b"pub fn f() {}\n";
+        let manifest: &[u8] =
+            b"[package]\nname = \"foo\"\nversion = \"1.0.0\"\nlicense = \"MIT OR Apache-2.0\"\n";
+        let package = "c".repeat(64);
+        let json = format!(
+            "{{\"$comment\":\"cargo's own\",\"files\":{{\"Cargo.toml\":\"{}\",\"src/lib.rs\":\"{}\"}},\
+             \"package\":\"{package}\"}}",
+            sha256_hex(manifest),
+            sha256_hex(lib)
+        );
+        let lock = format!(
+            "version = 4\n\n[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+             checksum = \"{package}\"\n"
+        );
+        let crates = format!(
+            "| Crate | Version | Licence | checksum | Why |\n|---|---|---|---|---|\n\
+             | `foo` | 1.0.0 | MIT OR Apache-2.0 | `{package}` | the one |\n"
+        );
+        let record = record_with("source", &format!("| Commit | `{}` |", "d".repeat(40)), &crates);
+        let at = fixture(
+            name,
+            &[
+                ("third_party/s/LICENSE", b"terms\n"),
+                ("third_party/s/PROVENANCE.md", record.as_bytes()),
+                ("third_party/s/Cargo.lock", lock.as_bytes()),
+                ("third_party/s/vendor/foo-1.0.0/Cargo.toml", manifest),
+                ("third_party/s/vendor/foo-1.0.0/src/lib.rs", lib),
+                ("third_party/s/vendor/foo-1.0.0/.cargo-checksum.json", json.as_bytes()),
+            ],
+        );
+        (at, record)
+    }
+
+    #[test]
+    fn a_source_import_is_read_crate_by_crate_and_file_by_file() {
+        let (at, _) = source_fixture("import-source");
+        let (findings, seen) = import_findings(&at).expect("listed");
+        assert_eq!(findings, Vec::<String>::new());
+        assert_eq!((seen.crates, seen.files), (1, 2));
+
+        // One byte changed, one file nobody listed, one stray file at the top.
+        std::fs::write(at.join("third_party/s/vendor/foo-1.0.0/src/lib.rs"), b"pub fn g() {}\n")
+            .expect("w");
+        std::fs::write(at.join("third_party/s/vendor/foo-1.0.0/src/extra.rs"), b"\n").expect("w");
+        std::fs::write(at.join("third_party/s/shim.rs"), b"\n").expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        let all = findings.join("\n");
+        for needle in [
+            "foo-1.0.0/src/lib.rs  hashes to",
+            "foo-1.0.0/src/extra.rs  is not listed in .cargo-checksum.json",
+            "third_party/s/shim.rs  is in a source import outside `vendor/`",
+        ] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
+    }
+
+    #[test]
+    fn a_source_record_is_held_to_its_lockfile_and_its_commit() {
+        let (at, record) = source_fixture("import-source-record");
+        let wrong = record.replace(&"c".repeat(64), &"e".repeat(64));
+        std::fs::write(at.join("third_party/s/PROVENANCE.md"), &wrong).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        let all = findings.join("\n");
+        for needle in ["Cargo.lock pins", "names package"] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
+
+        let tagless = record.replace(&"d".repeat(40), "the one tagged 1.0.0");
+        std::fs::write(at.join("third_party/s/PROVENANCE.md"), &tagless).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(findings.iter().any(|f| f.contains("carries no forty-digit")), "{findings:#?}");
+
+        let crateless = record.replace("| `foo` | 1.0.0 |", "| `bar` | 1.0.0 |");
+        std::fs::write(at.join("third_party/s/PROVENANCE.md"), &crateless).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        let all = findings.join("\n");
+        for needle in ["foo-1.0.0/  has no `Crate` row", "records crate `bar-1.0.0`"] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
+    }
+
+    #[test]
+    fn a_source_imports_file_names_are_not_needles() {
+        // The day HarfRust arrived its `lib.rs`, `mod.rs` and `README.md` were
+        // needles, and three hundred sources were readers of the import.
+        let (at, _) = source_fixture("import-source-needles");
+        let face: &[u8] = &[0x00, 0x01, 0x00, 0x00];
+        std::fs::create_dir_all(at.join("third_party/d")).expect("d");
+        std::fs::write(at.join("third_party/d/Face.ttf"), face).expect("w");
+        std::fs::write(at.join("third_party/d/PROVENANCE.md"), record_with("data", "", ""))
+            .expect("w");
+        let names = super::data_file_names(&at);
+        assert!(names.contains(&"Face.ttf".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n == "lib.rs" || n == "Cargo.toml"), "{names:?}");
+    }
+
+    /// Audit 1's third finding: the `Licence` column was parsed and dropped, and
+    /// a crate re-licensed in its own manifest (and its checksum file) was green.
+    #[test]
+    fn a_vendored_crates_licence_is_its_rows_and_one_this_tree_admits() {
+        let (at, record) = source_fixture("import-source-licence");
+        let crate_dir = at.join("third_party/s/vendor/foo-1.0.0");
+        let manifest =
+            b"[package]\nname = \"foo\"\nversion = \"1.0.0\"\nlicense = \"GPL-3.0-only\"\n";
+        std::fs::write(crate_dir.join("Cargo.toml"), manifest).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        let all = findings.join("\n");
+        for needle in [
+            "foo-1.0.0/Cargo.toml  is `GPL-3.0-only` and its `Crate` row in PROVENANCE.md records \
+             `MIT OR Apache-2.0`",
+            "foo-1.0.0  names `GPL-3.0-only`, which is not a licence an import's crate may carry",
+        ] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
+
+        // The row changed to match, so only the allow-list stands between.
+        let agreed = record.replace("| MIT OR Apache-2.0 |", "| GPL-3.0-only |");
+        std::fs::write(at.join("third_party/s/PROVENANCE.md"), agreed).expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(findings.iter().any(|f| f.contains("names `GPL-3.0-only`")), "{findings:#?}");
+        assert!(!findings.iter().any(|f| f.contains("its `Crate` row")), "{findings:#?}");
+
+        // No licence at all is not a licence.
+        std::fs::write(crate_dir.join("Cargo.toml"), b"[package]\nname = \"foo\"\n").expect("w");
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(findings.iter().any(|f| f.contains("states no `license`")), "{findings:#?}");
+    }
+
+    #[test]
+    fn an_spdx_expression_names_every_licence_it_offers() {
+        assert_eq!(
+            super::licence_ids("(MIT OR Apache-2.0) AND Unicode-3.0"),
+            ["MIT", "Apache-2.0", "Unicode-3.0"]
+        );
+        assert_eq!(super::licence_ids("MIT/Apache-2.0"), ["MIT", "Apache-2.0"]);
+        assert_eq!(
+            super::licence_ids("GPL-2.0-only WITH Classpath-exception-2.0"),
+            ["GPL-2.0-only", "Classpath-exception-2.0"]
+        );
+    }
+
+    /// The list is `deny.toml`'s and one more, and says so; this is what keeps
+    /// that sentence true when either file changes.
+    #[test]
+    fn the_import_licences_are_deny_toml_s_and_zlib() {
+        let deny = std::fs::read_to_string(root().join("deny.toml")).expect("deny.toml");
+        let line = deny
+            .lines()
+            .find(|line| line.trim_start().starts_with("allow = ["))
+            .expect("deny.toml's licence allow-list");
+        let mut expected: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        expected.push("Zlib");
+        expected.sort_unstable();
+        let mut listed = super::IMPORT_LICENCES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(listed, expected);
+    }
+
+    /// Audit 1's eighth finding: the `Archive` row was optional.
+    #[test]
+    fn an_archive_the_record_names_has_a_row() {
+        let face: &[u8] = &[0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4];
+        let archive = format!(
+            "| Archive | Bytes | SHA-256 |\n|---|---|---|\n| `face.zip` | 12 | `{}` |\n\n",
+            "b".repeat(64)
+        );
+        let files = format!(
+            "| File | Bytes | SHA-256 | From |\n|---|---|---|---|\n\
+             | `LICENSE` | 6 | `{}` | x |\n| `Face.ttf` | {} | `{}` | x |\n",
+            sha256_hex(b"terms\n"),
+            face.len(),
+            sha256_hex(face)
+        );
+        let retrieved = "| Retrieved with | `curl -fsSL https://example.invalid/face.zip` |";
+        let write = |record: String| {
+            fixture(
+                "import-archive",
+                &[
+                    ("third_party/f/LICENSE", b"terms\n"),
+                    ("third_party/f/Face.ttf", face),
+                    ("third_party/f/PROVENANCE.md", record.as_bytes()),
+                ],
+            )
+        };
+        let at = write(record_with("data", retrieved, &format!("{archive}{files}")));
+        assert_eq!(import_findings(&at).expect("listed").0, Vec::<String>::new());
+
+        let at = write(record_with("data", retrieved, &files));
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("names the archive `face.zip` and no `Archive` row")),
+            "{findings:#?}"
+        );
+
+        let at = write(record_with(
+            "data",
+            "| Retrieved with | by hand |",
+            &format!("{archive}{files}"),
+        ));
+        let (findings, _) = import_findings(&at).expect("listed");
+        assert!(
+            findings.iter().any(|f| f.contains("records the archive `face.zip`, which")),
+            "{findings:#?}"
+        );
+        assert_eq!(
+            super::archives_named("`curl.exe -fsSL` of `https://h/v4.1/Inter-4.1.zip`, then two"),
+            ["Inter-4.1.zip"]
+        );
+    }
+
+    #[test]
+    fn a_cargo_checksum_file_is_read_as_cargo_writes_it() {
+        let json = "{\"$comment\":\"a \\\"quoted\\\" note\",\"files\":{\"a\\u002frs\":\"1\",\
+                    \"b\":\"2\"},\"package\":\"3\"}";
+        let (files, package) = super::cargo_checksum(json).expect("cargo's shape");
+        assert_eq!(package, "3");
+        assert_eq!(files.get("a/rs").map(String::as_str), Some("1"));
+        assert_eq!(files.len(), 2);
+        assert!(super::cargo_checksum("{\"files\":{}}").is_none(), "no package, no files");
+        assert!(super::cargo_checksum("[1, 2]").is_none(), "not an object");
     }
 }
