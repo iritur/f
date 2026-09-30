@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 #
-# Install F as a second boot entry on a minimal Arch Linux machine.
+# Install F as a second boot entry on a minimal Arch Linux machine, or on
+# Debian or Ubuntu, which differ here only in how the toolchain arrives.
 #
 # The procedure this automates is docs/booting-on-hardware.md, and the task it
 # serves is E0-P18: this kernel has run outside QEMU exactly once, on a VMware
@@ -234,7 +235,7 @@ cmd_check() {
     if command -v grub-mkconfig >/dev/null 2>&1; then
         echo "grub            $(grub-mkconfig --version | head -1)"
     else
-        red "grub            grub-mkconfig not found — pacman -S grub"
+        red "grub            grub-mkconfig not found — pacman -S grub, or apt install grub-pc"
         fail=$((fail + 1))
     fi
 
@@ -296,6 +297,18 @@ cmd_check() {
         red "                Set GRUB_TIMEOUT=5 in /etc/default/grub."
         fail=$((fail + 1))
     fi
+    # Ubuntu's own default, on a machine with one operating system: the menu is
+    # skipped however long the timeout is, and the key that reveals it differs
+    # between BIOS and UEFI builds. A menu nobody sees is an entry nobody can
+    # pick, so this is the same failure as a zero timeout wearing another name.
+    # `install` regenerates grub.cfg, so the edit takes effect there.
+    local style
+    style=$(grep -E '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' || echo "")
+    if [ "$style" = "hidden" ]; then
+        red "grub menu       GRUB_TIMEOUT_STYLE=hidden, so the menu is never drawn."
+        red "                Set GRUB_TIMEOUT_STYLE=menu in /etc/default/grub."
+        fail=$((fail + 1))
+    fi
 
     # -- the console, which is the whole interface ---------------------------
     echo
@@ -311,18 +324,24 @@ cmd_check() {
         ylw "                $SERIAL_WHY"
         warn=$((warn + 1))
     else
-        red "serial          no UART detected at 0x3f8"
-        red "                $SERIAL_WHY"
-        red ""
-        red "                F has NO VIDEO OUTPUT. The multiboot header requests no"
-        red "                framebuffer and the kernel writes to no display. Without a"
-        red "                serial port you will see a black screen and have no way to"
-        red "                tell a clean boot from a triple fault."
-        red ""
-        red "                A BMC with serial-over-LAN, a COM header plus bracket, or a"
-        red "                PCIe serial card at the legacy 0x3f8 address. A USB serial"
-        red "                adapter will NOT work — it is not COM1."
-        fail=$((fail + 1))
+        # A warning and not a blocker since RFC 0081: the frame draws the log
+        # on whatever framebuffer the loader hands it, so a machine with no
+        # UART still has a record of every boot that gets past the address
+        # space. What it loses is the part before, and the reason for a death.
+        ylw "serial          no UART detected at 0x3f8"
+        ylw "                $SERIAL_WHY"
+        ylw ""
+        ylw "                The screen is then the only record. The kernel asks the loader"
+        ylw "                for a 1920x1080 framebuffer and draws the boot log on it from"
+        ylw "                the address-space switch onward (RFC 0081), so a boot that gets"
+        ylw "                that far can be read, and photographed. A death before that"
+        ylw "                point is a black screen that says nothing about why; the"
+        ylw "                'f.cores=1' entry is the one to try when that happens."
+        ylw ""
+        ylw "                For the whole log: a BMC with serial-over-LAN, a COM header plus"
+        ylw "                bracket, or a PCIe serial card at the legacy 0x3f8 address. A"
+        ylw "                USB serial adapter will NOT work — it is not COM1."
+        warn=$((warn + 1))
     fi
 
     # -- topology ------------------------------------------------------------
@@ -440,7 +459,7 @@ cmd_deploy_grub() {
         esac
     done
 
-    command -v grub-install >/dev/null 2>&1 || die "grub-install not found — pacman -S grub"
+    command -v grub-install >/dev/null 2>&1 || die "grub-install not found — pacman -S grub, or apt install grub-pc"
 
     local cmd
     if [ -d /sys/firmware/efi ]; then
@@ -574,22 +593,42 @@ cmd_build() {
     fi
     need_root
     bold "== toolchain =="
-    pacman -S --needed --noconfirm rustup git qemu-system-x86
+    if command -v pacman >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm rustup git qemu-system-x86
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Debian and Ubuntu. `rustup` is a package only from Ubuntu 24.04 and
+        # Debian 13, so it is not asked for here and is checked for below
+        # instead. build-essential is the C linker cargo needs to link `xtask`
+        # for this host, which an Arch machine with base-devel already has.
+        apt-get install -y git qemu-system-x86 build-essential
+    else
+        die "neither pacman nor apt-get here. Install git, qemu-system-x86_64, a C
+       linker and rustup yourself, then re-run."
+    fi
 
     # rustup reads rust-toolchain.toml and fetches the pin, including the
     # rust-src and llvm-tools components the build-std and elf32 steps need.
     # Doing it as the invoking user, not root, so the toolchain is not installed
-    # into root's home and then unusable.
+    # into root's home and then unusable. -H and ~/.cargo/bin because sudo
+    # resets PATH, and a rustup installed from rustup.rs lives in the user's
+    # home rather than in /usr/bin as Arch's package does.
     local as_user="${SUDO_USER:-$(id -un)}"
+    local user_home
+    user_home=$(getent passwd "$as_user" | cut -d: -f6)
+    local as=(sudo -H -u "$as_user" env PATH="$user_home/.cargo/bin:$PATH")
+    "${as[@]}" sh -c 'command -v rustup' >/dev/null 2>&1 \
+        || die "rustup not found for $as_user. Install it from https://rustup.rs as
+       $as_user, not as root, then re-run: it is what fetches the pinned
+       toolchain in rust-toolchain.toml."
     bold "== fetching the pinned toolchain as $as_user =="
-    sudo -u "$as_user" sh -c "cd '$REPO' && rustup show"
+    "${as[@]}" sh -c "cd '$REPO' && rustup show"
 
     # `run` rather than `build`, deliberately: it builds the kernel *and* the
     # init module, and then boots the result under QEMU on this machine. Proving
     # it boots emulated here before asking the firmware to do it means a failure
     # on metal has one fewer explanation.
     bold "== build, and boot it under QEMU first =="
-    sudo -u "$as_user" sh -c "cd '$REPO' && cargo xtask run"
+    "${as[@]}" sh -c "cd '$REPO' && cargo xtask run"
 
     # The image this script installs is the optimised one, and nothing above
     # built it: `cargo xtask` builds and boots the debug image on purpose, and
@@ -601,7 +640,7 @@ cmd_build() {
     # throughout. Emulation catching that class here is the whole reason this
     # step exists.
     bold "== the optimised image this script installs =="
-    sudo -u "$as_user" sh -c "cd '$REPO' \
+    "${as[@]}" sh -c "cd '$REPO' \
         && cargo build -p f-kernel --target x86_64-unknown-none \
             -Zbuild-std=core,compiler_builtins --release \
         && sysroot=\$(rustc --print sysroot) \
@@ -726,12 +765,13 @@ EOC
 # being its own partition, moving disk, or changing device names.
 cat <<'MENU'
 menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
-    echo "F: loading. All output is on COM1 at ${BAUD} 8N1 — there is no video."
+    echo "F: loading. The log is drawn on screen, and whole on COM1 at ${BAUD} 8N1."
     insmod part_gpt
     insmod part_msdos
     insmod fat
     insmod ext2
     insmod multiboot
+    insmod all_video
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32
     module ${gp}/init.bin${module_component}
@@ -744,6 +784,7 @@ menuentry "F — milestone M0, bring-up traced (f.bringup)" --class f {
     insmod fat
     insmod ext2
     insmod multiboot
+    insmod all_video
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 f.bringup
     module ${gp}/init.bin${module_component}
@@ -756,6 +797,7 @@ menuentry "F — milestone M0, one core (f.cores=1)" --class f {
     insmod fat
     insmod ext2
     insmod multiboot
+    insmod all_video
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 f.cores=1
     module ${gp}/init.bin${module_component}
@@ -768,6 +810,7 @@ menuentry "F — milestone M0, 60s timer jitter run" --class f {
     insmod fat
     insmod ext2
     insmod multiboot
+    insmod all_video
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 timer=60
     module ${gp}/init.bin${module_component}
@@ -856,6 +899,7 @@ menuentry "F — generation $(echo "$root" | cut -c1-16)" --class f {
     insmod fat
     insmod ext2
     insmod multiboot
+    insmod all_video
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 f.root=${root} f.frame=${frame}
     module ${gp}/init.bin${module_component}${module_offered}
@@ -914,15 +958,16 @@ EOG
 
     if ! serial_at_3f8; then
         echo
-        red "WARNING: no UART confirmed at 0x3f8 on this machine."
-        red "         $SERIAL_WHY"
-        red "F writes to nothing else. If that is still true at boot you will see a"
-        red "black screen and be unable to tell success from a triple fault."
-        red "Run '$PROG check' for what to do about it."
+        ylw "WARNING: no UART confirmed at 0x3f8 on this machine."
+        ylw "         $SERIAL_WHY"
+        ylw "The screen is then the only record, and it starts partway through the"
+        ylw "boot: a death before the address-space switch is a black screen."
+        ylw "Run '$PROG check' for what to do about it."
     fi
     echo
     bold "To run it:"
-    echo "  1. connect a serial console at ${BAUD} 8N1 (screen /dev/ttyS0 ${BAUD}, or the BMC)"
+    echo "  1. connect a serial console at ${BAUD} 8N1 (screen /dev/ttyS0 ${BAUD}, or the BMC),"
+    echo "     or have a camera ready for the screen if the machine has no COM1"
     echo "  2. reboot and pick \"F — milestone M0\" from the GRUB menu"
     echo "  3. success is the log ending in 'M0 ok' and the machine then sitting still —"
     echo "     there is no reboot and no exit code on hardware, only the log"
@@ -997,8 +1042,9 @@ install options:
   --serial          also send GRUB's own menu to serial at $BAUD
 
 The procedure is docs/booting-on-hardware.md. Read the two facts that cost an
-afternoon before starting: F has no video output at all, and its console is
-$BAUD baud rather than the 115200 everybody reaches for.
+afternoon before starting: the screen shows the log only from partway through
+the boot, so serial is still the whole record, and its console is $BAUD baud
+rather than the 115200 everybody reaches for.
 EOF
 }
 
