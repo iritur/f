@@ -160,6 +160,13 @@ which leaves both under `.\target-export\`.
 
 ## The short way, on Arch
 
+The script is written for Arch and also runs on **Debian and Ubuntu**, where
+`build` installs git, QEMU and a C linker with `apt-get` and needs `rustup`
+installed from <https://rustup.rs> first, as your own user rather than root:
+`rustup` is a package there only from Ubuntu 24.04 and Debian 13. Ubuntu hides
+GRUB's menu on a machine with one operating system (`GRUB_TIMEOUT_STYLE=hidden`),
+and `check` says so, because an entry in a menu nobody sees cannot be picked.
+
 ### Getting it onto the machine
 
 If you will build there, clone — `build` needs the checkout anyway:
@@ -271,6 +278,7 @@ Add to `/etc/grub.d/40_custom`:
 
 ```
 menuentry "F — M0" {
+    insmod all_video
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
     module    /boot/f/store.fc       # one `module` line per component file you
@@ -324,6 +332,7 @@ terminal_output serial console
 set timeout=5
 
 menuentry "F — M0" {
+    insmod all_video
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
     module    /boot/f/store.fc       # one `module` line per component file you

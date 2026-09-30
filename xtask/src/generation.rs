@@ -1115,12 +1115,13 @@ fn fragment(modules: &std::collections::BTreeMap<String, Installed>) -> String {
     for (root, module) in modules {
         out.push_str(&format!(
             "menuentry \"F — generation {short}\" --class f {{\n    \
-             echo \"F: loading generation {short}. Output on COM1 — there is no video.\"\n    \
+             echo \"F: loading generation {short}. The log is on screen, and whole on COM1.\"\n    \
              insmod part_gpt\n    \
              insmod part_msdos\n    \
              insmod fat\n    \
              insmod ext2\n    \
              insmod multiboot\n    \
+             insmod all_video\n    \
              search --no-floppy --file --set=root /boot/f/f-kernel.elf32\n    \
              multiboot /boot/f/f-kernel.elf32 f.root={root} {frame}{declared}\n    \
              module /boot/f/init.bin\n",
