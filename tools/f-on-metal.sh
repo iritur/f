@@ -651,7 +651,7 @@ cmd_build() {
 
     bold "== and boot that too, before the firmware is asked to =="
     qemu-system-x86_64 -kernel "$KERNEL_DEFAULT" -initrd "$INIT_DEFAULT" \
-        -smp 2 -m 128M -serial null -display none \
+        -smp 2,sockets=1,cores=2,threads=1 -m 128M -serial null -display none \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot \
         >/dev/null 2>&1
     rc=$?

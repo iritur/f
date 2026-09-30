@@ -3356,6 +3356,14 @@ const BOOT_TIMEOUT: u64 = 180;
 /// `cargo xtask trace` hashes.
 const BOOT_MEMORY: &str = "128M";
 
+/// The processors every boot in this file is run on, unless it says otherwise:
+/// two, in one socket. The socket is named because QEMU's default for a bare
+/// count moved at 6.2, and `machine_with` says what that cost.
+const SMP_TWO: &str = "2,sockets=1,cores=2,threads=1";
+
+/// Eight in one socket, which is `percpu::MAX_CPUS`, for `cargo xtask cores`.
+const SMP_EIGHT: &str = "8,sockets=1,cores=8,threads=1";
+
 /// A machine with a gibibyte in it, for the one check that needs one.
 ///
 /// Four rather than one, because the kernel's largest order is a gibibyte and
@@ -3757,9 +3765,19 @@ fn emulator(
     // core that is not the one holding the timer, and two rather than more
     // because a second core is what makes that sentence true — every core past
     // it would be started, counted, and left with nothing to do.
+    //
+    // The topology is spelled out, not left to `-smp 2`'s default, because that
+    // default moved: before QEMU 6.2 two cpus meant two sockets of one core,
+    // after it one socket of two. The kernel counts cores by asking the
+    // processor how many logical processors its *package* has
+    // (`smp::logical_processors`), so under the old default it counted one, the
+    // component lifecycle found no core to admit onto, and the boot failed on
+    // Ubuntu 20.04's QEMU 4.2 while passing everywhere else. The kernel's
+    // undercount on a two-socket machine is its own stated limitation; this is
+    // the emulator not being allowed to choose which machine it is.
     qemu.args([
         "-smp",
-        "2",
+        SMP_TWO,
         "-m",
         memory,
         "-serial",
@@ -8759,14 +8777,14 @@ fn cores() -> Result<(), String> {
     for (what, smp, append, expected, held) in [
         (
             "eight reported, two there — the machine disagrees with itself",
-            "cpus=2,maxcpus=8",
+            "cpus=2,maxcpus=8,sockets=1,cores=8,threads=1",
             None,
             "  cores         2 of 8 shards",
             Some(HELD),
         ),
         (
             "eight reported, eight there — the control",
-            "8",
+            SMP_EIGHT,
             None,
             "  cores         8 of 8 shards",
             None,
@@ -8778,7 +8796,7 @@ fn cores() -> Result<(), String> {
         // *not* reach: `this machine has no other` is about the hardware.
         (
             "eight there, and the boot line says use one",
-            "8",
+            SMP_EIGHT,
             Some("f.cores=1"),
             "  cores         1 of 8 shards",
             None,
@@ -8794,7 +8812,7 @@ fn cores() -> Result<(), String> {
         // asserted deterministically by the first boot's give-up line. RFC 0070.
         (
             "eight there, traced stage by stage",
-            "8",
+            SMP_EIGHT,
             Some("f.bringup"),
             "  cores         8 of 8 shards",
             None,
